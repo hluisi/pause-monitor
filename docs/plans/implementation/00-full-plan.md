@@ -970,66 +970,11 @@ git commit -m "feat(stress): add IOBaselineManager with learning period"
 
 ---
 
-## Phase 3: Test Infrastructure
+## Phase 3: Storage Layer
 
-### Task 8: Shared Test Fixtures
+> **Note:** Storage is created before test fixtures because conftest.py needs to import from storage.
 
-**Files:**
-- Create: `tests/conftest.py`
-
-**Step 1: Create conftest.py with fixtures**
-
-Create `tests/conftest.py`:
-
-```python
-"""Shared test fixtures for pause-monitor."""
-
-import sqlite3
-from datetime import datetime
-from pathlib import Path
-
-import pytest
-
-from pause_monitor.stress import StressBreakdown
-
-
-@pytest.fixture
-def tmp_db(tmp_path: Path) -> Path:
-    """Create a temporary database path."""
-    return tmp_path / "test.db"
-
-
-@pytest.fixture
-def initialized_db(tmp_db: Path) -> Path:
-    """Create an initialized database with schema."""
-    from pause_monitor.storage import init_database
-    init_database(tmp_db)
-    return tmp_db
-
-
-def create_test_stress() -> StressBreakdown:
-    """Create a StressBreakdown for testing."""
-    return StressBreakdown(load=10, memory=5, thermal=0, latency=0, io=0)
-
-
-@pytest.fixture
-def sample_stress() -> StressBreakdown:
-    """Fixture for a sample StressBreakdown."""
-    return create_test_stress()
-```
-
-**Step 2: Commit**
-
-```bash
-git add tests/conftest.py
-git commit -m "test: add shared fixtures in conftest.py"
-```
-
----
-
-## Phase 4: Storage Layer
-
-### Task 9: Database Schema
+### Task 8: Database Schema
 
 **Files:**
 - Create: `src/pause_monitor/storage.py`
@@ -1050,27 +995,30 @@ import pytest
 from pause_monitor.storage import init_database, get_schema_version, SCHEMA_VERSION
 
 
-def test_init_database_creates_file(tmp_db: Path):
+def test_init_database_creates_file(tmp_path: Path):
     """init_database creates SQLite file."""
-    init_database(tmp_db)
-    assert tmp_db.exists()
+    db_path = tmp_path / "test.db"
+    init_database(db_path)
+    assert db_path.exists()
 
 
-def test_init_database_enables_wal(tmp_db: Path):
+def test_init_database_enables_wal(tmp_path: Path):
     """init_database enables WAL journal mode."""
-    init_database(tmp_db)
+    db_path = tmp_path / "test.db"
+    init_database(db_path)
 
-    conn = sqlite3.connect(tmp_db)
+    conn = sqlite3.connect(db_path)
     result = conn.execute("PRAGMA journal_mode").fetchone()
     conn.close()
     assert result[0] == "wal"
 
 
-def test_init_database_creates_tables(tmp_db: Path):
+def test_init_database_creates_tables(tmp_path: Path):
     """init_database creates required tables."""
-    init_database(tmp_db)
+    db_path = tmp_path / "test.db"
+    init_database(db_path)
 
-    conn = sqlite3.connect(tmp_db)
+    conn = sqlite3.connect(db_path)
     tables = conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
     ).fetchall()
@@ -1083,11 +1031,12 @@ def test_init_database_creates_tables(tmp_db: Path):
     assert "daemon_state" in table_names
 
 
-def test_init_database_sets_schema_version(tmp_db: Path):
+def test_init_database_sets_schema_version(tmp_path: Path):
     """init_database sets schema version in daemon_state."""
-    init_database(tmp_db)
+    db_path = tmp_path / "test.db"
+    init_database(db_path)
 
-    conn = sqlite3.connect(tmp_db)
+    conn = sqlite3.connect(db_path)
     version = get_schema_version(conn)
     conn.close()
     assert version == SCHEMA_VERSION
@@ -1236,6 +1185,70 @@ git commit -m "feat(storage): add SQLite schema and initialization"
 ```
 
 ---
+
+### Task 9: Shared Test Fixtures
+
+> **Note:** Now that storage exists, we can create conftest.py with fixtures that depend on it.
+
+**Files:**
+- Create: `tests/conftest.py`
+
+**Step 1: Create conftest.py with fixtures**
+
+Create `tests/conftest.py`:
+
+```python
+"""Shared test fixtures for pause-monitor."""
+
+import sqlite3
+from datetime import datetime
+from pathlib import Path
+
+import pytest
+
+from pause_monitor.stress import StressBreakdown
+from pause_monitor.storage import init_database
+
+
+@pytest.fixture
+def tmp_db(tmp_path: Path) -> Path:
+    """Create a temporary database path."""
+    return tmp_path / "test.db"
+
+
+@pytest.fixture
+def initialized_db(tmp_db: Path) -> Path:
+    """Create an initialized database with schema."""
+    init_database(tmp_db)
+    return tmp_db
+
+
+def create_test_stress() -> StressBreakdown:
+    """Create a StressBreakdown for testing."""
+    return StressBreakdown(load=10, memory=5, thermal=0, latency=0, io=0)
+
+
+@pytest.fixture
+def sample_stress() -> StressBreakdown:
+    """Fixture for a sample StressBreakdown."""
+    return create_test_stress()
+```
+
+**Step 2: Verify fixtures work**
+
+Run: `uv run pytest tests/test_storage.py -v`
+Expected: PASS (4 tests, fixtures available)
+
+**Step 3: Commit**
+
+```bash
+git add tests/conftest.py
+git commit -m "test: add shared fixtures in conftest.py"
+```
+
+---
+
+## Phase 4: Storage Operations
 
 ### Task 10: Storage Sample Operations
 
@@ -2068,7 +2081,7 @@ class PowermetricsStream:
     async def read_samples(self) -> AsyncIterator[PowermetricsResult]:
         """Yield parsed samples as they become available.
 
-        Handles plist streaming where multiple plists are concatenated.
+        powermetrics outputs plists separated by NUL bytes (\\0).
         """
         if self._process is None or self._process.stdout is None:
             return
@@ -2076,31 +2089,16 @@ class PowermetricsStream:
         async for chunk in self._process.stdout:
             self._buffer += chunk
 
-            # Split on plist boundaries (each starts with '<?xml' or 'bplist')
-            while True:
-                # Look for binary plist header
-                bplist_idx = self._buffer.find(b"bplist", 1)
-                # Look for XML plist header
-                xml_idx = self._buffer.find(b"<?xml", 1)
+            # powermetrics separates plists with NUL bytes
+            while b"\0" in self._buffer:
+                plist_data, self._buffer = self._buffer.split(b"\0", 1)
 
-                # Find the earliest boundary
-                next_start = -1
-                if bplist_idx > 0 and xml_idx > 0:
-                    next_start = min(bplist_idx, xml_idx)
-                elif bplist_idx > 0:
-                    next_start = bplist_idx
-                elif xml_idx > 0:
-                    next_start = xml_idx
+                # Skip empty chunks
+                if not plist_data.strip():
+                    continue
 
-                if next_start > 0:
-                    # Extract complete plist
-                    plist_data = self._buffer[:next_start]
-                    self._buffer = self._buffer[next_start:]
-
-                    result = parse_powermetrics_sample(plist_data)
-                    yield result
-                else:
-                    break
+                result = parse_powermetrics_sample(plist_data)
+                yield result
 ```
 
 **Step 4: Run tests**
@@ -2325,11 +2323,12 @@ def test_sample_policy_elevates_on_threshold():
 
 
 def test_sample_policy_returns_to_normal():
-    """SamplePolicy returns to normal when stress drops."""
+    """SamplePolicy returns to normal when stress drops below de-elevation threshold."""
     policy = SamplePolicy(
         normal_interval=5,
         elevated_interval=1,
         elevation_threshold=30,
+        de_elevation_threshold=20,
         cooldown_samples=3,
     )
 
@@ -2338,12 +2337,35 @@ def test_sample_policy_returns_to_normal():
     policy.update(high_stress)
     assert policy.state == SamplingState.ELEVATED
 
-    # Drop below threshold for cooldown period
+    # Drop below de-elevation threshold for cooldown period
     low_stress = StressBreakdown(load=5, memory=0, thermal=0, latency=0, io=0)
     for _ in range(3):
         policy.update(low_stress)
 
     assert policy.state == SamplingState.NORMAL
+
+
+def test_sample_policy_hysteresis():
+    """SamplePolicy stays elevated when stress is between thresholds (hysteresis)."""
+    policy = SamplePolicy(
+        normal_interval=5,
+        elevated_interval=1,
+        elevation_threshold=30,
+        de_elevation_threshold=20,
+        cooldown_samples=3,
+    )
+
+    # Elevate
+    high_stress = StressBreakdown(load=40, memory=0, thermal=0, latency=0, io=0)
+    policy.update(high_stress)
+    assert policy.state == SamplingState.ELEVATED
+
+    # Drop to 25 (between 20 and 30) - should stay elevated
+    mid_stress = StressBreakdown(load=25, memory=0, thermal=0, latency=0, io=0)
+    for _ in range(10):  # Even many samples shouldn't trigger de-elevation
+        policy.update(mid_stress)
+
+    assert policy.state == SamplingState.ELEVATED  # Still elevated due to hysteresis
 
 
 def test_sample_policy_critical_triggers_snapshot():
@@ -2390,19 +2412,24 @@ class PolicyResult:
 
 
 class SamplePolicy:
-    """Adaptive sampling policy based on stress levels."""
+    """Adaptive sampling policy based on stress levels.
+
+    Uses hysteresis to prevent oscillation: elevate at 30, de-elevate at 20.
+    """
 
     def __init__(
         self,
         normal_interval: int = 5,
         elevated_interval: int = 1,
         elevation_threshold: int = 30,
+        de_elevation_threshold: int = 20,  # Hysteresis: lower threshold to return to normal
         critical_threshold: int = 60,
         cooldown_samples: int = 5,
     ):
         self.normal_interval = normal_interval
         self.elevated_interval = elevated_interval
         self.elevation_threshold = elevation_threshold
+        self.de_elevation_threshold = de_elevation_threshold
         self.critical_threshold = critical_threshold
         self.cooldown_samples = cooldown_samples
 
@@ -2434,16 +2461,21 @@ class SamplePolicy:
         if total >= self.critical_threshold:
             result.should_snapshot = True
 
-        # State transitions
+        # State transitions with hysteresis
         old_state = self._state
 
         if total >= self.elevation_threshold:
+            # Elevate when stress reaches upper threshold
             self._state = SamplingState.ELEVATED
             self._samples_below_threshold = 0
-        else:
+        elif self._state == SamplingState.ELEVATED and total < self.de_elevation_threshold:
+            # Only de-elevate when below lower threshold (hysteresis)
             self._samples_below_threshold += 1
             if self._samples_below_threshold >= self.cooldown_samples:
                 self._state = SamplingState.NORMAL
+        elif self._state == SamplingState.ELEVATED:
+            # Between thresholds - stay elevated but don't accumulate cooldown
+            self._samples_below_threshold = 0
 
         result.state_changed = old_state != self._state
 
@@ -2461,7 +2493,7 @@ class SamplePolicy:
 **Step 4: Run tests**
 
 Run: `uv run pytest tests/test_collector.py -v`
-Expected: PASS (14 tests)
+Expected: PASS (15 tests)
 
 **Step 5: Commit**
 
@@ -3881,16 +3913,38 @@ Add to `Daemon` class in `src/pause_monitor/daemon.py`:
             log.debug("caffeinate_stopped")
 
     async def _run_loop(self) -> None:
-        """Main sampling loop (placeholder for Task 23)."""
-        while not self._shutdown_event.is_set():
-            try:
-                await asyncio.wait_for(
-                    self._shutdown_event.wait(),
-                    timeout=self.policy.current_interval,
-                )
-                break  # Shutdown requested
-            except asyncio.TimeoutError:
-                pass  # Normal timeout, continue sampling
+        """Main sampling loop - streams powermetrics and processes samples."""
+        import time
+
+        # Start powermetrics stream
+        await self._powermetrics.start()
+
+        last_sample_time = time.monotonic()
+
+        try:
+            async for pm_result in self._powermetrics.read_samples():
+                if self._shutdown_event.is_set():
+                    break
+
+                # Calculate actual interval (for pause detection)
+                now = time.monotonic()
+                actual_interval = now - last_sample_time
+                last_sample_time = now
+
+                # Check for pause first
+                await self._check_for_pause(actual_interval)
+
+                # Collect and store sample
+                await self._collect_sample(pm_result, actual_interval)
+
+                # Update pause detector's expected interval based on current policy
+                self.pause_detector.expected_interval = self.policy.current_interval
+
+        except asyncio.CancelledError:
+            log.info("sampling_loop_cancelled")
+        except Exception as e:
+            log.exception("sampling_loop_error", error=str(e))
+            raise
 
         await self.stop()
 ```
@@ -4246,6 +4300,8 @@ Create `src/pause_monitor/tui/app.py`:
 ```python
 """Main TUI application."""
 
+import sqlite3
+
 from textual.app import App, ComposeResult
 from textual.containers import Container, Horizontal, Vertical
 from textual.widgets import Header, Footer, Static, DataTable, ProgressBar
@@ -4371,6 +4427,26 @@ class PauseMonitorApp(App):
     def __init__(self, config: Config | None = None):
         super().__init__()
         self.config = config or Config.load()
+        self._conn: sqlite3.Connection | None = None
+
+    def on_mount(self) -> None:
+        """Initialize on startup."""
+        from pause_monitor.storage import get_connection
+
+        self.title = "pause-monitor"
+        self.sub_title = "System Health Monitor"
+
+        # Connect to database (read-only for TUI)
+        self._conn = get_connection(self.config.db_path)
+
+        # Start periodic refresh
+        self.set_interval(1.0, self._refresh_data)
+
+    def on_unmount(self) -> None:
+        """Cleanup on shutdown."""
+        if self._conn:
+            self._conn.close()
+            self._conn = None
 
     def compose(self) -> ComposeResult:
         """Create the TUI layout."""
@@ -4383,19 +4459,18 @@ class PauseMonitorApp(App):
 
         yield Footer()
 
-    def on_mount(self) -> None:
-        """Initialize on startup."""
-        self.title = "pause-monitor"
-        self.sub_title = "System Health Monitor"
-
-        # Start periodic refresh
-        self.set_interval(1.0, self._refresh_data)
-
     def _refresh_data(self) -> None:
         """Refresh displayed data from database."""
-        # This will be connected to the database in integration
-        stress_gauge = self.query_one("#stress-gauge", StressGauge)
-        stress_gauge.update_stress(0)
+        if not self._conn:
+            return
+
+        from pause_monitor.storage import get_recent_samples
+
+        samples = get_recent_samples(self._conn, limit=1)
+        if samples:
+            sample = samples[0]
+            stress_gauge = self.query_one("#stress-gauge", StressGauge)
+            stress_gauge.update_stress(sample.stress.total)
 
     def action_refresh(self) -> None:
         """Manual refresh."""
@@ -4896,6 +4971,7 @@ Replace the install command in `src/pause_monitor/cli.py`:
 @click.option("--system", "system_wide", is_flag=True, help="Install system-wide (requires root)")
 def install(user, system_wide):
     """Set up launchd service."""
+    import os
     import subprocess
     import sys
     from pathlib import Path
@@ -4939,6 +5015,8 @@ def install(user, system_wide):
     <string>{Path.home()}/.local/share/pause-monitor/daemon.log</string>
     <key>ProcessType</key>
     <string>Background</string>
+    <key>LegacyTimers</key>
+    <true/>
 </dict>
 </plist>
 """
