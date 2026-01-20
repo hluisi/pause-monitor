@@ -6,10 +6,13 @@ readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.11"
 dependencies = [
-    "psutil>=5.9",
     "textual>=0.50",
     "rich>=13.0",
     "click>=8.0",
+    "aiosqlite>=0.19",
+    "pyobjc-framework-Cocoa>=10.0",
+    "structlog>=24.0",
+    "tomlkit>=0.12",
 ]
 
 [project.scripts]
