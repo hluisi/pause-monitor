@@ -219,8 +219,6 @@ class Daemon:
             log.exception("sampling_loop_error", error=str(e))
             raise
 
-        await self.stop()
-
     async def _collect_sample(
         self,
         pm_result: PowermetricsResult,
@@ -342,7 +340,11 @@ class Daemon:
             await run_full_capture(capture)
             self.notifier.forensics_completed(capture.event_dir)
         except Exception as e:
-            log.exception("forensics_capture_failed", event_dir=str(capture.event_dir), error=str(e))
+            log.exception(
+                "forensics_capture_failed",
+                event_dir=str(capture.event_dir),
+                error=str(e),
+            )
 
     async def _handle_policy_result(self, result: PolicyResult, stress: StressBreakdown) -> None:
         """Handle policy state changes."""
@@ -373,3 +375,33 @@ class Daemon:
             )
             capture = ForensicsCapture(event_dir)
             asyncio.create_task(self._run_forensics(capture))
+
+
+async def run_daemon(config: Config | None = None) -> None:
+    """Run the daemon until shutdown.
+
+    Args:
+        config: Optional config, loads from file if not provided
+    """
+    if config is None:
+        config = Config.load()
+
+    # Setup logging
+    structlog.configure(
+        processors=[
+            structlog.processors.TimeStamper(fmt="iso"),
+            structlog.processors.add_log_level,
+            structlog.dev.ConsoleRenderer(),
+        ],
+        wrapper_class=structlog.make_filtering_bound_logger(20),  # INFO
+    )
+
+    daemon = Daemon(config)
+
+    try:
+        await daemon.start()
+    except Exception as e:
+        log.exception("daemon_crashed", error=str(e))
+        raise
+    finally:
+        await daemon.stop()

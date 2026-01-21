@@ -211,7 +211,7 @@ def test_get_events_by_timerange(initialized_db: Path, sample_stress):
 
 def test_get_event_by_id_found(initialized_db: Path, sample_stress):
     """get_event_by_id returns event when found."""
-    from pause_monitor.storage import Event, insert_event, get_event_by_id
+    from pause_monitor.storage import Event, get_event_by_id, insert_event
 
     event = Event(
         timestamp=datetime.now(),

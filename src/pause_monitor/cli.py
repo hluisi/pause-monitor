@@ -13,7 +13,11 @@ def main():
 @main.command()
 def daemon():
     """Run the background sampler."""
-    click.echo("Daemon not yet implemented")
+    import asyncio
+
+    from pause_monitor.daemon import run_daemon
+
+    asyncio.run(run_daemon())
 
 
 @main.command()
