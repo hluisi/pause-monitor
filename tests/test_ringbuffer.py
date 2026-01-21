@@ -46,3 +46,79 @@ def test_process_snapshot_creation():
     assert snapshot.trigger == "tier2_entry"
     assert len(snapshot.by_cpu) == 1
     assert len(snapshot.by_memory) == 1
+
+
+def test_ring_buffer_push():
+    """RingBuffer stores samples up to max size."""
+    from pause_monitor.ringbuffer import RingBuffer
+
+    buffer = RingBuffer(max_samples=3)
+    stress = StressBreakdown(load=0, memory=0, thermal=0, latency=0, io=0, gpu=0, wakeups=0)
+
+    buffer.push(stress, tier=1)
+    buffer.push(stress, tier=1)
+    buffer.push(stress, tier=1)
+
+    assert len(buffer.samples) == 3
+
+
+def test_ring_buffer_evicts_oldest():
+    """RingBuffer evicts oldest when full."""
+    from pause_monitor.ringbuffer import RingBuffer
+
+    buffer = RingBuffer(max_samples=3)
+    stress = StressBreakdown(load=0, memory=0, thermal=0, latency=0, io=0, gpu=0, wakeups=0)
+
+    buffer.push(stress, tier=1)  # Will be evicted
+    first_time = buffer.samples[0].timestamp
+
+    buffer.push(stress, tier=1)
+    buffer.push(stress, tier=1)
+    buffer.push(stress, tier=1)  # Evicts first
+
+    assert len(buffer.samples) == 3
+    assert buffer.samples[0].timestamp != first_time
+
+
+def test_ring_buffer_snapshot_processes():
+    """RingBuffer captures process snapshots."""
+    from pause_monitor.ringbuffer import RingBuffer
+
+    buffer = RingBuffer(max_samples=300)
+
+    buffer.snapshot_processes(trigger="tier2_entry")
+
+    assert len(buffer.snapshots) == 1
+    assert buffer.snapshots[0].trigger == "tier2_entry"
+
+
+def test_ring_buffer_freeze():
+    """freeze() returns immutable copy of buffer contents."""
+    from pause_monitor.ringbuffer import RingBuffer
+
+    buffer = RingBuffer(max_samples=300)
+    stress = StressBreakdown(load=10, memory=5, thermal=0, latency=0, io=0, gpu=0, wakeups=0)
+    buffer.push(stress, tier=1)
+    buffer.snapshot_processes(trigger="test")
+
+    frozen = buffer.freeze()
+
+    # Modifying original doesn't affect frozen
+    buffer.push(stress, tier=2)
+    assert len(frozen.samples) == 1
+    assert len(buffer.samples) == 2
+
+
+def test_ring_buffer_clear_snapshots():
+    """clear_snapshots() removes process snapshots but keeps samples."""
+    from pause_monitor.ringbuffer import RingBuffer
+
+    buffer = RingBuffer(max_samples=300)
+    stress = StressBreakdown(load=0, memory=0, thermal=0, latency=0, io=0, gpu=0, wakeups=0)
+    buffer.push(stress, tier=1)
+    buffer.snapshot_processes(trigger="test")
+
+    buffer.clear_snapshots()
+
+    assert len(buffer.samples) == 1
+    assert len(buffer.snapshots) == 0

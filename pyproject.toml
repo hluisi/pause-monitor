@@ -12,6 +12,7 @@ dependencies = [
     "aiosqlite>=0.19",
     "structlog>=24.0",
     "tomlkit>=0.12",
+    "psutil>=5.9",
 ]
 
 [project.scripts]
