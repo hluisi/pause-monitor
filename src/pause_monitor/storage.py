@@ -72,6 +72,7 @@ CREATE TABLE IF NOT EXISTS events (
     stress_io       INTEGER,
     culprits        TEXT,
     event_dir       TEXT,
+    status          TEXT DEFAULT 'unreviewed',
     notes           TEXT
 );
 
@@ -124,6 +125,21 @@ def get_schema_version(conn: sqlite3.Connection) -> int:
         return int(row[0]) if row else 0
     except sqlite3.OperationalError:
         return 0
+
+
+def migrate_add_event_status(conn: sqlite3.Connection) -> None:
+    """Add status column to events table if missing.
+
+    Migration sets existing events to 'reviewed' (not 'unreviewed')
+    since they are legacy events that existed before status tracking.
+    """
+    cursor = conn.execute("PRAGMA table_info(events)")
+    columns = {row[1] for row in cursor.fetchall()}
+
+    if "status" not in columns:
+        conn.execute("ALTER TABLE events ADD COLUMN status TEXT DEFAULT 'reviewed'")
+        log.info("migration_applied", migration="add_event_status")
+    conn.commit()
 
 
 @dataclass
@@ -240,7 +256,8 @@ class Event:
     stress: StressBreakdown
     culprits: list[str]
     event_dir: str | None
-    notes: str | None
+    status: str = "unreviewed"  # unreviewed, reviewed, pinned, dismissed
+    notes: str | None = None
     id: int | None = None
 
 
@@ -250,8 +267,8 @@ def insert_event(conn: sqlite3.Connection, event: Event) -> int:
         """
         INSERT INTO events (
             timestamp, duration, stress_total, stress_load, stress_memory,
-            stress_thermal, stress_latency, stress_io, culprits, event_dir, notes
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            stress_thermal, stress_latency, stress_io, culprits, event_dir, status, notes
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             event.timestamp.timestamp(),
@@ -264,6 +281,7 @@ def insert_event(conn: sqlite3.Connection, event: Event) -> int:
             event.stress.io,
             json.dumps(event.culprits),
             event.event_dir,
+            event.status,
             event.notes,
         ),
     )
@@ -280,7 +298,7 @@ def get_events(
     """Get events, optionally filtered by time range."""
     query = """
         SELECT id, timestamp, duration, stress_total, stress_load, stress_memory,
-               stress_thermal, stress_latency, stress_io, culprits, event_dir, notes
+               stress_thermal, stress_latency, stress_io, culprits, event_dir, status, notes
         FROM events
     """
     params: list = []
@@ -317,7 +335,8 @@ def get_events(
             ),
             culprits=json.loads(row[9]) if row[9] else [],
             event_dir=row[10],
-            notes=row[11],
+            status=row[11] or "unreviewed",
+            notes=row[12],
         )
         for row in rows
     ]
@@ -328,7 +347,7 @@ def get_event_by_id(conn: sqlite3.Connection, event_id: int) -> Event | None:
     row = conn.execute(
         """
         SELECT id, timestamp, duration, stress_total, stress_load, stress_memory,
-               stress_thermal, stress_latency, stress_io, culprits, event_dir, notes
+               stress_thermal, stress_latency, stress_io, culprits, event_dir, status, notes
         FROM events WHERE id = ?
         """,
         (event_id,),
@@ -352,8 +371,36 @@ def get_event_by_id(conn: sqlite3.Connection, event_id: int) -> Event | None:
         ),
         culprits=json.loads(row[9]) if row[9] else [],
         event_dir=row[10],
-        notes=row[11],
+        status=row[11] or "unreviewed",
+        notes=row[12],
     )
+
+
+def update_event_status(
+    conn: sqlite3.Connection,
+    event_id: int,
+    status: str,
+    notes: str | None = None,
+) -> None:
+    """Update event status and optionally notes.
+
+    Args:
+        conn: Database connection
+        event_id: The event ID to update
+        status: New status (unreviewed, reviewed, pinned, dismissed)
+        notes: Optional notes (if None, existing notes are preserved)
+    """
+    if notes is not None:
+        conn.execute(
+            "UPDATE events SET status = ?, notes = ? WHERE id = ?",
+            (status, notes, event_id),
+        )
+    else:
+        conn.execute(
+            "UPDATE events SET status = ? WHERE id = ?",
+            (status, event_id),
+        )
+    conn.commit()
 
 
 def prune_old_data(

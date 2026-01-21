@@ -487,3 +487,263 @@ def test_prune_old_data_rejects_negative_days(initialized_db: Path):
         prune_old_data(conn, samples_days=-5, events_days=90)
 
     conn.close()
+
+
+# --- Event Status Tests ---
+
+
+def test_event_dataclass_has_status_field():
+    """Event dataclass has status field with default value."""
+    from pause_monitor.storage import Event
+
+    stress = StressBreakdown(load=10, memory=5, thermal=0, latency=0, io=0, gpu=0, wakeups=0)
+    event = Event(
+        timestamp=datetime.now(),
+        duration=3.5,
+        stress=stress,
+        culprits=["test_process"],
+        event_dir="/path/to/events/12345",
+    )
+    # Default should be "unreviewed"
+    assert event.status == "unreviewed"
+    assert event.notes is None
+
+
+def test_event_dataclass_accepts_status():
+    """Event dataclass accepts explicit status value."""
+    from pause_monitor.storage import Event
+
+    stress = StressBreakdown(load=10, memory=5, thermal=0, latency=0, io=0, gpu=0, wakeups=0)
+    event = Event(
+        timestamp=datetime.now(),
+        duration=3.5,
+        stress=stress,
+        culprits=["test_process"],
+        event_dir="/path/to/events/12345",
+        status="pinned",
+        notes="Important event",
+    )
+    assert event.status == "pinned"
+    assert event.notes == "Important event"
+
+
+def test_insert_event_with_status(initialized_db: Path, sample_stress):
+    """Events can be inserted with status."""
+    from pause_monitor.storage import Event, get_event_by_id, insert_event
+
+    event = Event(
+        timestamp=datetime.now(),
+        duration=2.5,
+        stress=sample_stress,
+        culprits=["test_process"],
+        event_dir=None,
+        status="unreviewed",
+    )
+
+    conn = sqlite3.connect(initialized_db)
+    event_id = insert_event(conn, event)
+    retrieved = get_event_by_id(conn, event_id)
+    conn.close()
+
+    assert retrieved is not None
+    assert retrieved.status == "unreviewed"
+
+
+def test_insert_event_with_pinned_status(initialized_db: Path, sample_stress):
+    """Events can be inserted with pinned status."""
+    from pause_monitor.storage import Event, get_event_by_id, insert_event
+
+    event = Event(
+        timestamp=datetime.now(),
+        duration=2.5,
+        stress=sample_stress,
+        culprits=["test_process"],
+        event_dir=None,
+        status="pinned",
+        notes="Keep this one",
+    )
+
+    conn = sqlite3.connect(initialized_db)
+    event_id = insert_event(conn, event)
+    retrieved = get_event_by_id(conn, event_id)
+    conn.close()
+
+    assert retrieved is not None
+    assert retrieved.status == "pinned"
+    assert retrieved.notes == "Keep this one"
+
+
+def test_update_event_status(initialized_db: Path, sample_stress):
+    """Event status can be updated."""
+    from pause_monitor.storage import Event, get_event_by_id, insert_event, update_event_status
+
+    event = Event(
+        timestamp=datetime.now(),
+        duration=2.5,
+        stress=sample_stress,
+        culprits=["test_process"],
+        event_dir=None,
+        status="unreviewed",
+    )
+
+    conn = sqlite3.connect(initialized_db)
+    event_id = insert_event(conn, event)
+
+    # Update status only
+    update_event_status(conn, event_id, "reviewed")
+    retrieved = get_event_by_id(conn, event_id)
+    conn.close()
+
+    assert retrieved is not None
+    assert retrieved.status == "reviewed"
+
+
+def test_update_event_status_with_notes(initialized_db: Path, sample_stress):
+    """Event status can be updated with notes."""
+    from pause_monitor.storage import Event, get_event_by_id, insert_event, update_event_status
+
+    event = Event(
+        timestamp=datetime.now(),
+        duration=2.5,
+        stress=sample_stress,
+        culprits=["test_process"],
+        event_dir=None,
+        status="unreviewed",
+    )
+
+    conn = sqlite3.connect(initialized_db)
+    event_id = insert_event(conn, event)
+
+    # Update status with notes
+    update_event_status(conn, event_id, "pinned", "Chrome memory leak")
+    retrieved = get_event_by_id(conn, event_id)
+    conn.close()
+
+    assert retrieved is not None
+    assert retrieved.status == "pinned"
+    assert retrieved.notes == "Chrome memory leak"
+
+
+def test_update_event_status_preserves_notes(initialized_db: Path, sample_stress):
+    """Updating status without notes preserves existing notes."""
+    from pause_monitor.storage import Event, get_event_by_id, insert_event, update_event_status
+
+    event = Event(
+        timestamp=datetime.now(),
+        duration=2.5,
+        stress=sample_stress,
+        culprits=["test_process"],
+        event_dir=None,
+        status="unreviewed",
+        notes="Original note",
+    )
+
+    conn = sqlite3.connect(initialized_db)
+    event_id = insert_event(conn, event)
+
+    # Update status only (notes=None should preserve existing notes)
+    update_event_status(conn, event_id, "reviewed")
+    retrieved = get_event_by_id(conn, event_id)
+    conn.close()
+
+    assert retrieved is not None
+    assert retrieved.status == "reviewed"
+    assert retrieved.notes == "Original note"
+
+
+def test_get_events_returns_status(initialized_db: Path, sample_stress):
+    """get_events includes status field in results."""
+    from pause_monitor.storage import Event, get_events, insert_event
+
+    conn = sqlite3.connect(initialized_db)
+
+    event = Event(
+        timestamp=datetime.now(),
+        duration=2.5,
+        stress=sample_stress,
+        culprits=["test_process"],
+        event_dir=None,
+        status="pinned",
+        notes="Test note",
+    )
+    insert_event(conn, event)
+
+    events = get_events(conn, limit=10)
+    conn.close()
+
+    assert len(events) == 1
+    assert events[0].status == "pinned"
+    assert events[0].notes == "Test note"
+
+
+def test_migrate_add_event_status(tmp_path: Path):
+    """migrate_add_event_status adds status column to existing database."""
+    from pause_monitor.storage import migrate_add_event_status
+
+    # Create a database with old schema (no status column)
+    db_path = tmp_path / "old.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute("""
+        CREATE TABLE events (
+            id              INTEGER PRIMARY KEY,
+            timestamp       REAL NOT NULL,
+            duration        REAL NOT NULL,
+            stress_total    INTEGER,
+            stress_load     INTEGER,
+            stress_memory   INTEGER,
+            stress_thermal  INTEGER,
+            stress_latency  INTEGER,
+            stress_io       INTEGER,
+            culprits        TEXT,
+            event_dir       TEXT,
+            notes           TEXT
+        )
+    """)
+
+    # Insert a legacy event
+    conn.execute(
+        "INSERT INTO events (timestamp, duration, stress_total) VALUES (?, ?, ?)",
+        (1000000.0, 2.5, 50),
+    )
+    conn.commit()
+
+    # Run migration
+    migrate_add_event_status(conn)
+
+    # Verify column exists
+    cursor = conn.execute("PRAGMA table_info(events)")
+    columns = {row[1] for row in cursor.fetchall()}
+    assert "status" in columns
+
+    # Verify existing event has 'reviewed' status (not 'unreviewed')
+    row = conn.execute("SELECT status FROM events WHERE id = 1").fetchone()
+    assert row[0] == "reviewed"
+
+    conn.close()
+
+
+def test_migrate_add_event_status_idempotent(initialized_db: Path, sample_stress):
+    """migrate_add_event_status is safe to run multiple times."""
+    from pause_monitor.storage import Event, get_event_by_id, insert_event, migrate_add_event_status
+
+    conn = sqlite3.connect(initialized_db)
+
+    # Insert event with status
+    event = Event(
+        timestamp=datetime.now(),
+        duration=2.5,
+        stress=sample_stress,
+        culprits=["test_process"],
+        event_dir=None,
+        status="pinned",
+    )
+    event_id = insert_event(conn, event)
+
+    # Run migration (should be no-op since column exists)
+    migrate_add_event_status(conn)
+
+    # Status should be preserved
+    retrieved = get_event_by_id(conn, event_id)
+    conn.close()
+
+    assert retrieved.status == "pinned"
