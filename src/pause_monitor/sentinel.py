@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 import os
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from enum import IntEnum
 from typing import TYPE_CHECKING
 
@@ -180,9 +180,11 @@ class Sentinel:
         self._cached_wakeups: int | None = None
         self._cached_throttled: bool | None = None
 
-        # Callbacks
-        self.on_tier_change: Callable[[str, int], None] | None = None
-        self.on_pause_detected: Callable[[float, float, BufferContents], None] | None = None
+        # Callbacks (must be async)
+        self.on_tier_change: Callable[[str, int], Awaitable[None]] | None = None
+        self.on_pause_detected: Callable[[float, float, BufferContents], Awaitable[None]] | None = (
+            None
+        )
 
     def stop(self) -> None:
         """Signal sentinel to stop."""
@@ -191,22 +193,34 @@ class Sentinel:
     async def start(self) -> None:
         """Run the sentinel loops."""
         self._running = True
-        await asyncio.gather(
+        results = await asyncio.gather(
             self._fast_loop(),
             self._slow_loop(),
             return_exceptions=True,
         )
+        # Surface any exceptions that occurred - per CLAUDE.md "Crashes Are Good"
+        for result in results:
+            if isinstance(result, Exception):
+                log.error("loop_failed", error=str(result), exc_info=result)
+                raise result
 
     async def _fast_loop(self) -> None:
         """100ms stress sampling loop."""
         last_time = time.monotonic()
+        first_iteration = True
 
         while self._running:
             now = time.monotonic()
             elapsed = now - last_time
             last_time = now
 
-            latency_ratio = elapsed / self.fast_interval if self.fast_interval > 0 else 1.0
+            # First iteration has near-zero elapsed time, which would give invalid
+            # latency_ratio. Use 1.0 (on-time) for the first sample.
+            if first_iteration:
+                latency_ratio = 1.0
+                first_iteration = False
+            else:
+                latency_ratio = elapsed / self.fast_interval if self.fast_interval > 0 else 1.0
 
             metrics = collect_fast_metrics()
             stress = self._calculate_fast_stress(metrics, latency_ratio)
@@ -261,7 +275,14 @@ class Sentinel:
 
     async def _handle_potential_pause(self, actual: float, expected: float) -> None:
         """Handle potential pause detection."""
-        log.warning("potential_pause", actual=actual, expected=expected, ratio=actual / expected)
+        log.warning(
+            "potential_pause",
+            actual=actual,
+            expected=expected,
+            ratio=actual / expected,
+            tier=self.tier_manager.current_tier,
+            peak_stress=self.tier_manager.peak_stress,
+        )
 
         if self.on_pause_detected:
             await self.on_pause_detected(actual, expected, self.buffer.freeze())
