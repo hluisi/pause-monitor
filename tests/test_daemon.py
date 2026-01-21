@@ -1,6 +1,7 @@
 """Tests for daemon core."""
 
 import signal
+import sqlite3
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
@@ -113,3 +114,71 @@ async def test_daemon_handles_sigterm():
     daemon._handle_signal(signal.SIGTERM)
 
     assert daemon._shutdown_event.is_set()
+
+
+@pytest.mark.asyncio
+async def test_daemon_collects_sample(tmp_path: Path):
+    """Daemon collects and stores samples."""
+    config = Config()
+
+    with patch.object(Config, "data_dir", new_callable=lambda: property(lambda self: tmp_path)):
+        with patch.object(
+            Config, "db_path", new_callable=lambda: property(lambda self: tmp_path / "test.db")
+        ):
+            events_prop = lambda: property(lambda self: tmp_path / "events")  # noqa: E731
+            with patch.object(Config, "events_dir", new_callable=events_prop):
+                daemon = Daemon(config)
+
+                # Initialize database
+                from pause_monitor.storage import init_database
+
+                init_database(config.db_path)
+                daemon._conn = sqlite3.connect(config.db_path)
+
+                # Mock powermetrics result
+                from pause_monitor.collector import PowermetricsResult
+
+                pm_result = PowermetricsResult(
+                    cpu_pct=25.0,
+                    cpu_freq=3000,
+                    cpu_temp=65.0,
+                    throttled=False,
+                    gpu_pct=10.0,
+                )
+
+                sample = await daemon._collect_sample(pm_result, interval=5.0)
+
+                assert sample is not None
+                assert sample.cpu_pct == 25.0
+                assert sample.stress.total >= 0
+
+
+@pytest.mark.asyncio
+async def test_daemon_detects_pause(tmp_path: Path):
+    """Daemon detects and handles pause events."""
+    config = Config()
+
+    with patch.object(Config, "data_dir", new_callable=lambda: property(lambda self: tmp_path)):
+        with patch.object(
+            Config, "db_path", new_callable=lambda: property(lambda self: tmp_path / "test.db")
+        ):
+            events_prop = lambda: property(lambda self: tmp_path / "events")  # noqa: E731
+            with patch.object(Config, "events_dir", new_callable=events_prop):
+                daemon = Daemon(config)
+
+                from pause_monitor.storage import init_database
+
+                init_database(config.db_path)
+                daemon._conn = sqlite3.connect(config.db_path)
+
+                # Simulate a long interval (pause)
+                daemon.pause_detector.expected_interval = 5.0
+
+                # Mock was_recently_asleep to avoid pmset log encoding issues
+                with patch("pause_monitor.daemon.was_recently_asleep", return_value=None):
+                    with patch.object(
+                        daemon, "_handle_pause", new_callable=AsyncMock
+                    ) as mock_handle:
+                        await daemon._check_for_pause(actual_interval=15.0)
+
+                        mock_handle.assert_called_once()
