@@ -1,6 +1,5 @@
 """Stress score calculation for pause-monitor."""
 
-import ctypes
 from dataclasses import dataclass
 from enum import Enum
 
@@ -33,22 +32,12 @@ def get_memory_pressure_fast() -> int:
     Returns:
         Percentage of memory "free" (0-100). Higher = more available.
     """
-    libc = ctypes.CDLL("/usr/lib/libc.dylib")
-    size = ctypes.c_size_t(4)
-    level = ctypes.c_int()
+    from pause_monitor.sysctl import sysctl_int
 
-    result = libc.sysctlbyname(
-        b"kern.memorystatus_level",
-        ctypes.byref(level),
-        ctypes.byref(size),
-        None,
-        0,
-    )
-
-    if result != 0:
+    result = sysctl_int("kern.memorystatus_level")
+    if result is None:
         return 50  # Fallback: assume moderate pressure
-
-    return level.value
+    return result
 
 
 @dataclass

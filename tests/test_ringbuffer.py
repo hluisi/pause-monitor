@@ -144,3 +144,22 @@ def test_ring_buffer_size_one():
     buffer.push(stress, tier=2)
     assert len(buffer.samples) == 1
     assert buffer.samples[0].tier == 2
+
+
+def test_ring_buffer_samples_returns_copy():
+    """samples property returns a copy, not the original."""
+    from pause_monitor.ringbuffer import RingBuffer
+
+    buffer = RingBuffer(max_samples=10)
+    stress = StressBreakdown(load=0, memory=0, thermal=0, latency=0, io=0, gpu=0, wakeups=0)
+    buffer.push(stress, tier=1)
+
+    samples1 = buffer.samples
+    samples2 = buffer.samples
+
+    assert samples1 is not samples2  # Different list objects
+    assert samples1 == samples2  # But equal content
+
+    # Modifying the returned list doesn't affect buffer
+    samples1.clear()
+    assert len(buffer.samples) == 1
