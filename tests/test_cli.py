@@ -812,3 +812,194 @@ class TestConfigCommand:
 
         assert result.exit_code == 1
         assert "Aborted" in result.output
+
+
+class TestInstallCommand:
+    """Tests for the install command."""
+
+    def test_install_user_default(self, runner: CliRunner, tmp_path: Path) -> None:
+        """install creates plist in ~/Library/LaunchAgents by default."""
+        plist_dir = tmp_path / "Library" / "LaunchAgents"
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("os.getuid", return_value=501),
+            patch("subprocess.run") as mock_run,
+        ):
+            result = runner.invoke(main, ["install"])
+
+        assert result.exit_code == 0
+        assert "Created" in result.output
+
+        # Verify plist was created
+        plist_path = plist_dir / "com.pause-monitor.daemon.plist"
+        assert plist_path.exists()
+
+        # Verify plist content
+        content = plist_path.read_text()
+        assert "<key>Label</key>" in content
+        assert "<string>com.pause-monitor.daemon</string>" in content
+        assert "<string>-m</string>" in content
+        assert "<string>pause_monitor.cli</string>" in content
+        assert "<string>daemon</string>" in content
+        assert "<key>RunAtLoad</key>" in content
+        assert "<key>KeepAlive</key>" in content
+        assert "<key>ProcessType</key>" in content
+        assert "<string>Background</string>" in content
+
+        # Verify launchctl bootstrap was called
+        mock_run.assert_called_once()
+        call_args = mock_run.call_args[0][0]
+        assert call_args[0] == "launchctl"
+        assert call_args[1] == "bootstrap"
+        assert call_args[2] == "gui/501"
+        assert str(plist_path) in call_args[3]
+
+    def test_install_system_wide(self, runner: CliRunner, tmp_path: Path) -> None:
+        """install --system creates plist in /Library/LaunchDaemons."""
+        # Can't write to /Library/LaunchDaemons in tests, so mock Path operations
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("pathlib.Path.mkdir"),
+            patch("pathlib.Path.write_text"),
+            patch("subprocess.run") as mock_run,
+        ):
+            result = runner.invoke(main, ["install", "--system"])
+
+        assert result.exit_code == 0
+        assert "Created" in result.output
+
+        # Verify launchctl bootstrap was called with "system" target
+        mock_run.assert_called_once()
+        call_args = mock_run.call_args[0][0]
+        assert call_args[0] == "launchctl"
+        assert call_args[1] == "bootstrap"
+        assert call_args[2] == "system"
+
+    def test_install_creates_directory(self, runner: CliRunner, tmp_path: Path) -> None:
+        """install creates LaunchAgents directory if it doesn't exist."""
+        # Don't pre-create the directory
+        plist_dir = tmp_path / "Library" / "LaunchAgents"
+        assert not plist_dir.exists()
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("os.getuid", return_value=501),
+            patch("subprocess.run"),
+        ):
+            result = runner.invoke(main, ["install"])
+
+        assert result.exit_code == 0
+        assert plist_dir.exists()
+
+    def test_install_already_loaded(self, runner: CliRunner, tmp_path: Path) -> None:
+        """install handles already-loaded service gracefully."""
+        from subprocess import CalledProcessError
+
+        error = CalledProcessError(
+            returncode=125,
+            cmd=["launchctl", "bootstrap"],
+            stderr=b"service already loaded",
+        )
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("os.getuid", return_value=501),
+            patch("subprocess.run", side_effect=error),
+        ):
+            result = runner.invoke(main, ["install"])
+
+        assert result.exit_code == 0
+        assert "Service was already installed" in result.output
+
+    def test_install_already_loaded_capitalized(self, runner: CliRunner, tmp_path: Path) -> None:
+        """install handles 'Already Loaded' (capitalized) message."""
+        from subprocess import CalledProcessError
+
+        error = CalledProcessError(
+            returncode=125,
+            cmd=["launchctl", "bootstrap"],
+            stderr=b"Already loaded",
+        )
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("os.getuid", return_value=501),
+            patch("subprocess.run", side_effect=error),
+        ):
+            result = runner.invoke(main, ["install"])
+
+        assert result.exit_code == 0
+        # The check uses .lower() on decoded stderr, so "Already loaded" -> "already loaded"
+        assert "Service was already installed" in result.output
+
+    def test_install_bootstrap_error(self, runner: CliRunner, tmp_path: Path) -> None:
+        """install shows warning on bootstrap failure."""
+        from subprocess import CalledProcessError
+
+        error = CalledProcessError(
+            returncode=1,
+            cmd=["launchctl", "bootstrap"],
+            stderr=b"some other error message",
+        )
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("os.getuid", return_value=501),
+            patch("subprocess.run", side_effect=error),
+        ):
+            result = runner.invoke(main, ["install"])
+
+        assert result.exit_code == 0
+        assert "Warning: Could not start service" in result.output
+        assert "some other error message" in result.output
+
+    def test_install_shows_status_instructions(self, runner: CliRunner, tmp_path: Path) -> None:
+        """install shows helpful status and log commands."""
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("os.getuid", return_value=501),
+            patch("subprocess.run"),
+        ):
+            result = runner.invoke(main, ["install"])
+
+        assert result.exit_code == 0
+        assert "launchctl print gui/501/com.pause-monitor.daemon" in result.output
+        assert "tail -f ~/.local/share/pause-monitor/daemon.log" in result.output
+
+    def test_install_plist_uses_current_python(self, runner: CliRunner, tmp_path: Path) -> None:
+        """install uses sys.executable for Python path in plist."""
+        plist_dir = tmp_path / "Library" / "LaunchAgents"
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("os.getuid", return_value=501),
+            patch("subprocess.run"),
+            patch("sys.executable", "/custom/python/path"),
+        ):
+            result = runner.invoke(main, ["install"])
+
+        assert result.exit_code == 0
+
+        plist_path = plist_dir / "com.pause-monitor.daemon.plist"
+        content = plist_path.read_text()
+        assert "<string>/custom/python/path</string>" in content
+
+    def test_install_plist_log_paths(self, runner: CliRunner, tmp_path: Path) -> None:
+        """install configures correct log paths in plist."""
+        plist_dir = tmp_path / "Library" / "LaunchAgents"
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("os.getuid", return_value=501),
+            patch("subprocess.run"),
+        ):
+            result = runner.invoke(main, ["install"])
+
+        assert result.exit_code == 0
+
+        plist_path = plist_dir / "com.pause-monitor.daemon.plist"
+        content = plist_path.read_text()
+        # Check that log paths use the mocked home directory
+        expected_log_path = f"{tmp_path}/.local/share/pause-monitor/daemon.log"
+        assert f"<string>{expected_log_path}</string>" in content

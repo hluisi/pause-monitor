@@ -318,9 +318,86 @@ def config_reset() -> None:
 
 
 @main.command()
-def install() -> None:
+@click.option("--user", is_flag=True, default=True, help="Install for current user (default)")
+@click.option("--system", "system_wide", is_flag=True, help="Install system-wide (requires root)")
+def install(user: bool, system_wide: bool) -> None:
     """Set up launchd service."""
-    click.echo("Install not yet implemented")
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    # Determine paths
+    if system_wide:
+        plist_dir = Path("/Library/LaunchDaemons")
+        service_target = "system"
+        label = "com.pause-monitor.daemon"
+    else:
+        plist_dir = Path.home() / "Library" / "LaunchAgents"
+        service_target = f"gui/{os.getuid()}"
+        label = "com.pause-monitor.daemon"
+
+    plist_path = plist_dir / f"{label}.plist"
+
+    # Get Python path
+    python_path = sys.executable
+
+    # Create plist content
+    plist_content = f"""<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>{label}</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>{python_path}</string>
+        <string>-m</string>
+        <string>pause_monitor.cli</string>
+        <string>daemon</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>{Path.home()}/.local/share/pause-monitor/daemon.log</string>
+    <key>StandardErrorPath</key>
+    <string>{Path.home()}/.local/share/pause-monitor/daemon.log</string>
+    <key>ProcessType</key>
+    <string>Background</string>
+    <key>LegacyTimers</key>
+    <true/>
+</dict>
+</plist>
+"""
+
+    # Create directory if needed
+    plist_dir.mkdir(parents=True, exist_ok=True)
+
+    # Write plist
+    plist_path.write_text(plist_content)
+    click.echo(f"Created {plist_path}")
+
+    # Bootstrap the service (modern launchctl syntax)
+    try:
+        subprocess.run(
+            ["launchctl", "bootstrap", service_target, str(plist_path)],
+            check=True,
+            capture_output=True,
+        )
+        click.echo("Service installed and started")
+    except subprocess.CalledProcessError as e:
+        # May already be loaded - check stderr for known messages
+        stderr_text = e.stderr.decode()
+        stderr_lower = stderr_text.lower()
+        if "already loaded" in stderr_lower or "service already loaded" in stderr_lower:
+            click.echo("Service was already installed")
+        else:
+            click.echo(f"Warning: Could not start service: {stderr_text}")
+
+    click.echo(f"\nTo check status: launchctl print {service_target}/{label}")
+    click.echo("To view logs: tail -f ~/.local/share/pause-monitor/daemon.log")
 
 
 @main.command()
