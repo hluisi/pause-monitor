@@ -1,6 +1,7 @@
 """Tests for stress score calculation."""
 
 from pause_monitor.stress import (
+    IOBaselineManager,
     MemoryPressureLevel,
     StressBreakdown,
     calculate_stress,
@@ -158,3 +159,52 @@ def test_stress_io_sustained_high():
         io_baseline=100_000_000,
     )
     assert breakdown.io == 20
+
+
+def test_io_baseline_manager_initial_state():
+    """IOBaselineManager starts with default baseline."""
+    manager = IOBaselineManager(persisted_baseline=None)
+    assert manager.baseline_fast == 10_000_000
+    assert manager.learning is True
+
+
+def test_io_baseline_manager_persisted():
+    """IOBaselineManager uses persisted baseline if available."""
+    manager = IOBaselineManager(persisted_baseline=50_000_000)
+    assert manager.baseline_fast == 50_000_000
+    assert manager.learning is False
+
+
+def test_io_baseline_manager_update():
+    """IOBaselineManager updates baseline with EMA."""
+    manager = IOBaselineManager(persisted_baseline=10_000_000)
+    manager.update(20_000_000)
+    assert 10_900_000 < manager.baseline_fast < 11_100_000
+
+
+def test_io_baseline_manager_learning_completes():
+    """IOBaselineManager exits learning after enough samples."""
+    manager = IOBaselineManager(persisted_baseline=None)
+    assert manager.learning is True
+
+    for _ in range(60):
+        manager.update(10_000_000)
+
+    assert manager.learning is False
+
+
+def test_io_baseline_manager_spike_detection():
+    """IOBaselineManager detects spikes correctly."""
+    manager = IOBaselineManager(persisted_baseline=10_000_000)
+
+    assert manager.is_spike(50_000_000) is False  # 5x, not spike
+    assert manager.is_spike(110_000_000) is True  # 11x, spike
+
+
+def test_io_baseline_manager_learning_spike_threshold():
+    """During learning, only extreme absolute values are spikes."""
+    manager = IOBaselineManager(persisted_baseline=None)
+    assert manager.learning is True
+
+    assert manager.is_spike(150_000_000) is False
+    assert manager.is_spike(250_000_000) is True

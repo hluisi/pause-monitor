@@ -4,6 +4,10 @@ import ctypes
 from dataclasses import dataclass
 from enum import Enum
 
+import structlog
+
+log = structlog.get_logger()
+
 
 class MemoryPressureLevel(Enum):
     """Memory pressure categories."""
@@ -64,6 +68,48 @@ class StressBreakdown:
     def total(self) -> int:
         """Combined stress score, capped at 100."""
         return min(100, self.load + self.memory + self.thermal + self.latency + self.io)
+
+
+class IOBaselineManager:
+    """Manage I/O baseline with learning period awareness."""
+
+    LEARNING_SAMPLES = 60  # ~1 minute at 1s sampling
+    DEFAULT_BASELINE = 10_000_000  # 10 MB/s
+
+    def __init__(self, persisted_baseline: float | None):
+        self.baseline_fast = persisted_baseline or self.DEFAULT_BASELINE
+        self.baseline_slow = persisted_baseline or self.DEFAULT_BASELINE
+        self.samples_seen = 0 if persisted_baseline is None else self.LEARNING_SAMPLES
+        self.learning = self.samples_seen < self.LEARNING_SAMPLES
+
+    def update(self, io_rate: float) -> None:
+        """Update baselines with new I/O rate observation."""
+        self.samples_seen += 1
+
+        if self.learning:
+            alpha_fast = 0.3
+            alpha_slow = 0.1
+
+            if self.samples_seen >= self.LEARNING_SAMPLES:
+                self.learning = False
+                log.info(
+                    "io_baseline_learning_complete",
+                    baseline_fast=self.baseline_fast,
+                    baseline_slow=self.baseline_slow,
+                )
+        else:
+            alpha_fast = 0.1
+            alpha_slow = 0.001
+
+        self.baseline_fast = alpha_fast * io_rate + (1 - alpha_fast) * self.baseline_fast
+        self.baseline_slow = alpha_slow * io_rate + (1 - alpha_slow) * self.baseline_slow
+
+    def is_spike(self, io_rate: float) -> bool:
+        """Check if current I/O rate is a spike relative to baseline."""
+        if self.learning:
+            return io_rate > 200_000_000  # 200 MB/s absolute during learning
+
+        return io_rate > self.baseline_fast * 10
 
 
 def calculate_stress(
