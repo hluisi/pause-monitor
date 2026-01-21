@@ -171,7 +171,7 @@ def test_sample_policy_elevates_on_threshold():
         elevation_threshold=30,
     )
 
-    stress = StressBreakdown(load=20, memory=15, thermal=0, latency=0, io=0)
+    stress = StressBreakdown(load=20, memory=15, thermal=0, latency=0, io=0, gpu=0, wakeups=0)
     policy.update(stress)
 
     assert policy.state == SamplingState.ELEVATED
@@ -192,12 +192,12 @@ def test_sample_policy_returns_to_normal():
     )
 
     # Elevate
-    high_stress = StressBreakdown(load=40, memory=0, thermal=0, latency=0, io=0)
+    high_stress = StressBreakdown(load=40, memory=0, thermal=0, latency=0, io=0, gpu=0, wakeups=0)
     policy.update(high_stress)
     assert policy.state == SamplingState.ELEVATED
 
     # Drop below de-elevation threshold for cooldown period
-    low_stress = StressBreakdown(load=5, memory=0, thermal=0, latency=0, io=0)
+    low_stress = StressBreakdown(load=5, memory=0, thermal=0, latency=0, io=0, gpu=0, wakeups=0)
     for _ in range(3):
         policy.update(low_stress)
 
@@ -218,12 +218,12 @@ def test_sample_policy_hysteresis():
     )
 
     # Elevate
-    high_stress = StressBreakdown(load=40, memory=0, thermal=0, latency=0, io=0)
+    high_stress = StressBreakdown(load=40, memory=0, thermal=0, latency=0, io=0, gpu=0, wakeups=0)
     policy.update(high_stress)
     assert policy.state == SamplingState.ELEVATED
 
     # Drop to 25 (between 20 and 30) - should stay elevated
-    mid_stress = StressBreakdown(load=25, memory=0, thermal=0, latency=0, io=0)
+    mid_stress = StressBreakdown(load=25, memory=0, thermal=0, latency=0, io=0, gpu=0, wakeups=0)
     for _ in range(10):  # Even many samples shouldn't trigger de-elevation
         policy.update(mid_stress)
 
@@ -242,7 +242,7 @@ def test_sample_policy_critical_triggers_snapshot():
         critical_threshold=60,
     )
 
-    stress = StressBreakdown(load=40, memory=20, thermal=20, latency=0, io=0)
+    stress = StressBreakdown(load=40, memory=20, thermal=20, latency=0, io=0, gpu=0, wakeups=0)
     result = policy.update(stress)
 
     assert result.should_snapshot is True

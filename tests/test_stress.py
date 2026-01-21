@@ -24,13 +24,13 @@ def test_memory_pressure_level_enum():
 
 def test_stress_breakdown_total():
     """StressBreakdown.total sums components."""
-    breakdown = StressBreakdown(load=10, memory=5, thermal=0, latency=0, io=0)
+    breakdown = StressBreakdown(load=10, memory=5, thermal=0, latency=0, io=0, gpu=0, wakeups=0)
     assert breakdown.total == 15
 
 
 def test_stress_breakdown_total_capped():
     """StressBreakdown.total capped at 100."""
-    breakdown = StressBreakdown(load=40, memory=30, thermal=20, latency=30, io=20)
+    breakdown = StressBreakdown(load=40, memory=30, thermal=20, latency=30, io=20, gpu=0, wakeups=0)
     assert breakdown.total == 100
 
 
@@ -208,3 +208,30 @@ def test_io_baseline_manager_learning_spike_threshold():
 
     assert manager.is_spike(150_000_000) is False
     assert manager.is_spike(250_000_000) is True
+
+
+def test_stress_breakdown_has_all_factors():
+    """Verify StressBreakdown has all 7 factors."""
+    breakdown = StressBreakdown(load=10, memory=15, thermal=0, latency=5, io=10, gpu=8, wakeups=5)
+    assert breakdown.load == 10
+    assert breakdown.memory == 15
+    assert breakdown.thermal == 0
+    assert breakdown.latency == 5
+    assert breakdown.io == 10
+    assert breakdown.gpu == 8
+    assert breakdown.wakeups == 5
+
+
+def test_stress_breakdown_total_includes_all_factors():
+    """Verify total sums all 7 factors."""
+    breakdown = StressBreakdown(
+        load=40, memory=30, thermal=20, latency=30, io=20, gpu=20, wakeups=20
+    )
+    # 40+30+20+30+20+20+20 = 180, capped at 100
+    assert breakdown.total == 100
+
+
+def test_stress_breakdown_total_uncapped():
+    """Verify total with small values."""
+    breakdown = StressBreakdown(load=5, memory=5, thermal=0, latency=0, io=0, gpu=3, wakeups=2)
+    assert breakdown.total == 15

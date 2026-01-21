@@ -23,7 +23,7 @@ def initialized_db(tmp_db: Path) -> Path:
 
 def create_test_stress() -> StressBreakdown:
     """Create a StressBreakdown for testing."""
-    return StressBreakdown(load=10, memory=5, thermal=0, latency=0, io=0)
+    return StressBreakdown(load=10, memory=5, thermal=0, latency=0, io=0, gpu=0, wakeups=0)
 
 
 @pytest.fixture

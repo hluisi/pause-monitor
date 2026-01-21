@@ -223,6 +223,8 @@ def get_recent_samples(conn: sqlite3.Connection, limit: int = 100) -> list[Sampl
                 thermal=row[17] or 0,
                 latency=row[18] or 0,
                 io=row[19] or 0,
+                gpu=0,  # DB schema update in Task 4
+                wakeups=0,  # DB schema update in Task 4
             ),
         )
         for row in rows
@@ -310,6 +312,8 @@ def get_events(
                 thermal=row[6] or 0,
                 latency=row[7] or 0,
                 io=row[8] or 0,
+                gpu=0,  # DB schema update in Task 4
+                wakeups=0,  # DB schema update in Task 4
             ),
             culprits=json.loads(row[9]) if row[9] else [],
             event_dir=row[10],
@@ -343,6 +347,8 @@ def get_event_by_id(conn: sqlite3.Connection, event_id: int) -> Event | None:
             thermal=row[6] or 0,
             latency=row[7] or 0,
             io=row[8] or 0,
+            gpu=0,  # DB schema update in Task 4
+            wakeups=0,  # DB schema update in Task 4
         ),
         culprits=json.loads(row[9]) if row[9] else [],
         event_dir=row[10],

@@ -63,11 +63,22 @@ class StressBreakdown:
     thermal: int  # 0-20: throttling active
     latency: int  # 0-30: self-latency
     io: int  # 0-20: disk I/O spike
+    gpu: int  # 0-20: GPU usage sustained high
+    wakeups: int  # 0-20: idle wakeups sustained high
 
     @property
     def total(self) -> int:
         """Combined stress score, capped at 100."""
-        return min(100, self.load + self.memory + self.thermal + self.latency + self.io)
+        raw = (
+            self.load
+            + self.memory
+            + self.thermal
+            + self.latency
+            + self.io
+            + self.gpu
+            + self.wakeups
+        )
+        return min(100, raw)
 
 
 class IOBaselineManager:
@@ -162,4 +173,6 @@ def calculate_stress(
         thermal=thermal_score,
         latency=latency_score,
         io=io_score,
+        gpu=0,  # Scoring logic implemented in Task 2
+        wakeups=0,  # Scoring logic implemented in Task 2
     )

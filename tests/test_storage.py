@@ -75,7 +75,7 @@ def test_sample_dataclass_fields():
         cpu_freq=3000,
         throttled=False,
         gpu_pct=10.0,
-        stress=StressBreakdown(load=10, memory=5, thermal=0, latency=0, io=0),
+        stress=StressBreakdown(load=10, memory=5, thermal=0, latency=0, io=0, gpu=0, wakeups=0),
     )
     assert sample.cpu_pct == 25.5
     assert sample.stress.total == 15
@@ -148,7 +148,7 @@ def test_event_dataclass():
     """Event has correct fields."""
     from pause_monitor.storage import Event
 
-    stress = StressBreakdown(load=10, memory=5, thermal=0, latency=0, io=0)
+    stress = StressBreakdown(load=10, memory=5, thermal=0, latency=0, io=0, gpu=0, wakeups=0)
     event = Event(
         timestamp=datetime.now(),
         duration=3.5,

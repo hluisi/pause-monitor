@@ -60,7 +60,7 @@ class TestEventsCommand:
         import sqlite3
 
         conn = sqlite3.connect(db_path)
-        stress = StressBreakdown(load=10, memory=5, thermal=0, latency=0, io=0)
+        stress = StressBreakdown(load=10, memory=5, thermal=0, latency=0, io=0, gpu=0, wakeups=0)
         event = Event(
             timestamp=datetime(2026, 1, 20, 14, 30, 0),
             duration=2.5,
@@ -95,7 +95,7 @@ class TestEventsCommand:
         import sqlite3
 
         conn = sqlite3.connect(db_path)
-        stress = StressBreakdown(load=20, memory=10, thermal=5, latency=15, io=0)
+        stress = StressBreakdown(load=20, memory=10, thermal=5, latency=15, io=0, gpu=0, wakeups=0)
         event = Event(
             timestamp=datetime(2026, 1, 20, 14, 30, 0),
             duration=3.5,
@@ -148,7 +148,7 @@ class TestEventsCommand:
         import sqlite3
 
         conn = sqlite3.connect(db_path)
-        stress = StressBreakdown(load=10, memory=5, thermal=0, latency=0, io=0)
+        stress = StressBreakdown(load=10, memory=5, thermal=0, latency=0, io=0, gpu=0, wakeups=0)
         for i in range(5):
             event = Event(
                 timestamp=datetime(2026, 1, 20, 14, 30 + i, 0),
@@ -216,7 +216,9 @@ class TestHistoryCommand:
         # Insert test samples
         conn = get_connection(db_path)
         for i in range(5):
-            stress = StressBreakdown(load=10 + i * 5, memory=5, thermal=0, latency=0, io=0)
+            stress = StressBreakdown(
+                load=10 + i * 5, memory=5, thermal=0, latency=0, io=0, gpu=0, wakeups=0
+            )
             sample = Sample(
                 timestamp=datetime.now(),
                 interval=5.0,
@@ -261,7 +263,7 @@ class TestHistoryCommand:
 
         # Insert test sample
         conn = get_connection(db_path)
-        stress = StressBreakdown(load=15, memory=5, thermal=0, latency=0, io=0)
+        stress = StressBreakdown(load=15, memory=5, thermal=0, latency=0, io=0, gpu=0, wakeups=0)
         sample = Sample(
             timestamp=datetime.now(),
             interval=5.0,
@@ -308,7 +310,7 @@ class TestHistoryCommand:
 
         # Insert test sample
         conn = get_connection(db_path)
-        stress = StressBreakdown(load=10, memory=5, thermal=0, latency=0, io=0)
+        stress = StressBreakdown(load=10, memory=5, thermal=0, latency=0, io=0, gpu=0, wakeups=0)
         sample = Sample(
             timestamp=datetime.now(),
             interval=5.0,
@@ -355,7 +357,9 @@ class TestHistoryCommand:
         # Insert samples with varying stress (some >= 30)
         conn = get_connection(db_path)
         for stress_val in [10, 20, 35, 45, 25]:
-            stress = StressBreakdown(load=stress_val, memory=0, thermal=0, latency=0, io=0)
+            stress = StressBreakdown(
+                load=stress_val, memory=0, thermal=0, latency=0, io=0, gpu=0, wakeups=0
+            )
             sample = Sample(
                 timestamp=datetime.now(),
                 interval=5.0,
@@ -397,7 +401,7 @@ class TestHistoryCommand:
 
         # Insert sample from 2 hours ago (outside --hours 1 range)
         conn = get_connection(db_path)
-        stress = StressBreakdown(load=10, memory=5, thermal=0, latency=0, io=0)
+        stress = StressBreakdown(load=10, memory=5, thermal=0, latency=0, io=0, gpu=0, wakeups=0)
         old_sample = Sample(
             timestamp=datetime.now() - timedelta(hours=2),
             interval=5.0,
@@ -492,7 +496,7 @@ class TestPruneCommand:
 
         # Insert old sample (40 days ago)
         conn = sqlite3.connect(db_path)
-        stress = StressBreakdown(load=10, memory=5, thermal=0, latency=0, io=0)
+        stress = StressBreakdown(load=10, memory=5, thermal=0, latency=0, io=0, gpu=0, wakeups=0)
         old_sample = Sample(
             timestamp=datetime.fromtimestamp(time.time() - 40 * 86400),
             interval=5.0,
@@ -552,7 +556,7 @@ class TestPruneCommand:
 
         # Insert sample 10 days ago (would be kept with default 30 days)
         conn = sqlite3.connect(db_path)
-        stress = StressBreakdown(load=10, memory=5, thermal=0, latency=0, io=0)
+        stress = StressBreakdown(load=10, memory=5, thermal=0, latency=0, io=0, gpu=0, wakeups=0)
         sample = Sample(
             timestamp=datetime.fromtimestamp(time.time() - 10 * 86400),
             interval=5.0,

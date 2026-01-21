@@ -388,7 +388,7 @@ class Daemon:
         event = Event(
             timestamp=pause.timestamp,
             duration=pause.duration,
-            stress=StressBreakdown(load=0, memory=0, thermal=0, latency=0, io=0),
+            stress=StressBreakdown(load=0, memory=0, thermal=0, latency=0, io=0, gpu=0, wakeups=0),
             culprits=[],
             event_dir=str(event_dir),
             notes=None,
