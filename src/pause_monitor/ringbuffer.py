@@ -63,14 +63,14 @@ class RingBuffer:
         self._snapshots: list[ProcessSnapshot] = []
 
     @property
-    def samples(self) -> deque[RingSample]:
-        """Read-only access to samples."""
-        return self._samples
+    def samples(self) -> list[RingSample]:
+        """Read-only access to samples (returns a copy)."""
+        return list(self._samples)
 
     @property
     def snapshots(self) -> list[ProcessSnapshot]:
-        """Read-only access to snapshots."""
-        return self._snapshots
+        """Read-only access to snapshots (returns a copy)."""
+        return list(self._snapshots)
 
     def push(self, stress: StressBreakdown, tier: int) -> None:
         """Add a stress sample to the buffer."""
@@ -83,7 +83,12 @@ class RingBuffer:
         )
 
     def snapshot_processes(self, trigger: str) -> None:
-        """Capture current top processes by CPU and memory."""
+        """Capture current top processes by CPU and memory.
+
+        Note: cpu_percent values from psutil are based on comparison with the
+        previous call. Since snapshots are taken sporadically (on tier transitions),
+        CPU percentages may be inaccurate. Memory values are always accurate.
+        """
         processes = []
         for proc in psutil.process_iter(["pid", "name", "cpu_percent", "memory_info"]):
             try:

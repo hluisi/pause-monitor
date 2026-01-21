@@ -122,3 +122,25 @@ def test_ring_buffer_clear_snapshots():
 
     assert len(buffer.samples) == 1
     assert len(buffer.snapshots) == 0
+
+
+def test_ring_buffer_freeze_empty():
+    """freeze() works on empty buffer."""
+    from pause_monitor.ringbuffer import RingBuffer
+
+    buffer = RingBuffer(max_samples=10)
+    frozen = buffer.freeze()
+    assert len(frozen.samples) == 0
+    assert len(frozen.snapshots) == 0
+
+
+def test_ring_buffer_size_one():
+    """RingBuffer with max_samples=1 only keeps last sample."""
+    from pause_monitor.ringbuffer import RingBuffer
+
+    buffer = RingBuffer(max_samples=1)
+    stress = StressBreakdown(load=0, memory=0, thermal=0, latency=0, io=0, gpu=0, wakeups=0)
+    buffer.push(stress, tier=1)
+    buffer.push(stress, tier=2)
+    assert len(buffer.samples) == 1
+    assert buffer.samples[0].tier == 2
