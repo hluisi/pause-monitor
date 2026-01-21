@@ -1,5 +1,6 @@
 """SQLite storage layer for pause-monitor."""
 
+import json
 import sqlite3
 import time
 from dataclasses import dataclass
@@ -221,3 +222,124 @@ def get_recent_samples(conn: sqlite3.Connection, limit: int = 100) -> list[Sampl
         )
         for row in rows
     ]
+
+
+@dataclass
+class Event:
+    """Pause event record."""
+
+    timestamp: datetime
+    duration: float
+    stress: StressBreakdown
+    culprits: list[str]
+    event_dir: str | None
+    notes: str | None
+    id: int | None = None
+
+
+def insert_event(conn: sqlite3.Connection, event: Event) -> int:
+    """Insert an event and return its ID."""
+    cursor = conn.execute(
+        """
+        INSERT INTO events (
+            timestamp, duration, stress_total, stress_load, stress_memory,
+            stress_thermal, stress_latency, stress_io, culprits, event_dir, notes
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            event.timestamp.timestamp(),
+            event.duration,
+            event.stress.total,
+            event.stress.load,
+            event.stress.memory,
+            event.stress.thermal,
+            event.stress.latency,
+            event.stress.io,
+            json.dumps(event.culprits),
+            event.event_dir,
+            event.notes,
+        ),
+    )
+    conn.commit()
+    return cursor.lastrowid
+
+
+def get_events(
+    conn: sqlite3.Connection,
+    start: datetime | None = None,
+    end: datetime | None = None,
+    limit: int = 100,
+) -> list[Event]:
+    """Get events, optionally filtered by time range."""
+    query = """
+        SELECT id, timestamp, duration, stress_total, stress_load, stress_memory,
+               stress_thermal, stress_latency, stress_io, culprits, event_dir, notes
+        FROM events
+    """
+    params: list = []
+
+    if start or end:
+        query += " WHERE "
+        conditions = []
+        if start:
+            conditions.append("timestamp >= ?")
+            params.append(start.timestamp())
+        if end:
+            conditions.append("timestamp <= ?")
+            params.append(end.timestamp())
+        query += " AND ".join(conditions)
+
+    query += " ORDER BY timestamp DESC LIMIT ?"
+    params.append(limit)
+
+    rows = conn.execute(query, params).fetchall()
+
+    return [
+        Event(
+            id=row[0],
+            timestamp=datetime.fromtimestamp(row[1]),
+            duration=row[2],
+            stress=StressBreakdown(
+                load=row[4] or 0,
+                memory=row[5] or 0,
+                thermal=row[6] or 0,
+                latency=row[7] or 0,
+                io=row[8] or 0,
+            ),
+            culprits=json.loads(row[9]) if row[9] else [],
+            event_dir=row[10],
+            notes=row[11],
+        )
+        for row in rows
+    ]
+
+
+def get_event_by_id(conn: sqlite3.Connection, event_id: int) -> Event | None:
+    """Get a single event by ID."""
+    row = conn.execute(
+        """
+        SELECT id, timestamp, duration, stress_total, stress_load, stress_memory,
+               stress_thermal, stress_latency, stress_io, culprits, event_dir, notes
+        FROM events WHERE id = ?
+        """,
+        (event_id,),
+    ).fetchone()
+
+    if not row:
+        return None
+
+    return Event(
+        id=row[0],
+        timestamp=datetime.fromtimestamp(row[1]),
+        duration=row[2],
+        stress=StressBreakdown(
+            load=row[4] or 0,
+            memory=row[5] or 0,
+            thermal=row[6] or 0,
+            latency=row[7] or 0,
+            io=row[8] or 0,
+        ),
+        culprits=json.loads(row[9]) if row[9] else [],
+        event_dir=row[10],
+        notes=row[11],
+    )

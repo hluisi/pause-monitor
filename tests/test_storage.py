@@ -5,6 +5,7 @@ from datetime import datetime
 from pathlib import Path
 
 from pause_monitor.storage import SCHEMA_VERSION, get_schema_version, init_database
+from pause_monitor.stress import StressBreakdown
 
 
 def test_init_database_creates_file(tmp_path: Path):
@@ -141,3 +142,103 @@ def test_get_recent_samples(initialized_db: Path, sample_stress):
     assert len(samples) == 3
     assert samples[0].cpu_pct == 14.0  # Most recent
     assert samples[2].cpu_pct == 12.0
+
+
+def test_event_dataclass():
+    """Event has correct fields."""
+    from pause_monitor.storage import Event
+
+    stress = StressBreakdown(load=10, memory=5, thermal=0, latency=0, io=0)
+    event = Event(
+        timestamp=datetime.now(),
+        duration=3.5,
+        stress=stress,
+        culprits=["codemeter", "WindowServer"],
+        event_dir="/path/to/events/12345",
+        notes="Test pause",
+    )
+    assert event.duration == 3.5
+    assert "codemeter" in event.culprits
+
+
+def test_insert_event(initialized_db: Path, sample_stress):
+    """insert_event stores event in database."""
+    from pause_monitor.storage import Event, insert_event
+
+    event = Event(
+        timestamp=datetime.now(),
+        duration=2.5,
+        stress=sample_stress,
+        culprits=["test_process"],
+        event_dir=None,
+        notes=None,
+    )
+
+    conn = sqlite3.connect(initialized_db)
+    event_id = insert_event(conn, event)
+    conn.close()
+
+    assert event_id > 0
+
+
+def test_get_events_by_timerange(initialized_db: Path, sample_stress):
+    """get_events returns events within time range."""
+    from pause_monitor.storage import Event, get_events, insert_event
+
+    conn = sqlite3.connect(initialized_db)
+
+    base_time = 1000000.0
+    for i in range(5):
+        event = Event(
+            timestamp=datetime.fromtimestamp(base_time + i * 3600),
+            duration=1.0 + i,
+            stress=sample_stress,
+            culprits=[],
+            event_dir=None,
+            notes=None,
+        )
+        insert_event(conn, event)
+
+    events = get_events(
+        conn,
+        start=datetime.fromtimestamp(base_time + 3600),
+        end=datetime.fromtimestamp(base_time + 10800),
+    )
+    conn.close()
+
+    assert len(events) == 3
+
+
+def test_get_event_by_id_found(initialized_db: Path, sample_stress):
+    """get_event_by_id returns event when found."""
+    from pause_monitor.storage import Event, insert_event, get_event_by_id
+
+    event = Event(
+        timestamp=datetime.now(),
+        duration=2.5,
+        stress=sample_stress,
+        culprits=["test_process"],
+        event_dir="/path/to/event",
+        notes="Test note",
+    )
+
+    conn = sqlite3.connect(initialized_db)
+    event_id = insert_event(conn, event)
+    retrieved = get_event_by_id(conn, event_id)
+    conn.close()
+
+    assert retrieved is not None
+    assert retrieved.id == event_id
+    assert retrieved.duration == 2.5
+    assert retrieved.culprits == ["test_process"]
+
+
+def test_get_event_by_id_not_found(initialized_db: Path):
+    """get_event_by_id returns None when not found."""
+    from pause_monitor.storage import get_event_by_id
+
+    conn = sqlite3.connect(initialized_db)
+    result = get_event_by_id(conn, 99999)
+    conn.close()
+
+    assert result is None
