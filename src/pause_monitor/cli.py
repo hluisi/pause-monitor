@@ -31,7 +31,7 @@ def tui():
 
 
 @main.command()
-def status():
+def status() -> None:
     """Quick health check."""
     from datetime import datetime, timedelta
 
@@ -88,7 +88,7 @@ def status():
 @main.command()
 @click.argument("event_id", required=False, type=int)
 @click.option("--limit", "-n", default=20, help="Number of events to show")
-def events(event_id, limit):
+def events(event_id: int | None, limit: int) -> None:
     """List or inspect pause events."""
     from pause_monitor.config import Config
     from pause_monitor.storage import get_connection, get_event_by_id, get_events
