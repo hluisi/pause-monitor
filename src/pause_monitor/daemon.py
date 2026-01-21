@@ -1,6 +1,7 @@
 """Background daemon for pause-monitor."""
 
 import asyncio
+import os
 import signal
 import sqlite3
 import time
@@ -121,6 +122,13 @@ class Daemon:
         for sig in (signal.SIGTERM, signal.SIGINT):
             loop.add_signal_handler(sig, lambda s=sig: self._handle_signal(s))
 
+        # Check for existing instance
+        if self._check_already_running():
+            log.error("daemon_already_running")
+            raise RuntimeError("Daemon is already running")
+
+        self._write_pid_file()
+
         # Initialize database
         self.config.data_dir.mkdir(parents=True, exist_ok=True)
         init_database(self.config.db_path)
@@ -156,6 +164,8 @@ class Daemon:
             self._conn.close()
             self._conn = None
 
+        self._remove_pid_file()
+
         log.info("daemon_stopped")
 
     def _handle_signal(self, sig: signal.Signals) -> None:
@@ -186,6 +196,33 @@ class Daemon:
                 self._caffeinate_proc.kill()
             self._caffeinate_proc = None
             log.debug("caffeinate_stopped")
+
+    def _write_pid_file(self) -> None:
+        """Write PID file."""
+        self.config.pid_path.parent.mkdir(parents=True, exist_ok=True)
+        self.config.pid_path.write_text(str(os.getpid()))
+        log.debug("pid_file_written", path=str(self.config.pid_path))
+
+    def _remove_pid_file(self) -> None:
+        """Remove PID file."""
+        if self.config.pid_path.exists():
+            self.config.pid_path.unlink()
+            log.debug("pid_file_removed")
+
+    def _check_already_running(self) -> bool:
+        """Check if daemon is already running."""
+        if not self.config.pid_path.exists():
+            return False
+
+        try:
+            pid = int(self.config.pid_path.read_text().strip())
+            # Check if process exists
+            os.kill(pid, 0)
+            return True
+        except (ValueError, ProcessLookupError, PermissionError):
+            # PID file exists but process doesn't - stale file
+            self._remove_pid_file()
+            return False
 
     async def _run_loop(self) -> None:
         """Main sampling loop - streams powermetrics and processes samples."""

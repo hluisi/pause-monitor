@@ -1,5 +1,6 @@
 """Tests for daemon core."""
 
+import os
 import signal
 import sqlite3
 from datetime import datetime
@@ -182,3 +183,166 @@ async def test_daemon_detects_pause(tmp_path: Path):
                         await daemon._check_for_pause(actual_interval=15.0)
 
                         mock_handle.assert_called_once()
+
+
+# PID file management tests
+
+
+def test_write_pid_file(tmp_path: Path):
+    """Daemon writes PID file with current process ID."""
+    config = Config()
+
+    with patch.object(
+        Config, "pid_path", new_callable=lambda: property(lambda self: tmp_path / "daemon.pid")
+    ):
+        daemon = Daemon(config)
+        daemon._write_pid_file()
+
+        assert config.pid_path.exists()
+        assert config.pid_path.read_text() == str(os.getpid())
+
+
+def test_remove_pid_file(tmp_path: Path):
+    """Daemon removes PID file."""
+    config = Config()
+    pid_file = tmp_path / "daemon.pid"
+    pid_file.write_text("12345")
+
+    with patch.object(Config, "pid_path", new_callable=lambda: property(lambda self: pid_file)):
+        daemon = Daemon(config)
+        daemon._remove_pid_file()
+
+        assert not pid_file.exists()
+
+
+def test_remove_pid_file_nonexistent(tmp_path: Path):
+    """Daemon handles removing nonexistent PID file gracefully."""
+    config = Config()
+    pid_file = tmp_path / "daemon.pid"
+
+    with patch.object(Config, "pid_path", new_callable=lambda: property(lambda self: pid_file)):
+        daemon = Daemon(config)
+        # Should not raise
+        daemon._remove_pid_file()
+
+
+def test_check_already_running_no_pid_file(tmp_path: Path):
+    """Returns False when no PID file exists."""
+    config = Config()
+    pid_file = tmp_path / "daemon.pid"
+
+    with patch.object(Config, "pid_path", new_callable=lambda: property(lambda self: pid_file)):
+        daemon = Daemon(config)
+        assert daemon._check_already_running() is False
+
+
+def test_check_already_running_stale_pid(tmp_path: Path):
+    """Returns False and cleans up stale PID file."""
+    config = Config()
+    pid_file = tmp_path / "daemon.pid"
+    # Write a PID that doesn't exist (use a very high number)
+    pid_file.write_text("999999999")
+
+    with patch.object(Config, "pid_path", new_callable=lambda: property(lambda self: pid_file)):
+        daemon = Daemon(config)
+        result = daemon._check_already_running()
+
+        assert result is False
+        # Stale PID file should be removed
+        assert not pid_file.exists()
+
+
+def test_check_already_running_invalid_pid(tmp_path: Path):
+    """Returns False and cleans up PID file with invalid content."""
+    config = Config()
+    pid_file = tmp_path / "daemon.pid"
+    pid_file.write_text("not-a-number")
+
+    with patch.object(Config, "pid_path", new_callable=lambda: property(lambda self: pid_file)):
+        daemon = Daemon(config)
+        result = daemon._check_already_running()
+
+        assert result is False
+        # Invalid PID file should be removed
+        assert not pid_file.exists()
+
+
+def test_check_already_running_current_process(tmp_path: Path):
+    """Returns True when PID file contains current process ID."""
+    config = Config()
+    pid_file = tmp_path / "daemon.pid"
+    # Write current process PID - this process definitely exists
+    pid_file.write_text(str(os.getpid()))
+
+    with patch.object(Config, "pid_path", new_callable=lambda: property(lambda self: pid_file)):
+        daemon = Daemon(config)
+        result = daemon._check_already_running()
+
+        assert result is True
+        # PID file should still exist
+        assert pid_file.exists()
+
+
+@pytest.mark.asyncio
+async def test_daemon_start_rejects_duplicate(tmp_path: Path):
+    """Daemon.start() raises if already running."""
+    config = Config()
+    pid_file = tmp_path / "daemon.pid"
+    # Simulate existing running daemon (use current PID)
+    pid_file.write_text(str(os.getpid()))
+
+    with patch.object(Config, "data_dir", new_callable=lambda: property(lambda self: tmp_path)):
+        with patch.object(Config, "pid_path", new_callable=lambda: property(lambda self: pid_file)):
+            daemon = Daemon(config)
+
+            with pytest.raises(RuntimeError, match="already running"):
+                await daemon.start()
+
+
+@pytest.mark.asyncio
+async def test_daemon_start_writes_pid_file(tmp_path: Path):
+    """Daemon.start() writes PID file."""
+    config = Config()
+    pid_file = tmp_path / "daemon.pid"
+
+    with patch.object(Config, "data_dir", new_callable=lambda: property(lambda self: tmp_path)):
+        with patch.object(
+            Config, "db_path", new_callable=lambda: property(lambda self: tmp_path / "test.db")
+        ):
+            with patch.object(
+                Config,
+                "events_dir",
+                new_callable=lambda: property(lambda self: tmp_path / "events"),
+            ):
+                with patch.object(
+                    Config, "pid_path", new_callable=lambda: property(lambda self: pid_file)
+                ):
+                    daemon = Daemon(config)
+
+                    with patch.object(daemon, "_run_loop", new_callable=AsyncMock):
+                        with patch.object(daemon, "_start_caffeinate", new_callable=AsyncMock):
+                            daemon._shutdown_event.set()
+                            await daemon.start()
+
+                            assert pid_file.exists()
+                            assert pid_file.read_text() == str(os.getpid())
+
+
+@pytest.mark.asyncio
+async def test_daemon_stop_removes_pid_file(tmp_path: Path):
+    """Daemon.stop() removes PID file."""
+    config = Config()
+    pid_file = tmp_path / "daemon.pid"
+    pid_file.write_text(str(os.getpid()))
+
+    with patch.object(Config, "pid_path", new_callable=lambda: property(lambda self: pid_file)):
+        daemon = Daemon(config)
+
+        # Mock powermetrics
+        mock_powermetrics = AsyncMock()
+        mock_powermetrics.stop = AsyncMock()
+        daemon._powermetrics = mock_powermetrics
+
+        await daemon.stop()
+
+        assert not pid_file.exists()
