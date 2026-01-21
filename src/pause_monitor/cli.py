@@ -148,9 +148,65 @@ def events(event_id: int | None, limit: int) -> None:
 
 
 @main.command()
-def history():
+@click.option("--hours", "-h", default=24, help="Hours of history to show")
+@click.option("--format", "-f", "fmt", type=click.Choice(["table", "json", "csv"]), default="table")
+def history(hours: int, fmt: str) -> None:
     """Query historical data."""
-    click.echo("History not yet implemented")
+    import json
+    from datetime import datetime, timedelta
+
+    from pause_monitor.config import Config
+    from pause_monitor.storage import get_connection, get_recent_samples
+
+    config = Config.load()
+
+    if not config.db_path.exists():
+        click.echo("Database not found. Run 'pause-monitor daemon' first.")
+        return
+
+    conn = get_connection(config.db_path)
+    try:
+        # Get samples from time range
+        # Note: get_recent_samples returns newest first, so we get more than needed
+        # and filter by time
+        cutoff = datetime.now() - timedelta(hours=hours)
+        samples = get_recent_samples(conn, limit=hours * 720)  # ~1 sample/5s max
+        samples = [s for s in samples if s.timestamp >= cutoff]
+
+        if not samples:
+            click.echo(f"No samples in the last {hours} hours.")
+            return
+
+        if fmt == "json":
+            data = [
+                {
+                    "timestamp": s.timestamp.isoformat(),
+                    "stress": s.stress.total,
+                    "cpu_pct": s.cpu_pct,
+                    "load_avg": s.load_avg,
+                }
+                for s in samples
+            ]
+            click.echo(json.dumps(data, indent=2))
+        elif fmt == "csv":
+            click.echo("timestamp,stress,cpu_pct,load_avg")
+            for s in samples:
+                click.echo(f"{s.timestamp.isoformat()},{s.stress.total},{s.cpu_pct},{s.load_avg}")
+        else:
+            # Summary stats
+            stresses = [s.stress.total for s in samples]
+            click.echo(f"Samples: {len(samples)}")
+            click.echo(f"Time range: {samples[-1].timestamp} to {samples[0].timestamp}")
+            click.echo(f"Stress - Min: {min(stresses)}, Max: {max(stresses)}, "
+                       f"Avg: {sum(stresses)/len(stresses):.1f}")
+
+            # High stress periods
+            high_stress = [s for s in samples if s.stress.total >= 30]
+            if high_stress:
+                click.echo(f"\nHigh stress periods: {len(high_stress)} samples")
+                click.echo(f"  ({len(high_stress) / len(samples) * 100:.1f}% of time)")
+    finally:
+        conn.close()
 
 
 @main.command()
