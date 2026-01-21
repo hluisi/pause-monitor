@@ -317,6 +317,7 @@ class Daemon:
             latency_ratio=latency_ratio,
             io_rate=io_rate,
             io_baseline=int(self.io_baseline.baseline_fast),
+            gpu_pct=pm_result.gpu_pct,
         )
 
         # Create sample

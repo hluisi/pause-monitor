@@ -437,6 +437,114 @@ async def test_auto_prune_skips_if_no_connection(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_daemon_passes_gpu_to_stress_calculation(tmp_path: Path):
+    """Verify daemon extracts and passes GPU percentage to stress calculation."""
+    config = Config()
+
+    with patch.object(Config, "data_dir", new_callable=lambda: property(lambda self: tmp_path)):
+        with patch.object(
+            Config, "db_path", new_callable=lambda: property(lambda self: tmp_path / "test.db")
+        ):
+            events_prop = lambda: property(lambda self: tmp_path / "events")  # noqa: E731
+            with patch.object(Config, "events_dir", new_callable=events_prop):
+                daemon = Daemon(config)
+
+                # Initialize database
+                from pause_monitor.storage import init_database
+
+                init_database(config.db_path)
+                daemon._conn = sqlite3.connect(config.db_path)
+
+                # Mock powermetrics result with high GPU usage (above 80% threshold)
+                from pause_monitor.collector import PowermetricsResult
+
+                pm_result = PowermetricsResult(
+                    cpu_pct=25.0,
+                    cpu_freq=3000,
+                    cpu_temp=65.0,
+                    throttled=False,
+                    gpu_pct=85.0,  # Above 80% threshold - should contribute to stress
+                )
+
+                sample = await daemon._collect_sample(pm_result, interval=5.0)
+
+                # GPU above 80% should add 20 points to stress
+                assert sample.stress.gpu == 20
+
+
+@pytest.mark.asyncio
+async def test_daemon_handles_none_gpu(tmp_path: Path):
+    """Verify daemon handles None GPU percentage gracefully."""
+    config = Config()
+
+    with patch.object(Config, "data_dir", new_callable=lambda: property(lambda self: tmp_path)):
+        with patch.object(
+            Config, "db_path", new_callable=lambda: property(lambda self: tmp_path / "test.db")
+        ):
+            events_prop = lambda: property(lambda self: tmp_path / "events")  # noqa: E731
+            with patch.object(Config, "events_dir", new_callable=events_prop):
+                daemon = Daemon(config)
+
+                # Initialize database
+                from pause_monitor.storage import init_database
+
+                init_database(config.db_path)
+                daemon._conn = sqlite3.connect(config.db_path)
+
+                # Mock powermetrics result with None GPU
+                from pause_monitor.collector import PowermetricsResult
+
+                pm_result = PowermetricsResult(
+                    cpu_pct=25.0,
+                    cpu_freq=3000,
+                    cpu_temp=65.0,
+                    throttled=False,
+                    gpu_pct=None,  # GPU not available
+                )
+
+                sample = await daemon._collect_sample(pm_result, interval=5.0)
+
+                # GPU score should be 0 when gpu_pct is None
+                assert sample.stress.gpu == 0
+
+
+@pytest.mark.asyncio
+async def test_daemon_gpu_below_threshold_no_stress(tmp_path: Path):
+    """Verify GPU below 80% does not contribute to stress."""
+    config = Config()
+
+    with patch.object(Config, "data_dir", new_callable=lambda: property(lambda self: tmp_path)):
+        with patch.object(
+            Config, "db_path", new_callable=lambda: property(lambda self: tmp_path / "test.db")
+        ):
+            events_prop = lambda: property(lambda self: tmp_path / "events")  # noqa: E731
+            with patch.object(Config, "events_dir", new_callable=events_prop):
+                daemon = Daemon(config)
+
+                # Initialize database
+                from pause_monitor.storage import init_database
+
+                init_database(config.db_path)
+                daemon._conn = sqlite3.connect(config.db_path)
+
+                # Mock powermetrics result with GPU below threshold
+                from pause_monitor.collector import PowermetricsResult
+
+                pm_result = PowermetricsResult(
+                    cpu_pct=25.0,
+                    cpu_freq=3000,
+                    cpu_temp=65.0,
+                    throttled=False,
+                    gpu_pct=50.0,  # Below 80% threshold
+                )
+
+                sample = await daemon._collect_sample(pm_result, interval=5.0)
+
+                # GPU below threshold should not contribute to stress
+                assert sample.stress.gpu == 0
+
+
+@pytest.mark.asyncio
 async def test_auto_prune_uses_config_retention_days(tmp_path: Path):
     """Auto-prune uses retention days from config."""
     from pause_monitor.config import RetentionConfig
