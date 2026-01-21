@@ -66,31 +66,38 @@ def get_system_metrics() -> SystemMetrics:
 
 
 def _get_memory_available() -> int:
-    """Get available memory in bytes via sysctl."""
+    """Get available memory in bytes via sysctl.
+
+    Returns free pages multiplied by page size.
+    """
     libc = ctypes.CDLL("/usr/lib/libc.dylib")
 
     # Get page size
     page_size = ctypes.c_size_t(4)
-    page_value = ctypes.c_int()
-    libc.sysctlbyname(
+    page_value = ctypes.c_uint32()
+    ret = libc.sysctlbyname(
         b"hw.pagesize",
         ctypes.byref(page_value),
         ctypes.byref(page_size),
         None,
         0,
     )
+    if ret != 0:
+        return 0
     page_size_bytes = page_value.value
 
-    # Get free + inactive pages as "available"
+    # Get free pages
     vm_size = ctypes.c_size_t(4)
-    free_pages = ctypes.c_int()
-    libc.sysctlbyname(
+    free_pages = ctypes.c_uint32()
+    ret = libc.sysctlbyname(
         b"vm.page_free_count",
         ctypes.byref(free_pages),
         ctypes.byref(vm_size),
         None,
         0,
     )
+    if ret != 0:
+        return 0
 
     return free_pages.value * page_size_bytes
 
