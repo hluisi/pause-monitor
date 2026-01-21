@@ -28,6 +28,67 @@ class SleepWakeEvent:
     reason: str
 
 
+@dataclass
+class PauseEvent:
+    """A detected system pause (not sleep-related)."""
+
+    timestamp: datetime
+    duration: float
+    expected: float
+    latency_ratio: float
+
+
+class PauseDetector:
+    """Detect system pauses via timing anomalies."""
+
+    def __init__(self, expected_interval: float, pause_threshold: float = 2.0):
+        """Initialize pause detector.
+
+        Args:
+            expected_interval: Expected seconds between samples
+            pause_threshold: Ratio above which is considered a pause
+        """
+        self.expected_interval = expected_interval
+        self.pause_threshold = pause_threshold
+
+    def check(
+        self,
+        actual_interval: float,
+        recent_wake: SleepWakeEvent | None = None,
+    ) -> PauseEvent | None:
+        """Check if the interval indicates a pause.
+
+        Args:
+            actual_interval: Actual time elapsed since last sample
+            recent_wake: If system recently woke from sleep
+
+        Returns:
+            PauseEvent if pause detected, None otherwise
+        """
+        latency_ratio = actual_interval / self.expected_interval
+
+        # Not a pause if ratio is below threshold
+        if latency_ratio < self.pause_threshold:
+            return None
+
+        # Not a pause if we just woke from sleep
+        if recent_wake is not None:
+            log.debug(
+                "pause_suppressed_by_wake",
+                actual=actual_interval,
+                expected=self.expected_interval,
+                wake_reason=recent_wake.reason,
+            )
+            return None
+
+        return PauseEvent(
+            timestamp=datetime.now(),
+            duration=actual_interval,
+            expected=self.expected_interval,
+            latency_ratio=latency_ratio,
+        )
+
+
 # Pattern to match pmset log entries
 PMSET_PATTERN = re.compile(
     r"(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})\s+[+-]\d{4}\s+"
