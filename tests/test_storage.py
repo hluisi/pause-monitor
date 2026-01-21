@@ -1,6 +1,7 @@
 """Tests for SQLite storage layer."""
 
 import sqlite3
+from datetime import datetime
 from pathlib import Path
 
 from pause_monitor.storage import SCHEMA_VERSION, get_schema_version, init_database
@@ -51,3 +52,92 @@ def test_init_database_sets_schema_version(tmp_path: Path):
     version = get_schema_version(conn)
     conn.close()
     assert version == SCHEMA_VERSION
+
+
+def test_sample_dataclass_fields():
+    """Sample has correct fields matching design doc."""
+    from pause_monitor.storage import Sample
+    from pause_monitor.stress import StressBreakdown
+
+    sample = Sample(
+        timestamp=datetime.now(),
+        interval=5.0,
+        cpu_pct=25.5,
+        load_avg=1.5,
+        mem_available=8_000_000_000,
+        swap_used=100_000_000,
+        io_read=1_000_000,
+        io_write=500_000,
+        net_sent=10_000,
+        net_recv=20_000,
+        cpu_temp=65.0,
+        cpu_freq=3000,
+        throttled=False,
+        gpu_pct=10.0,
+        stress=StressBreakdown(load=10, memory=5, thermal=0, latency=0, io=0),
+    )
+    assert sample.cpu_pct == 25.5
+    assert sample.stress.total == 15
+
+
+def test_insert_sample(initialized_db: Path, sample_stress):
+    """insert_sample stores sample in database."""
+    from pause_monitor.storage import Sample, insert_sample
+
+    sample = Sample(
+        timestamp=datetime.now(),
+        interval=5.0,
+        cpu_pct=25.5,
+        load_avg=1.5,
+        mem_available=8_000_000_000,
+        swap_used=100_000_000,
+        io_read=1_000_000,
+        io_write=500_000,
+        net_sent=10_000,
+        net_recv=20_000,
+        cpu_temp=65.0,
+        cpu_freq=3000,
+        throttled=False,
+        gpu_pct=10.0,
+        stress=sample_stress,
+    )
+
+    conn = sqlite3.connect(initialized_db)
+    sample_id = insert_sample(conn, sample)
+    conn.close()
+
+    assert sample_id > 0
+
+
+def test_get_recent_samples(initialized_db: Path, sample_stress):
+    """get_recent_samples returns samples in reverse chronological order."""
+    from pause_monitor.storage import Sample, get_recent_samples, insert_sample
+
+    conn = sqlite3.connect(initialized_db)
+
+    for i in range(5):
+        sample = Sample(
+            timestamp=datetime.fromtimestamp(1000000 + i * 5),
+            interval=5.0,
+            cpu_pct=10.0 + i,
+            load_avg=1.0,
+            mem_available=8_000_000_000,
+            swap_used=0,
+            io_read=0,
+            io_write=0,
+            net_sent=0,
+            net_recv=0,
+            cpu_temp=None,
+            cpu_freq=None,
+            throttled=None,
+            gpu_pct=None,
+            stress=sample_stress,
+        )
+        insert_sample(conn, sample)
+
+    samples = get_recent_samples(conn, limit=3)
+    conn.close()
+
+    assert len(samples) == 3
+    assert samples[0].cpu_pct == 14.0  # Most recent
+    assert samples[2].cpu_pct == 12.0
