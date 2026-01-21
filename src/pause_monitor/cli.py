@@ -24,11 +24,10 @@ def daemon():
 def tui():
     """Launch interactive dashboard."""
     from pause_monitor.config import Config
-    from pause_monitor.tui import PauseMonitorApp
+    from pause_monitor.tui import run_tui
 
     config = Config.load()
-    app = PauseMonitorApp(config)
-    app.run()
+    run_tui(config)
 
 
 @main.command()

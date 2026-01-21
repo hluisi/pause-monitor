@@ -1,6 +1,7 @@
 """Main TUI application."""
 
 import sqlite3
+from typing import Any
 
 from textual.app import App, ComposeResult
 from textual.widgets import DataTable, Footer, Header, Static
@@ -57,9 +58,9 @@ class MetricsPanel(Static):
 
     def __init__(self) -> None:
         super().__init__()
-        self._metrics: dict = {}
+        self._metrics: dict[str, Any] = {}
 
-    def update_metrics(self, metrics: dict) -> None:
+    def update_metrics(self, metrics: dict[str, Any]) -> None:
         """Update displayed metrics."""
         self._metrics = metrics
         lines = [
@@ -130,16 +131,38 @@ class PauseMonitorApp(App):
 
     def on_mount(self) -> None:
         """Initialize on startup."""
-        from pause_monitor.storage import get_connection
+        from pause_monitor.storage import get_connection, get_schema_version
 
         self.title = "pause-monitor"
         self.sub_title = "System Health Monitor"
 
-        # Connect to database (read-only for TUI)
+        # Check if database exists and has schema
+        if not self.config.db_path.exists():
+            self.notify(
+                "Database not found. Run 'pause-monitor daemon' first.",
+                severity="error",
+                timeout=10,
+            )
+            return
+
+        # Connect to database
         self._conn = get_connection(self.config.db_path)
+
+        # Verify schema is initialized
+        if get_schema_version(self._conn) == 0:
+            self._conn.close()
+            self._conn = None
+            self.notify(
+                "Database not initialized. Run 'pause-monitor daemon' first.",
+                severity="error",
+                timeout=10,
+            )
+            return
 
         # Start periodic refresh
         self.set_interval(1.0, self._refresh_data)
+        # Load initial data
+        self._refresh_data()
 
     def on_unmount(self) -> None:
         """Cleanup on shutdown."""
@@ -163,13 +186,49 @@ class PauseMonitorApp(App):
         if not self._conn:
             return
 
-        from pause_monitor.storage import get_recent_samples
+        from pause_monitor.storage import get_events, get_recent_samples
 
         samples = get_recent_samples(self._conn, limit=1)
         if samples:
             sample = samples[0]
+            # Update stress gauge
             stress_gauge = self.query_one("#stress-gauge", StressGauge)
             stress_gauge.update_stress(sample.stress.total)
+
+            # Update metrics panel
+            metrics_panel = self.query_one("#metrics", MetricsPanel)
+            metrics_panel.update_metrics(
+                {
+                    "cpu_pct": sample.cpu_pct or 0,
+                    "load_avg": sample.load_avg or 0,
+                    "mem_available": sample.mem_available or 0,
+                    "cpu_freq": sample.cpu_freq or 0,
+                    "throttled": sample.throttled or False,
+                }
+            )
+
+            # Update stress breakdown
+            breakdown = self.query_one("#breakdown", Static)
+            breakdown.update(
+                f"Load: {sample.stress.load:3d}  Memory: {sample.stress.memory:3d}\n"
+                f"Thermal: {sample.stress.thermal:3d}  Latency: {sample.stress.latency:3d}\n"
+                f"I/O: {sample.stress.io:3d}"
+            )
+
+        # Update events table
+        events = get_events(self._conn, limit=10)
+        events_table = self.query_one("#events", EventsTable)
+        events_table.clear()
+        for event in events:
+            culprits_str = ", ".join(event.culprits[:3]) if event.culprits else "-"
+            if len(event.culprits) > 3:
+                culprits_str += f" (+{len(event.culprits) - 3})"
+            events_table.add_row(
+                event.timestamp.strftime("%Y-%m-%d %H:%M:%S"),
+                f"{event.duration:.1f}s",
+                str(event.stress.total),
+                culprits_str,
+            )
 
     def action_refresh(self) -> None:
         """Manual refresh."""
