@@ -1,6 +1,11 @@
 """Tests for daemon core."""
 
+import signal
 from datetime import datetime
+from pathlib import Path
+from unittest.mock import AsyncMock, patch
+
+import pytest
 
 from pause_monitor.config import Config
 from pause_monitor.daemon import Daemon, DaemonState
@@ -50,3 +55,61 @@ def test_daemon_init_creates_components():
     assert daemon.io_baseline is not None
     assert daemon.pause_detector is not None
     assert daemon.core_count > 0
+
+
+@pytest.mark.asyncio
+async def test_daemon_start_initializes_database(tmp_path: Path):
+    """Daemon.start() initializes database."""
+    config = Config()
+
+    # Patch the property at the class level
+    with patch.object(Config, "data_dir", new_callable=lambda: property(lambda self: tmp_path)):
+        with patch.object(
+            Config, "db_path", new_callable=lambda: property(lambda self: tmp_path / "test.db")
+        ):
+            with patch.object(
+                Config,
+                "events_dir",
+                new_callable=lambda: property(lambda self: tmp_path / "events"),
+            ):
+                daemon = Daemon(config)
+
+                with patch.object(daemon, "_run_loop", new_callable=AsyncMock):
+                    with patch.object(daemon, "_start_caffeinate", new_callable=AsyncMock):
+                        # Start and immediately stop
+                        daemon._shutdown_event.set()
+                        await daemon.start()
+
+                        assert (tmp_path / "test.db").exists()
+
+
+@pytest.mark.asyncio
+async def test_daemon_stop_cleans_up(tmp_path: Path):
+    """Daemon.stop() cleans up resources."""
+    config = Config()
+    daemon = Daemon(config)
+
+    # Mock powermetrics
+    mock_powermetrics = AsyncMock()
+    mock_powermetrics.stop = AsyncMock()
+    daemon._powermetrics = mock_powermetrics
+
+    await daemon.stop()
+
+    # Check that stop was called (before _powermetrics was set to None)
+    mock_powermetrics.stop.assert_called_once()
+    # Verify cleanup happened
+    assert daemon._powermetrics is None
+    assert daemon.state.running is False
+
+
+@pytest.mark.asyncio
+async def test_daemon_handles_sigterm():
+    """Daemon handles SIGTERM gracefully."""
+    config = Config()
+    daemon = Daemon(config)
+
+    # Trigger SIGTERM handler
+    daemon._handle_signal(signal.SIGTERM)
+
+    assert daemon._shutdown_event.is_set()
