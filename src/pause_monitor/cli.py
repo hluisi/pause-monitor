@@ -148,7 +148,7 @@ def events(event_id: int | None, limit: int) -> None:
 
 
 @main.command()
-@click.option("--hours", "-h", default=24, help="Hours of history to show")
+@click.option("--hours", "-H", default=24, help="Hours of history to show")
 @click.option("--format", "-f", "fmt", type=click.Choice(["table", "json", "csv"]), default="table")
 def history(hours: int, fmt: str) -> None:
     """Query historical data."""
@@ -174,7 +174,7 @@ def history(hours: int, fmt: str) -> None:
         samples = [s for s in samples if s.timestamp >= cutoff]
 
         if not samples:
-            click.echo(f"No samples in the last {hours} hours.")
+            click.echo(f"No samples in the last {hours} hour{'s' if hours != 1 else ''}.")
             return
 
         if fmt == "json":

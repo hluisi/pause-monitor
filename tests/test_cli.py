@@ -430,7 +430,7 @@ class TestHistoryCommand:
             mock_config = MagicMock(spec=Config)
             mock_config.db_path = db_path
             mock_load.return_value = mock_config
-            result = runner.invoke(main, ["history", "-h", "1"])
+            result = runner.invoke(main, ["history", "-H", "1"])
 
         assert result.exit_code == 0
-        assert "No samples in the last 1 hours" in result.output
+        assert "No samples in the last 1 hour" in result.output
