@@ -2,8 +2,15 @@
 
 import plistlib
 from datetime import datetime
+from unittest.mock import AsyncMock, patch
 
-from pause_monitor.collector import parse_powermetrics_sample
+import pytest
+
+from pause_monitor.collector import (
+    PowermetricsStream,
+    StreamStatus,
+    parse_powermetrics_sample,
+)
 
 SAMPLE_PLIST = {
     "timestamp": datetime.now(),
@@ -75,3 +82,47 @@ def test_parse_powermetrics_throttled_critical():
     result = parse_powermetrics_sample(data)
 
     assert result.throttled is True
+
+
+@pytest.mark.asyncio
+async def test_powermetrics_stream_status_not_started():
+    """Stream status is NOT_STARTED before starting."""
+    stream = PowermetricsStream(interval_ms=1000)
+    assert stream.status == StreamStatus.NOT_STARTED
+
+
+@pytest.mark.asyncio
+async def test_powermetrics_stream_status_running():
+    """Stream status is RUNNING after start."""
+    stream = PowermetricsStream(interval_ms=1000)
+
+    with patch("asyncio.create_subprocess_exec") as mock_exec:
+        mock_process = AsyncMock()
+        mock_process.returncode = None
+        mock_process.stdout = AsyncMock()
+        mock_process.stdout.__aiter__ = AsyncMock(return_value=iter([]))
+        mock_exec.return_value = mock_process
+
+        await stream.start()
+        assert stream.status == StreamStatus.RUNNING
+
+        await stream.stop()
+
+
+@pytest.mark.asyncio
+async def test_powermetrics_stream_stop():
+    """Stream can be stopped cleanly."""
+    stream = PowermetricsStream(interval_ms=1000)
+
+    with patch("asyncio.create_subprocess_exec") as mock_exec:
+        mock_process = AsyncMock()
+        mock_process.returncode = None
+        mock_process.terminate = AsyncMock()
+        mock_process.wait = AsyncMock()
+        mock_exec.return_value = mock_process
+
+        await stream.start()
+        await stream.stop()
+
+        mock_process.terminate.assert_called_once()
+        assert stream.status == StreamStatus.STOPPED

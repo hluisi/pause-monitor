@@ -1,12 +1,25 @@
 """Metrics collector using powermetrics."""
 
+import asyncio
 import plistlib
+from asyncio.subprocess import Process
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
+from enum import Enum
 from typing import Any
 
 import structlog
 
 log = structlog.get_logger()
+
+
+class StreamStatus(Enum):
+    """Powermetrics stream status."""
+
+    NOT_STARTED = "not_started"
+    RUNNING = "running"
+    STOPPED = "stopped"
+    FAILED = "failed"
 
 
 @dataclass
@@ -100,3 +113,86 @@ def _extract_cpu_freq(processor: dict[str, Any]) -> int | None:
             max_freq_hz = max(max_freq_hz, freq_hz)
 
     return max_freq_hz // 1_000_000 if max_freq_hz > 0 else None
+
+
+class PowermetricsStream:
+    """Async stream of powermetrics data.
+
+    Uses streaming plist output for lower latency than exec-per-sample.
+    """
+
+    POWERMETRICS_CMD = [
+        "/usr/bin/powermetrics",
+        "--samplers",
+        "cpu_power,gpu_power,thermal",
+        "--output-format",
+        "plist",
+    ]
+
+    def __init__(self, interval_ms: int = 1000):
+        self.interval_ms = interval_ms
+        self._process: Process | None = None
+        self._status = StreamStatus.NOT_STARTED
+        self._buffer = b""
+
+    @property
+    def status(self) -> StreamStatus:
+        """Current stream status."""
+        return self._status
+
+    async def start(self) -> None:
+        """Start the powermetrics subprocess."""
+        if self._process is not None:
+            return
+
+        cmd = self.POWERMETRICS_CMD + ["-i", str(self.interval_ms)]
+
+        try:
+            self._process = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            self._status = StreamStatus.RUNNING
+            log.info("powermetrics_started", interval_ms=self.interval_ms)
+        except (FileNotFoundError, PermissionError) as e:
+            self._status = StreamStatus.FAILED
+            log.error("powermetrics_start_failed", error=str(e))
+            raise
+
+    async def stop(self) -> None:
+        """Stop the powermetrics subprocess."""
+        if self._process is None:
+            return
+
+        try:
+            self._process.terminate()
+            await self._process.wait()
+        except ProcessLookupError:
+            pass
+
+        self._process = None
+        self._status = StreamStatus.STOPPED
+        log.info("powermetrics_stopped")
+
+    async def read_samples(self) -> AsyncIterator[PowermetricsResult]:
+        """Yield parsed samples as they become available.
+
+        powermetrics outputs plists separated by NUL bytes (\\0).
+        """
+        if self._process is None or self._process.stdout is None:
+            return
+
+        async for chunk in self._process.stdout:
+            self._buffer += chunk
+
+            # powermetrics separates plists with NUL bytes
+            while b"\0" in self._buffer:
+                plist_data, self._buffer = self._buffer.split(b"\0", 1)
+
+                # Skip empty chunks
+                if not plist_data.strip():
+                    continue
+
+                result = parse_powermetrics_sample(plist_data)
+                yield result
