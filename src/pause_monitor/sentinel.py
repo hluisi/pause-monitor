@@ -88,6 +88,8 @@ class TierManager:
         # Track peak during elevated states (after escalation checks)
         if self._current_tier >= Tier.ELEVATED and stress_total > self._peak_stress:
             self._peak_stress = stress_total
+            # Only emit peak action for Tier 2 - Tier 3 is already critical.
+            # Ring buffer triggers don't include "tier3_peak" by design.
             if self._current_tier == Tier.ELEVATED:
                 action = "tier2_peak"
 

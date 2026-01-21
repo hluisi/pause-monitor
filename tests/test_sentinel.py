@@ -187,3 +187,20 @@ def test_tier_manager_peak_returns_action_on_new_peak():
 
     action = manager.update(stress_total=25)  # Not a new peak
     assert action is None
+
+
+def test_tier_manager_escalates_at_exact_threshold():
+    """Stress exactly at threshold triggers escalation."""
+    from pause_monitor.sentinel import TierManager
+
+    manager = TierManager(elevated_threshold=15, critical_threshold=50)
+
+    # Exactly at tier 2 threshold
+    action = manager.update(stress_total=15)
+    assert manager.current_tier == 2
+    assert action == "tier2_entry"
+
+    # Exactly at tier 3 threshold
+    action = manager.update(stress_total=50)
+    assert manager.current_tier == 3
+    assert action == "tier3_entry"
