@@ -241,3 +241,30 @@ async def test_run_full_capture_orchestrates_all(tmp_path: Path):
                 mock_spin.assert_called_once_with(event_dir)
                 mock_tail.assert_called_once_with(event_dir)
                 mock_logs.assert_called_once_with(event_dir, window_seconds=60)
+
+
+def test_forensics_capture_includes_ring_buffer(tmp_path):
+    """ForensicsCapture writes ring buffer contents to event dir."""
+    import json
+
+    from pause_monitor.forensics import ForensicsCapture
+    from pause_monitor.ringbuffer import RingBuffer
+    from pause_monitor.stress import StressBreakdown
+
+    # Create buffer with samples
+    buffer = RingBuffer(max_samples=10)
+    stress = StressBreakdown(load=10, memory=5, thermal=0, latency=0, io=0, gpu=0, wakeups=0)
+    buffer.push(stress, tier=1)
+    buffer.push(stress, tier=2)
+    frozen = buffer.freeze()
+
+    # Create capture with buffer
+    capture = ForensicsCapture(event_dir=tmp_path)
+    capture.write_ring_buffer(frozen)
+
+    # Verify file exists
+    assert (tmp_path / "ring_buffer.json").exists()
+
+    # Verify contents
+    data = json.loads((tmp_path / "ring_buffer.json").read_text())
+    assert len(data["samples"]) == 2

@@ -2,9 +2,13 @@
 
 import asyncio
 import json
+from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from pause_monitor.ringbuffer import BufferContents
 
 import structlog
 
@@ -62,6 +66,32 @@ class ForensicsCapture:
         """Write a binary artifact file."""
         path = self.event_dir / name
         path.write_bytes(content)
+
+    def write_ring_buffer(self, contents: "BufferContents") -> None:
+        """Write ring buffer contents to event directory."""
+        data = {
+            "samples": [
+                {
+                    "timestamp": s.timestamp.isoformat(),
+                    "stress": asdict(s.stress),
+                    "tier": s.tier,
+                }
+                for s in contents.samples
+            ],
+            "snapshots": [
+                {
+                    "timestamp": s.timestamp.isoformat(),
+                    "trigger": s.trigger,
+                    "by_cpu": [asdict(p) for p in s.by_cpu],
+                    "by_memory": [asdict(p) for p in s.by_memory],
+                }
+                for s in contents.snapshots
+            ],
+        }
+
+        path = self.event_dir / "ring_buffer.json"
+        path.write_text(json.dumps(data, indent=2))
+        log.debug("ring_buffer_written", path=str(path), samples=len(contents.samples))
 
 
 async def capture_spindump(event_dir: Path, timeout: float = 30.0) -> bool:
