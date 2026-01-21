@@ -8,7 +8,7 @@ import pytest
 from click.testing import CliRunner
 
 from pause_monitor.cli import main
-from pause_monitor.config import Config
+from pause_monitor.config import AlertsConfig, Config, RetentionConfig, SamplingConfig
 from pause_monitor.storage import Event, init_database, insert_event
 from pause_monitor.stress import StressBreakdown
 
@@ -86,9 +86,7 @@ class TestEventsCommand:
         assert "2.5s" in result.output
         assert "codemeter" in result.output
 
-    def test_events_show_specific_event(
-        self, runner: CliRunner, tmp_path: Path
-    ) -> None:
+    def test_events_show_specific_event(self, runner: CliRunner, tmp_path: Path) -> None:
         """events <id> shows a specific event."""
         db_path = tmp_path / "data.db"
         init_database(db_path)
@@ -173,9 +171,7 @@ class TestEventsCommand:
         # Count data rows (skip header and separator)
         lines = [line for line in result.output.strip().split("\n") if line.strip()]
         # Header line, separator line, 2 data lines
-        data_lines = [
-            line for line in lines if not line.startswith("ID") and "---" not in line
-        ]
+        data_lines = [line for line in lines if not line.startswith("ID") and "---" not in line]
         assert len(data_lines) == 2
 
 
@@ -220,9 +216,7 @@ class TestHistoryCommand:
         # Insert test samples
         conn = get_connection(db_path)
         for i in range(5):
-            stress = StressBreakdown(
-                load=10 + i * 5, memory=5, thermal=0, latency=0, io=0
-            )
+            stress = StressBreakdown(load=10 + i * 5, memory=5, thermal=0, latency=0, io=0)
             sample = Sample(
                 timestamp=datetime.now(),
                 interval=5.0,
@@ -351,9 +345,7 @@ class TestHistoryCommand:
         assert data_parts[1] == "15"  # stress total: 10 + 5
         assert data_parts[2] == "25.0"  # cpu_pct
 
-    def test_history_high_stress_periods(
-        self, runner: CliRunner, tmp_path: Path
-    ) -> None:
+    def test_history_high_stress_periods(self, runner: CliRunner, tmp_path: Path) -> None:
         """history shows high stress period summary when present."""
         from pause_monitor.storage import Sample, get_connection, insert_sample
 
@@ -434,3 +426,197 @@ class TestHistoryCommand:
 
         assert result.exit_code == 0
         assert "No samples in the last 1 hour" in result.output
+
+
+def _make_path_prop(path: Path):
+    """Create a property that returns a fixed path."""
+    return property(lambda self: path)
+
+
+class TestConfigCommand:
+    """Tests for the config command group."""
+
+    def test_config_show_defaults(self, runner: CliRunner, tmp_path: Path) -> None:
+        """config show displays default values when no config file exists."""
+        config_path = tmp_path / "config.toml"
+
+        with patch.object(Config, "config_path", new_callable=lambda: _make_path_prop(config_path)):
+            result = runner.invoke(main, ["config", "show"])
+
+        assert result.exit_code == 0
+        assert "Config file:" in result.output
+        assert "Exists: False" in result.output
+        assert "[sampling]" in result.output
+        assert "normal_interval = 5" in result.output
+        assert "elevated_interval = 1" in result.output
+        assert "elevation_threshold = 30" in result.output
+        assert "critical_threshold = 60" in result.output
+        assert "[retention]" in result.output
+        assert "samples_days = 30" in result.output
+        assert "events_days = 90" in result.output
+        assert "[alerts]" in result.output
+        assert "enabled = True" in result.output
+        assert "sound = True" in result.output
+        assert "learning_mode = False" in result.output
+
+    def test_config_show_custom_values(self, runner: CliRunner, tmp_path: Path) -> None:
+        """config show displays custom values from config file."""
+        config_path = tmp_path / "config.toml"
+
+        # Create a custom config
+        custom_config = Config(
+            sampling=SamplingConfig(
+                normal_interval=10,
+                elevated_interval=2,
+                elevation_threshold=40,
+                critical_threshold=70,
+            ),
+            retention=RetentionConfig(samples_days=14, events_days=60),
+            alerts=AlertsConfig(enabled=False, sound=False),
+            learning_mode=True,
+        )
+        custom_config.save(config_path)
+
+        with patch.object(Config, "config_path", new_callable=lambda: _make_path_prop(config_path)):
+            result = runner.invoke(main, ["config", "show"])
+
+        assert result.exit_code == 0
+        assert "Exists: True" in result.output
+        assert "normal_interval = 10" in result.output
+        assert "elevated_interval = 2" in result.output
+        assert "elevation_threshold = 40" in result.output
+        assert "critical_threshold = 70" in result.output
+        assert "samples_days = 14" in result.output
+        assert "events_days = 60" in result.output
+        assert "enabled = False" in result.output
+        assert "sound = False" in result.output
+        assert "learning_mode = True" in result.output
+
+    def test_config_edit_creates_default(self, runner: CliRunner, tmp_path: Path) -> None:
+        """config edit creates default config if it doesn't exist."""
+        config_path = tmp_path / "config.toml"
+
+        with (
+            patch.object(Config, "config_path", new_callable=lambda: _make_path_prop(config_path)),
+            patch.object(Config, "config_dir", new_callable=lambda: _make_path_prop(tmp_path)),
+            patch("subprocess.run") as mock_run,
+            patch.dict("os.environ", {"EDITOR": "vim"}),
+        ):
+            result = runner.invoke(main, ["config", "edit"])
+
+        assert result.exit_code == 0
+        assert f"Created default config at {config_path}" in result.output
+        assert config_path.exists()
+        mock_run.assert_called_once_with(["vim", str(config_path)])
+
+    def test_config_edit_opens_existing(self, runner: CliRunner, tmp_path: Path) -> None:
+        """config edit opens existing config without creating new."""
+        config_path = tmp_path / "config.toml"
+
+        # Create existing config
+        existing_config = Config()
+        existing_config.save(config_path)
+
+        with (
+            patch.object(Config, "config_path", new_callable=lambda: _make_path_prop(config_path)),
+            patch("subprocess.run") as mock_run,
+            patch.dict("os.environ", {"EDITOR": "nano"}),
+        ):
+            result = runner.invoke(main, ["config", "edit"])
+
+        assert result.exit_code == 0
+        assert "Created default config" not in result.output
+        mock_run.assert_called_once_with(["nano", str(config_path)])
+
+    def test_config_edit_uses_default_editor(self, runner: CliRunner, tmp_path: Path) -> None:
+        """config edit uses nano when EDITOR is not set."""
+        config_path = tmp_path / "config.toml"
+        config_path.write_text("")
+
+        with (
+            patch.object(Config, "config_path", new_callable=lambda: _make_path_prop(config_path)),
+            patch("subprocess.run") as mock_run,
+            patch.dict("os.environ", {}, clear=True),
+        ):
+            # Ensure EDITOR is not set
+            import os
+
+            os.environ.pop("EDITOR", None)
+            result = runner.invoke(main, ["config", "edit"])
+
+        assert result.exit_code == 0
+        mock_run.assert_called_once_with(["nano", str(config_path)])
+
+    def test_config_reset_with_confirmation(self, runner: CliRunner, tmp_path: Path) -> None:
+        """config reset resets config when user confirms."""
+        config_path = tmp_path / "config.toml"
+
+        # Create custom config first
+        custom_config = Config(
+            sampling=SamplingConfig(normal_interval=99),
+            learning_mode=True,
+        )
+        custom_config.save(config_path)
+
+        with (
+            patch.object(Config, "config_path", new_callable=lambda: _make_path_prop(config_path)),
+            patch.object(Config, "config_dir", new_callable=lambda: _make_path_prop(tmp_path)),
+        ):
+            result = runner.invoke(main, ["config", "reset", "--yes"])
+
+        assert result.exit_code == 0
+        assert f"Config reset to defaults at {config_path}" in result.output
+
+        # Verify defaults were written
+        reset_config = Config.load(config_path)
+        assert reset_config.sampling.normal_interval == 5
+        assert reset_config.learning_mode is False
+
+    def test_config_reset_without_confirmation(self, runner: CliRunner, tmp_path: Path) -> None:
+        """config reset aborts without --yes flag."""
+        config_path = tmp_path / "config.toml"
+
+        # Create custom config first
+        custom_config = Config(
+            sampling=SamplingConfig(normal_interval=99),
+        )
+        custom_config.save(config_path)
+
+        with patch.object(Config, "config_path", new_callable=lambda: _make_path_prop(config_path)):
+            result = runner.invoke(main, ["config", "reset"])
+
+        assert result.exit_code == 1
+        assert "Aborted" in result.output
+
+        # Verify config was NOT reset
+        unchanged_config = Config.load(config_path)
+        assert unchanged_config.sampling.normal_interval == 99
+
+    def test_config_reset_interactive_yes(self, runner: CliRunner, tmp_path: Path) -> None:
+        """config reset resets when user types 'y' interactively."""
+        config_path = tmp_path / "config.toml"
+
+        custom_config = Config(sampling=SamplingConfig(normal_interval=99))
+        custom_config.save(config_path)
+
+        with (
+            patch.object(Config, "config_path", new_callable=lambda: _make_path_prop(config_path)),
+            patch.object(Config, "config_dir", new_callable=lambda: _make_path_prop(tmp_path)),
+        ):
+            result = runner.invoke(main, ["config", "reset"], input="y\n")
+
+        assert result.exit_code == 0
+        assert "Config reset to defaults" in result.output
+
+    def test_config_reset_interactive_no(self, runner: CliRunner, tmp_path: Path) -> None:
+        """config reset aborts when user types 'n' interactively."""
+        config_path = tmp_path / "config.toml"
+
+        custom_config = Config(sampling=SamplingConfig(normal_interval=99))
+        custom_config.save(config_path)
+
+        with patch.object(Config, "config_path", new_callable=lambda: _make_path_prop(config_path)):
+            result = runner.invoke(main, ["config", "reset"], input="n\n")
+
+        assert result.exit_code == 1
+        assert "Aborted" in result.output

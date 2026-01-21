@@ -5,13 +5,13 @@ import click
 
 @click.group()
 @click.version_option()
-def main():
+def main() -> None:
     """Track down intermittent macOS system pauses."""
     pass
 
 
 @main.command()
-def daemon():
+def daemon() -> None:
     """Run the background sampler."""
     import asyncio
 
@@ -21,7 +21,7 @@ def daemon():
 
 
 @main.command()
-def tui():
+def tui() -> None:
     """Launch interactive dashboard."""
     from pause_monitor.config import Config
     from pause_monitor.tui import run_tui
@@ -197,8 +197,10 @@ def history(hours: int, fmt: str) -> None:
             stresses = [s.stress.total for s in samples]
             click.echo(f"Samples: {len(samples)}")
             click.echo(f"Time range: {samples[-1].timestamp} to {samples[0].timestamp}")
-            click.echo(f"Stress - Min: {min(stresses)}, Max: {max(stresses)}, "
-                       f"Avg: {sum(stresses)/len(stresses):.1f}")
+            click.echo(
+                f"Stress - Min: {min(stresses)}, Max: {max(stresses)}, "
+                f"Avg: {sum(stresses) / len(stresses):.1f}"
+            )
 
             # High stress periods
             high_stress = [s for s in samples if s.stress.total >= 30]
@@ -209,14 +211,77 @@ def history(hours: int, fmt: str) -> None:
         conn.close()
 
 
+@main.group()
+def config() -> None:
+    """Manage configuration."""
+    pass
+
+
+@config.command("show")
+def config_show() -> None:
+    """Display current configuration."""
+    from pause_monitor.config import Config
+
+    cfg = Config.load()
+
+    click.echo(f"Config file: {cfg.config_path}")
+    click.echo(f"Exists: {cfg.config_path.exists()}")
+    click.echo()
+    click.echo("[sampling]")
+    click.echo(f"  normal_interval = {cfg.sampling.normal_interval}")
+    click.echo(f"  elevated_interval = {cfg.sampling.elevated_interval}")
+    click.echo(f"  elevation_threshold = {cfg.sampling.elevation_threshold}")
+    click.echo(f"  critical_threshold = {cfg.sampling.critical_threshold}")
+    click.echo()
+    click.echo("[retention]")
+    click.echo(f"  samples_days = {cfg.retention.samples_days}")
+    click.echo(f"  events_days = {cfg.retention.events_days}")
+    click.echo()
+    click.echo("[alerts]")
+    click.echo(f"  enabled = {cfg.alerts.enabled}")
+    click.echo(f"  sound = {cfg.alerts.sound}")
+    click.echo()
+    click.echo(f"learning_mode = {cfg.learning_mode}")
+
+
+@config.command("edit")
+def config_edit() -> None:
+    """Open config file in editor."""
+    import os
+    import subprocess
+
+    from pause_monitor.config import Config
+
+    cfg = Config.load()
+
+    # Create config if it doesn't exist
+    if not cfg.config_path.exists():
+        cfg.save()
+        click.echo(f"Created default config at {cfg.config_path}")
+
+    editor = os.environ.get("EDITOR", "nano")
+    subprocess.run([editor, str(cfg.config_path)])
+
+
+@config.command("reset")
+@click.confirmation_option(prompt="Reset config to defaults?")
+def config_reset() -> None:
+    """Reset configuration to defaults."""
+    from pause_monitor.config import Config
+
+    cfg = Config()
+    cfg.save()
+    click.echo(f"Config reset to defaults at {cfg.config_path}")
+
+
 @main.command()
-def install():
+def install() -> None:
     """Set up launchd service."""
     click.echo("Install not yet implemented")
 
 
 @main.command()
-def uninstall():
+def uninstall() -> None:
     """Remove launchd service."""
     click.echo("Uninstall not yet implemented")
 
