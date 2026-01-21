@@ -112,6 +112,11 @@ def init_database(db_path: Path) -> None:
         conn.close()
 
 
+def get_connection(db_path: Path) -> sqlite3.Connection:
+    """Get a database connection."""
+    return sqlite3.connect(db_path)
+
+
 def get_schema_version(conn: sqlite3.Connection) -> int:
     """Get current schema version from database."""
     try:

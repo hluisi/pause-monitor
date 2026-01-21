@@ -23,7 +23,12 @@ def daemon():
 @main.command()
 def tui():
     """Launch interactive dashboard."""
-    click.echo("TUI not yet implemented")
+    from pause_monitor.config import Config
+    from pause_monitor.tui import PauseMonitorApp
+
+    config = Config.load()
+    app = PauseMonitorApp(config)
+    app.run()
 
 
 @main.command()
