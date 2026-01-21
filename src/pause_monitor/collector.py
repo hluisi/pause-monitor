@@ -1,7 +1,10 @@
 """Metrics collector using powermetrics."""
 
 import asyncio
+import ctypes
+import os
 import plistlib
+import subprocess
 from asyncio.subprocess import Process
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
@@ -11,6 +14,116 @@ from typing import Any
 import structlog
 
 log = structlog.get_logger()
+
+
+@dataclass
+class SystemMetrics:
+    """Non-powermetrics system metrics."""
+
+    load_avg: float
+    mem_available: int
+    swap_used: int
+    io_read: int
+    io_write: int
+    net_sent: int
+    net_recv: int
+
+
+def get_core_count() -> int:
+    """Get number of CPU cores."""
+    return os.cpu_count() or 1
+
+
+def get_system_metrics() -> SystemMetrics:
+    """Get system metrics not provided by powermetrics.
+
+    Uses os module and sysctl for most metrics.
+    """
+    # Load average
+    load_avg = os.getloadavg()[0]  # 1-minute average
+
+    # Memory via sysctl (faster than subprocess)
+    mem_available = _get_memory_available()
+
+    # Swap via sysctl
+    swap_used = _get_swap_used()
+
+    # I/O counters via ioreg (macOS specific)
+    io_read, io_write = _get_io_counters()
+
+    # Network counters via netstat
+    net_sent, net_recv = _get_network_counters()
+
+    return SystemMetrics(
+        load_avg=load_avg,
+        mem_available=mem_available,
+        swap_used=swap_used,
+        io_read=io_read,
+        io_write=io_write,
+        net_sent=net_sent,
+        net_recv=net_recv,
+    )
+
+
+def _get_memory_available() -> int:
+    """Get available memory in bytes via sysctl."""
+    libc = ctypes.CDLL("/usr/lib/libc.dylib")
+
+    # Get page size
+    page_size = ctypes.c_size_t(4)
+    page_value = ctypes.c_int()
+    libc.sysctlbyname(
+        b"hw.pagesize",
+        ctypes.byref(page_value),
+        ctypes.byref(page_size),
+        None,
+        0,
+    )
+    page_size_bytes = page_value.value
+
+    # Get free + inactive pages as "available"
+    vm_size = ctypes.c_size_t(4)
+    free_pages = ctypes.c_int()
+    libc.sysctlbyname(
+        b"vm.page_free_count",
+        ctypes.byref(free_pages),
+        ctypes.byref(vm_size),
+        None,
+        0,
+    )
+
+    return free_pages.value * page_size_bytes
+
+
+def _get_swap_used() -> int:
+    """Get swap usage in bytes."""
+    try:
+        result = subprocess.run(
+            ["sysctl", "-n", "vm.swapusage"],
+            capture_output=True,
+            text=True,
+            timeout=1,
+        )
+        # Parse: "total = 1024.00M  used = 256.00M  free = 768.00M"
+        parts = result.stdout.split()
+        for i, part in enumerate(parts):
+            if part.endswith("M") and i >= 2 and parts[i - 2] == "used":
+                return int(float(part[:-1]) * 1024 * 1024)
+        return 0
+    except (subprocess.TimeoutExpired, IndexError, ValueError):
+        return 0
+
+
+def _get_io_counters() -> tuple[int, int]:
+    """Get disk I/O bytes (read, write)."""
+    # Placeholder - actual implementation would use IOKit
+    return 0, 0
+
+
+def _get_network_counters() -> tuple[int, int]:
+    """Get network bytes (sent, received)."""
+    # Placeholder - actual implementation would parse netstat
+    return 0, 0
 
 
 class StreamStatus(Enum):
