@@ -33,7 +33,56 @@ def tui():
 @main.command()
 def status():
     """Quick health check."""
-    click.echo("Status not yet implemented")
+    import sqlite3
+    from datetime import datetime, timedelta
+
+    from pause_monitor.config import Config
+    from pause_monitor.storage import get_events, get_recent_samples
+
+    config = Config.load()
+
+    if not config.db_path.exists():
+        click.echo("Database not found. Run 'pause-monitor daemon' first.")
+        return
+
+    conn = sqlite3.connect(config.db_path)
+
+    # Get latest sample
+    samples = get_recent_samples(conn, limit=1)
+
+    if not samples:
+        click.echo("No samples collected yet.")
+        conn.close()
+        return
+
+    latest = samples[0]
+    age = (datetime.now() - latest.timestamp).total_seconds()
+
+    # Check if daemon is running
+    daemon_status = "running" if age < 30 else "stopped"
+
+    click.echo(f"Daemon: {daemon_status}")
+    click.echo(f"Last sample: {int(age)}s ago")
+    click.echo(f"Stress: {latest.stress.total}/100")
+    click.echo(
+        f"  Load: {latest.stress.load}, Memory: {latest.stress.memory}, "
+        f"Thermal: {latest.stress.thermal}, Latency: {latest.stress.latency}, "
+        f"I/O: {latest.stress.io}"
+    )
+
+    # Get recent events
+    events = get_events(
+        conn,
+        start=datetime.now() - timedelta(days=1),
+        limit=5,
+    )
+
+    if events:
+        click.echo(f"\nRecent events (last 24h): {len(events)}")
+        for event in events[:3]:
+            click.echo(f"  - {event.timestamp.strftime('%H:%M:%S')}: {event.duration:.1f}s pause")
+
+    conn.close()
 
 
 @main.command()
