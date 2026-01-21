@@ -211,6 +211,42 @@ def history(hours: int, fmt: str) -> None:
         conn.close()
 
 
+@main.command()
+@click.option("--samples-days", default=None, type=int, help="Override sample retention days")
+@click.option("--events-days", default=None, type=int, help="Override event retention days")
+@click.option("--dry-run", is_flag=True, help="Show what would be deleted")
+def prune(samples_days: int | None, events_days: int | None, dry_run: bool) -> None:
+    """Delete old data per retention policy."""
+    from pause_monitor.config import Config
+    from pause_monitor.storage import get_connection, prune_old_data
+
+    config = Config.load()
+
+    if not config.db_path.exists():
+        click.echo("Database not found.")
+        return
+
+    samples_days = samples_days or config.retention.samples_days
+    events_days = events_days or config.retention.events_days
+
+    if dry_run:
+        click.echo(f"Would prune samples older than {samples_days} days")
+        click.echo(f"Would prune events older than {events_days} days")
+        return
+
+    conn = get_connection(config.db_path)
+    try:
+        samples_deleted, events_deleted = prune_old_data(
+            conn,
+            samples_days=samples_days,
+            events_days=events_days,
+        )
+    finally:
+        conn.close()
+
+    click.echo(f"Deleted {samples_deleted} samples, {events_deleted} events")
+
+
 @main.group()
 def config() -> None:
     """Manage configuration."""

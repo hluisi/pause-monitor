@@ -428,6 +428,164 @@ class TestHistoryCommand:
         assert "No samples in the last 1 hour" in result.output
 
 
+class TestPruneCommand:
+    """Tests for the prune command."""
+
+    def test_prune_no_database(self, runner: CliRunner, tmp_path: Path) -> None:
+        """prune with no database shows message."""
+        mock_db_path = tmp_path / "nonexistent" / "data.db"
+
+        with patch("pause_monitor.config.Config.load") as mock_load:
+            mock_config = MagicMock(spec=Config)
+            mock_config.db_path = mock_db_path
+            mock_load.return_value = mock_config
+            result = runner.invoke(main, ["prune"])
+
+        assert result.exit_code == 0
+        assert "Database not found" in result.output
+
+    def test_prune_dry_run(self, runner: CliRunner, tmp_path: Path) -> None:
+        """prune --dry-run shows what would be deleted."""
+        db_path = tmp_path / "data.db"
+        init_database(db_path)
+
+        with patch("pause_monitor.config.Config.load") as mock_load:
+            mock_config = MagicMock()
+            mock_config.db_path = db_path
+            mock_config.retention.samples_days = 30
+            mock_config.retention.events_days = 90
+            mock_load.return_value = mock_config
+            result = runner.invoke(main, ["prune", "--dry-run"])
+
+        assert result.exit_code == 0
+        assert "Would prune samples older than 30 days" in result.output
+        assert "Would prune events older than 90 days" in result.output
+
+    def test_prune_dry_run_with_override(self, runner: CliRunner, tmp_path: Path) -> None:
+        """prune --dry-run with overrides shows custom values."""
+        db_path = tmp_path / "data.db"
+        init_database(db_path)
+
+        with patch("pause_monitor.config.Config.load") as mock_load:
+            mock_config = MagicMock()
+            mock_config.db_path = db_path
+            mock_config.retention.samples_days = 30
+            mock_config.retention.events_days = 90
+            mock_load.return_value = mock_config
+            result = runner.invoke(
+                main, ["prune", "--dry-run", "--samples-days", "7", "--events-days", "14"]
+            )
+
+        assert result.exit_code == 0
+        assert "Would prune samples older than 7 days" in result.output
+        assert "Would prune events older than 14 days" in result.output
+
+    def test_prune_deletes_old_data(self, runner: CliRunner, tmp_path: Path) -> None:
+        """prune deletes old samples and events."""
+        import sqlite3
+        import time
+
+        from pause_monitor.storage import Sample, insert_sample
+
+        db_path = tmp_path / "data.db"
+        init_database(db_path)
+
+        # Insert old sample (40 days ago)
+        conn = sqlite3.connect(db_path)
+        stress = StressBreakdown(load=10, memory=5, thermal=0, latency=0, io=0)
+        old_sample = Sample(
+            timestamp=datetime.fromtimestamp(time.time() - 40 * 86400),
+            interval=5.0,
+            cpu_pct=25.0,
+            load_avg=1.5,
+            mem_available=8000000000,
+            swap_used=0,
+            io_read=0,
+            io_write=0,
+            net_sent=0,
+            net_recv=0,
+            cpu_temp=None,
+            cpu_freq=None,
+            throttled=None,
+            gpu_pct=None,
+            stress=stress,
+        )
+        insert_sample(conn, old_sample)
+        conn.close()
+
+        with patch("pause_monitor.config.Config.load") as mock_load:
+            mock_config = MagicMock()
+            mock_config.db_path = db_path
+            mock_config.retention.samples_days = 30
+            mock_config.retention.events_days = 90
+            mock_load.return_value = mock_config
+            result = runner.invoke(main, ["prune"])
+
+        assert result.exit_code == 0
+        assert "Deleted 1 samples, 0 events" in result.output
+
+    def test_prune_with_nothing_to_delete(self, runner: CliRunner, tmp_path: Path) -> None:
+        """prune with no old data shows zeros."""
+        db_path = tmp_path / "data.db"
+        init_database(db_path)
+
+        with patch("pause_monitor.config.Config.load") as mock_load:
+            mock_config = MagicMock()
+            mock_config.db_path = db_path
+            mock_config.retention.samples_days = 30
+            mock_config.retention.events_days = 90
+            mock_load.return_value = mock_config
+            result = runner.invoke(main, ["prune"])
+
+        assert result.exit_code == 0
+        assert "Deleted 0 samples, 0 events" in result.output
+
+    def test_prune_samples_days_override(self, runner: CliRunner, tmp_path: Path) -> None:
+        """prune --samples-days overrides config value."""
+        import sqlite3
+        import time
+
+        from pause_monitor.storage import Sample, insert_sample
+
+        db_path = tmp_path / "data.db"
+        init_database(db_path)
+
+        # Insert sample 10 days ago (would be kept with default 30 days)
+        conn = sqlite3.connect(db_path)
+        stress = StressBreakdown(load=10, memory=5, thermal=0, latency=0, io=0)
+        sample = Sample(
+            timestamp=datetime.fromtimestamp(time.time() - 10 * 86400),
+            interval=5.0,
+            cpu_pct=25.0,
+            load_avg=1.5,
+            mem_available=8000000000,
+            swap_used=0,
+            io_read=0,
+            io_write=0,
+            net_sent=0,
+            net_recv=0,
+            cpu_temp=None,
+            cpu_freq=None,
+            throttled=None,
+            gpu_pct=None,
+            stress=stress,
+        )
+        insert_sample(conn, sample)
+        conn.close()
+
+        with patch("pause_monitor.config.Config.load") as mock_load:
+            mock_config = MagicMock()
+            mock_config.db_path = db_path
+            mock_config.retention.samples_days = 30
+            mock_config.retention.events_days = 90
+            mock_load.return_value = mock_config
+            # Override to 7 days, so 10-day-old sample will be deleted
+            result = runner.invoke(main, ["prune", "--samples-days", "7"])
+
+        assert result.exit_code == 0
+        assert "Deleted 1 samples" in result.output
+
+
 def _make_path_prop(path: Path):
     """Create a property that returns a fixed path."""
     return property(lambda self: path)

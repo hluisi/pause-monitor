@@ -348,3 +348,55 @@ def get_event_by_id(conn: sqlite3.Connection, event_id: int) -> Event | None:
         event_dir=row[10],
         notes=row[11],
     )
+
+
+def prune_old_data(
+    conn: sqlite3.Connection,
+    samples_days: int = 30,
+    events_days: int = 90,
+) -> tuple[int, int]:
+    """Delete old samples and events.
+
+    Args:
+        conn: Database connection
+        samples_days: Delete samples older than this
+        events_days: Delete events older than this
+
+    Returns:
+        Tuple of (samples_deleted, events_deleted)
+    """
+    cutoff_samples = time.time() - (samples_days * 86400)
+    cutoff_events = time.time() - (events_days * 86400)
+
+    # Delete old process samples first (foreign key)
+    conn.execute(
+        """
+        DELETE FROM process_samples
+        WHERE sample_id IN (SELECT id FROM samples WHERE timestamp < ?)
+        """,
+        (cutoff_samples,),
+    )
+
+    # Delete old samples
+    cursor = conn.execute(
+        "DELETE FROM samples WHERE timestamp < ?",
+        (cutoff_samples,),
+    )
+    samples_deleted = cursor.rowcount
+
+    # Delete old events
+    cursor = conn.execute(
+        "DELETE FROM events WHERE timestamp < ?",
+        (cutoff_events,),
+    )
+    events_deleted = cursor.rowcount
+
+    conn.commit()
+
+    log.info(
+        "prune_complete",
+        samples_deleted=samples_deleted,
+        events_deleted=events_deleted,
+    )
+
+    return samples_deleted, events_deleted

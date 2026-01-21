@@ -242,3 +242,206 @@ def test_get_event_by_id_not_found(initialized_db: Path):
     conn.close()
 
     assert result is None
+
+
+def test_prune_old_data_deletes_old_samples(initialized_db: Path, sample_stress):
+    """prune_old_data deletes samples older than cutoff."""
+    import time
+
+    from pause_monitor.storage import Sample, insert_sample, prune_old_data
+
+    conn = sqlite3.connect(initialized_db)
+
+    # Insert old sample (40 days ago)
+    old_sample = Sample(
+        timestamp=datetime.fromtimestamp(time.time() - 40 * 86400),
+        interval=5.0,
+        cpu_pct=25.0,
+        load_avg=1.5,
+        mem_available=8_000_000_000,
+        swap_used=0,
+        io_read=0,
+        io_write=0,
+        net_sent=0,
+        net_recv=0,
+        cpu_temp=None,
+        cpu_freq=None,
+        throttled=None,
+        gpu_pct=None,
+        stress=sample_stress,
+    )
+    insert_sample(conn, old_sample)
+
+    # Insert recent sample (1 day ago)
+    recent_sample = Sample(
+        timestamp=datetime.fromtimestamp(time.time() - 1 * 86400),
+        interval=5.0,
+        cpu_pct=30.0,
+        load_avg=2.0,
+        mem_available=8_000_000_000,
+        swap_used=0,
+        io_read=0,
+        io_write=0,
+        net_sent=0,
+        net_recv=0,
+        cpu_temp=None,
+        cpu_freq=None,
+        throttled=None,
+        gpu_pct=None,
+        stress=sample_stress,
+    )
+    insert_sample(conn, recent_sample)
+
+    # Prune samples older than 30 days
+    samples_deleted, events_deleted = prune_old_data(conn, samples_days=30, events_days=90)
+
+    # Verify old sample was deleted, recent kept
+    count = conn.execute("SELECT COUNT(*) FROM samples").fetchone()[0]
+    conn.close()
+
+    assert samples_deleted == 1
+    assert events_deleted == 0
+    assert count == 1
+
+
+def test_prune_old_data_deletes_old_events(initialized_db: Path, sample_stress):
+    """prune_old_data deletes events older than cutoff."""
+    import time
+
+    from pause_monitor.storage import Event, insert_event, prune_old_data
+
+    conn = sqlite3.connect(initialized_db)
+
+    # Insert old event (100 days ago)
+    old_event = Event(
+        timestamp=datetime.fromtimestamp(time.time() - 100 * 86400),
+        duration=2.5,
+        stress=sample_stress,
+        culprits=["test_process"],
+        event_dir=None,
+        notes=None,
+    )
+    insert_event(conn, old_event)
+
+    # Insert recent event (30 days ago)
+    recent_event = Event(
+        timestamp=datetime.fromtimestamp(time.time() - 30 * 86400),
+        duration=1.5,
+        stress=sample_stress,
+        culprits=["another_process"],
+        event_dir=None,
+        notes=None,
+    )
+    insert_event(conn, recent_event)
+
+    # Prune events older than 90 days
+    samples_deleted, events_deleted = prune_old_data(conn, samples_days=30, events_days=90)
+
+    # Verify old event was deleted, recent kept
+    count = conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+    conn.close()
+
+    assert samples_deleted == 0
+    assert events_deleted == 1
+    assert count == 1
+
+
+def test_prune_old_data_deletes_process_samples(initialized_db: Path, sample_stress):
+    """prune_old_data deletes process_samples linked to old samples."""
+    import time
+
+    from pause_monitor.storage import Sample, insert_sample, prune_old_data
+
+    conn = sqlite3.connect(initialized_db)
+
+    # Insert old sample (40 days ago)
+    old_sample = Sample(
+        timestamp=datetime.fromtimestamp(time.time() - 40 * 86400),
+        interval=5.0,
+        cpu_pct=25.0,
+        load_avg=1.5,
+        mem_available=8_000_000_000,
+        swap_used=0,
+        io_read=0,
+        io_write=0,
+        net_sent=0,
+        net_recv=0,
+        cpu_temp=None,
+        cpu_freq=None,
+        throttled=None,
+        gpu_pct=None,
+        stress=sample_stress,
+    )
+    sample_id = insert_sample(conn, old_sample)
+
+    # Insert process sample linked to the old sample
+    conn.execute(
+        """
+        INSERT INTO process_samples (sample_id, pid, name, cpu_pct, mem_pct)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (sample_id, 123, "test_process", 50.0, 10.0),
+    )
+    conn.commit()
+
+    # Verify process sample exists
+    proc_count_before = conn.execute("SELECT COUNT(*) FROM process_samples").fetchone()[0]
+    assert proc_count_before == 1
+
+    # Prune
+    prune_old_data(conn, samples_days=30, events_days=90)
+
+    # Verify process sample was deleted
+    proc_count_after = conn.execute("SELECT COUNT(*) FROM process_samples").fetchone()[0]
+    sample_count = conn.execute("SELECT COUNT(*) FROM samples").fetchone()[0]
+    conn.close()
+
+    assert proc_count_after == 0
+    assert sample_count == 0
+
+
+def test_prune_old_data_with_nothing_to_delete(initialized_db: Path, sample_stress):
+    """prune_old_data returns zeros when nothing to delete."""
+    import time
+
+    from pause_monitor.storage import Event, Sample, insert_event, insert_sample, prune_old_data
+
+    conn = sqlite3.connect(initialized_db)
+
+    # Insert recent sample (1 day ago)
+    recent_sample = Sample(
+        timestamp=datetime.fromtimestamp(time.time() - 1 * 86400),
+        interval=5.0,
+        cpu_pct=30.0,
+        load_avg=2.0,
+        mem_available=8_000_000_000,
+        swap_used=0,
+        io_read=0,
+        io_write=0,
+        net_sent=0,
+        net_recv=0,
+        cpu_temp=None,
+        cpu_freq=None,
+        throttled=None,
+        gpu_pct=None,
+        stress=sample_stress,
+    )
+    insert_sample(conn, recent_sample)
+
+    # Insert recent event (10 days ago)
+    recent_event = Event(
+        timestamp=datetime.fromtimestamp(time.time() - 10 * 86400),
+        duration=1.5,
+        stress=sample_stress,
+        culprits=[],
+        event_dir=None,
+        notes=None,
+    )
+    insert_event(conn, recent_event)
+
+    # Prune with default retention
+    samples_deleted, events_deleted = prune_old_data(conn, samples_days=30, events_days=90)
+    conn.close()
+
+    assert samples_deleted == 0
+    assert events_deleted == 0
