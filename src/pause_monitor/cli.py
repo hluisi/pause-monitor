@@ -318,26 +318,40 @@ def config_reset() -> None:
 
 
 @main.command()
-@click.option("--user", is_flag=True, default=True, help="Install for current user (default)")
 @click.option("--system", "system_wide", is_flag=True, help="Install system-wide (requires root)")
-def install(user: bool, system_wide: bool) -> None:
+@click.option("--force", is_flag=True, help="Overwrite existing plist without prompting")
+def install(system_wide: bool, force: bool) -> None:
     """Set up launchd service."""
     import os
     import subprocess
     import sys
     from pathlib import Path
 
+    label = "com.pause-monitor.daemon"
+
+    # Check root for system-wide install
+    if system_wide and os.getuid() != 0:
+        click.echo("Error: --system requires root privileges. Use sudo.", err=True)
+        raise SystemExit(1)
+
     # Determine paths
     if system_wide:
         plist_dir = Path("/Library/LaunchDaemons")
         service_target = "system"
-        label = "com.pause-monitor.daemon"
     else:
         plist_dir = Path.home() / "Library" / "LaunchAgents"
         service_target = f"gui/{os.getuid()}"
-        label = "com.pause-monitor.daemon"
 
     plist_path = plist_dir / f"{label}.plist"
+
+    # Check for existing plist
+    if plist_path.exists() and not force:
+        if not click.confirm(f"Plist already exists at {plist_path}. Overwrite?"):
+            return
+
+    # Create log directory if needed
+    log_dir = Path.home() / ".local" / "share" / "pause-monitor"
+    log_dir.mkdir(parents=True, exist_ok=True)
 
     # Get Python path
     python_path = sys.executable

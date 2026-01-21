@@ -862,7 +862,9 @@ class TestInstallCommand:
             patch("pathlib.Path.home", return_value=tmp_path),
             patch("pathlib.Path.mkdir"),
             patch("pathlib.Path.write_text"),
+            patch("pathlib.Path.exists", return_value=False),
             patch("subprocess.run") as mock_run,
+            patch("os.getuid", return_value=0),  # Pretend to be root
         ):
             result = runner.invoke(main, ["install", "--system"])
 
@@ -1003,3 +1005,94 @@ class TestInstallCommand:
         # Check that log paths use the mocked home directory
         expected_log_path = f"{tmp_path}/.local/share/pause-monitor/daemon.log"
         assert f"<string>{expected_log_path}</string>" in content
+
+    def test_install_system_requires_root(self, runner: CliRunner, tmp_path: Path) -> None:
+        """install --system fails without root privileges."""
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("os.getuid", return_value=501),  # Non-root user
+        ):
+            result = runner.invoke(main, ["install", "--system"])
+
+        assert result.exit_code == 1
+        assert "Error: --system requires root privileges" in result.output
+        assert "sudo" in result.output
+
+    def test_install_existing_plist_prompts(self, runner: CliRunner, tmp_path: Path) -> None:
+        """install prompts when plist already exists."""
+        plist_dir = tmp_path / "Library" / "LaunchAgents"
+        plist_dir.mkdir(parents=True)
+        plist_path = plist_dir / "com.pause-monitor.daemon.plist"
+        plist_path.write_text("existing content")
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("os.getuid", return_value=501),
+            patch("subprocess.run"),
+        ):
+            # User declines to overwrite
+            result = runner.invoke(main, ["install"], input="n\n")
+
+        assert result.exit_code == 0
+        assert "already exists" in result.output
+        assert "Overwrite?" in result.output
+        # Plist should still have original content
+        assert plist_path.read_text() == "existing content"
+
+    def test_install_existing_plist_confirms_overwrite(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        """install overwrites plist when user confirms."""
+        plist_dir = tmp_path / "Library" / "LaunchAgents"
+        plist_dir.mkdir(parents=True)
+        plist_path = plist_dir / "com.pause-monitor.daemon.plist"
+        plist_path.write_text("existing content")
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("os.getuid", return_value=501),
+            patch("subprocess.run"),
+        ):
+            # User confirms overwrite
+            result = runner.invoke(main, ["install"], input="y\n")
+
+        assert result.exit_code == 0
+        assert "Created" in result.output
+        # Plist should have new content
+        assert "existing content" not in plist_path.read_text()
+        assert "<key>Label</key>" in plist_path.read_text()
+
+    def test_install_force_skips_prompt(self, runner: CliRunner, tmp_path: Path) -> None:
+        """install --force overwrites plist without prompting."""
+        plist_dir = tmp_path / "Library" / "LaunchAgents"
+        plist_dir.mkdir(parents=True)
+        plist_path = plist_dir / "com.pause-monitor.daemon.plist"
+        plist_path.write_text("existing content")
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("os.getuid", return_value=501),
+            patch("subprocess.run"),
+        ):
+            result = runner.invoke(main, ["install", "--force"])
+
+        assert result.exit_code == 0
+        assert "Overwrite?" not in result.output
+        assert "Created" in result.output
+        # Plist should have new content
+        assert "<key>Label</key>" in plist_path.read_text()
+
+    def test_install_creates_log_directory(self, runner: CliRunner, tmp_path: Path) -> None:
+        """install creates log directory if it doesn't exist."""
+        log_dir = tmp_path / ".local" / "share" / "pause-monitor"
+        assert not log_dir.exists()
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("os.getuid", return_value=501),
+            patch("subprocess.run"),
+        ):
+            result = runner.invoke(main, ["install"])
+
+        assert result.exit_code == 0
+        assert log_dir.exists()
