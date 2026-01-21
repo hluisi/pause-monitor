@@ -1,5 +1,6 @@
 """Forensics capture for pause events."""
 
+import asyncio
 import json
 from datetime import datetime
 from pathlib import Path
@@ -61,3 +62,155 @@ class ForensicsCapture:
         """Write a binary artifact file."""
         path = self.event_dir / name
         path.write_bytes(content)
+
+
+async def capture_spindump(event_dir: Path, timeout: float = 30.0) -> bool:
+    """Capture thread stacks via spindump.
+
+    Args:
+        event_dir: Directory to write spindump output
+        timeout: Maximum seconds to wait for spindump
+
+    Returns:
+        True if capture succeeded
+    """
+    output_path = event_dir / "spindump.txt"
+
+    try:
+        process = await asyncio.create_subprocess_exec(
+            "/usr/sbin/spindump",
+            "-notarget",
+            "-stdout",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+
+        stdout, _ = await asyncio.wait_for(
+            process.communicate(),
+            timeout=timeout,
+        )
+
+        output_path.write_bytes(stdout)
+        log.info("spindump_captured", path=str(output_path), size=len(stdout))
+        return True
+
+    except asyncio.TimeoutError:
+        process.kill()
+        await process.wait()
+        log.warning("spindump_timeout", timeout=timeout)
+        return False
+    except (FileNotFoundError, PermissionError) as e:
+        log.warning("spindump_failed", error=str(e))
+        return False
+
+
+async def capture_tailspin(event_dir: Path, timeout: float = 10.0) -> bool:
+    """Capture kernel trace via tailspin.
+
+    Args:
+        event_dir: Directory to write tailspin output
+        timeout: Maximum seconds to wait
+
+    Returns:
+        True if capture succeeded
+    """
+    output_path = event_dir / "tailspin.tailspin"
+
+    try:
+        process = await asyncio.create_subprocess_exec(
+            "/usr/bin/tailspin",
+            "save",
+            "-o",
+            str(output_path),
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+
+        await asyncio.wait_for(process.wait(), timeout=timeout)
+
+        if output_path.exists():
+            log.info("tailspin_captured", path=str(output_path))
+            return True
+        return False
+
+    except asyncio.TimeoutError:
+        process.kill()
+        await process.wait()
+        log.warning("tailspin_timeout", timeout=timeout)
+        return False
+    except (FileNotFoundError, PermissionError) as e:
+        log.warning("tailspin_failed", error=str(e))
+        return False
+
+
+async def capture_system_logs(
+    event_dir: Path,
+    window_seconds: int = 60,
+    timeout: float = 10.0,
+) -> bool:
+    """Capture filtered system logs around the event.
+
+    Args:
+        event_dir: Directory to write log output
+        window_seconds: Seconds of logs to capture before event
+        timeout: Maximum seconds to wait
+
+    Returns:
+        True if capture succeeded
+    """
+    output_path = event_dir / "system.log"
+
+    try:
+        process = await asyncio.create_subprocess_exec(
+            "/usr/bin/log",
+            "show",
+            "--last",
+            f"{window_seconds}s",
+            "--predicate",
+            'subsystem == "com.apple.powerd" OR '
+            'subsystem == "com.apple.kernel" OR '
+            'subsystem == "com.apple.windowserver" OR '
+            'eventMessage CONTAINS[c] "hang" OR '
+            'eventMessage CONTAINS[c] "stall" OR '
+            'eventMessage CONTAINS[c] "timeout"',
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+
+        stdout, _ = await asyncio.wait_for(
+            process.communicate(),
+            timeout=timeout,
+        )
+
+        output_path.write_bytes(stdout)
+        log.info("logs_captured", path=str(output_path), size=len(stdout))
+        return True
+
+    except asyncio.TimeoutError:
+        process.kill()
+        await process.wait()
+        log.warning("logs_timeout", timeout=timeout)
+        return False
+    except (FileNotFoundError, PermissionError) as e:
+        log.warning("logs_failed", error=str(e))
+        return False
+
+
+async def run_full_capture(
+    capture: ForensicsCapture,
+    window_seconds: int = 60,
+) -> None:
+    """Run all forensic capture steps.
+
+    Args:
+        capture: ForensicsCapture instance with event_dir set
+        window_seconds: Seconds of history to capture
+    """
+    # Run captures concurrently
+    await asyncio.gather(
+        capture_spindump(capture.event_dir),
+        capture_tailspin(capture.event_dir),
+        capture_system_logs(capture.event_dir, window_seconds=window_seconds),
+    )
+
+    log.info("full_capture_complete", event_dir=str(capture.event_dir))
