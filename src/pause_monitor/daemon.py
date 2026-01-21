@@ -23,7 +23,14 @@ from pause_monitor.config import Config
 from pause_monitor.forensics import ForensicsCapture, create_event_dir, run_full_capture
 from pause_monitor.notifications import Notifier
 from pause_monitor.sleepwake import PauseDetector, PauseEvent, was_recently_asleep
-from pause_monitor.storage import Event, Sample, init_database, insert_event, insert_sample
+from pause_monitor.storage import (
+    Event,
+    Sample,
+    init_database,
+    insert_event,
+    insert_sample,
+    prune_old_data,
+)
 from pause_monitor.stress import (
     IOBaselineManager,
     StressBreakdown,
@@ -143,6 +150,9 @@ class Daemon:
         self.state.running = True
         log.info("daemon_started")
 
+        # Start auto-prune task
+        asyncio.create_task(self._auto_prune())
+
         # Main loop
         await self._run_loop()
 
@@ -223,6 +233,27 @@ class Daemon:
             # PID file exists but process doesn't - stale file
             self._remove_pid_file()
             return False
+
+    async def _auto_prune(self) -> None:
+        """Run automatic data pruning daily."""
+        while not self._shutdown_event.is_set():
+            try:
+                # Wait for 24 hours or shutdown
+                await asyncio.wait_for(
+                    self._shutdown_event.wait(),
+                    timeout=86400,  # 24 hours
+                )
+                break
+            except asyncio.TimeoutError:
+                # Run prune
+                if self._conn:
+                    log.info("auto_prune_starting")
+                    deleted = prune_old_data(
+                        self._conn,
+                        samples_days=self.config.retention.samples_days,
+                        events_days=self.config.retention.events_days,
+                    )
+                    log.info("auto_prune_completed", samples=deleted[0], events=deleted[1])
 
     async def _run_loop(self) -> None:
         """Main sampling loop - streams powermetrics and processes samples."""

@@ -1,5 +1,6 @@
 """Tests for daemon core."""
 
+import asyncio
 import os
 import signal
 import sqlite3
@@ -346,3 +347,133 @@ async def test_daemon_stop_removes_pid_file(tmp_path: Path):
         await daemon.stop()
 
         assert not pid_file.exists()
+
+
+# Auto-prune tests
+
+
+@pytest.mark.asyncio
+async def test_auto_prune_runs_on_timeout(tmp_path: Path):
+    """Auto-prune runs prune_old_data when timeout expires."""
+    config = Config()
+
+    with patch.object(Config, "data_dir", new_callable=lambda: property(lambda self: tmp_path)):
+        with patch.object(
+            Config, "db_path", new_callable=lambda: property(lambda self: tmp_path / "test.db")
+        ):
+            daemon = Daemon(config)
+
+            from pause_monitor.storage import init_database
+
+            init_database(config.db_path)
+            daemon._conn = sqlite3.connect(config.db_path)
+
+            # Patch prune_old_data to track calls and signal shutdown after first call
+            with patch("pause_monitor.daemon.prune_old_data", return_value=(0, 0)) as mock_prune:
+                mock_prune.side_effect = lambda *args, **kwargs: (
+                    daemon._shutdown_event.set(),
+                    (0, 0),
+                )[1]
+
+                # Patch the timeout to be very short so we don't wait 24 hours
+                with patch("pause_monitor.daemon.asyncio.wait_for") as mock_wait_for:
+                    # First call times out (triggers prune), second would block but shutdown is set
+                    mock_wait_for.side_effect = [asyncio.TimeoutError(), asyncio.CancelledError()]
+
+                    # Run actual _auto_prune method - it will exit after prune sets shutdown
+                    try:
+                        await daemon._auto_prune()
+                    except asyncio.CancelledError:
+                        pass
+
+                mock_prune.assert_called_once_with(
+                    daemon._conn,
+                    samples_days=config.retention.samples_days,
+                    events_days=config.retention.events_days,
+                )
+
+
+@pytest.mark.asyncio
+async def test_auto_prune_exits_on_shutdown(tmp_path: Path):
+    """Auto-prune exits cleanly when shutdown event is set."""
+    config = Config()
+
+    with patch.object(Config, "data_dir", new_callable=lambda: property(lambda self: tmp_path)):
+        daemon = Daemon(config)
+
+        # Set shutdown event immediately
+        daemon._shutdown_event.set()
+
+        # Track that prune_old_data is NOT called
+        with patch("pause_monitor.daemon.prune_old_data") as mock_prune:
+            await daemon._auto_prune()
+            mock_prune.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_auto_prune_skips_if_no_connection(tmp_path: Path):
+    """Auto-prune skips pruning if database connection is None."""
+    config = Config()
+
+    with patch.object(Config, "data_dir", new_callable=lambda: property(lambda self: tmp_path)):
+        daemon = Daemon(config)
+        daemon._conn = None  # No connection
+
+        with patch("pause_monitor.daemon.prune_old_data") as mock_prune:
+            # Patch wait_for to timeout once, then we set shutdown
+            with patch("pause_monitor.daemon.asyncio.wait_for") as mock_wait_for:
+
+                def timeout_then_shutdown(*args, **kwargs):
+                    # After first timeout, set shutdown so loop exits
+                    daemon._shutdown_event.set()
+                    raise asyncio.TimeoutError()
+
+                mock_wait_for.side_effect = timeout_then_shutdown
+
+                # Run actual _auto_prune - since _conn is None, prune should not be called
+                await daemon._auto_prune()
+
+            mock_prune.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_auto_prune_uses_config_retention_days(tmp_path: Path):
+    """Auto-prune uses retention days from config."""
+    from pause_monitor.config import RetentionConfig
+
+    config = Config(
+        retention=RetentionConfig(samples_days=7, events_days=14),
+    )
+
+    with patch.object(Config, "data_dir", new_callable=lambda: property(lambda self: tmp_path)):
+        with patch.object(
+            Config, "db_path", new_callable=lambda: property(lambda self: tmp_path / "test.db")
+        ):
+            daemon = Daemon(config)
+
+            from pause_monitor.storage import init_database
+
+            init_database(config.db_path)
+            daemon._conn = sqlite3.connect(config.db_path)
+
+            # Patch prune_old_data to track calls and signal shutdown after first call
+            with patch("pause_monitor.daemon.prune_old_data", return_value=(0, 0)) as mock_prune:
+                mock_prune.side_effect = lambda *args, **kwargs: (
+                    daemon._shutdown_event.set(),
+                    (0, 0),
+                )[1]
+
+                # Patch the timeout to be very short
+                with patch("pause_monitor.daemon.asyncio.wait_for") as mock_wait_for:
+                    mock_wait_for.side_effect = [asyncio.TimeoutError(), asyncio.CancelledError()]
+
+                    try:
+                        await daemon._auto_prune()
+                    except asyncio.CancelledError:
+                        pass
+
+                mock_prune.assert_called_once_with(
+                    daemon._conn,
+                    samples_days=7,
+                    events_days=14,
+                )
