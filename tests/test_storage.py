@@ -1,9 +1,10 @@
 """Tests for SQLite storage layer."""
 
-import pytest
 import sqlite3
 from datetime import datetime
 from pathlib import Path
+
+import pytest
 
 from pause_monitor.storage import SCHEMA_VERSION, get_schema_version, init_database
 from pause_monitor.stress import StressBreakdown
@@ -306,31 +307,33 @@ def test_prune_old_data_deletes_old_samples(initialized_db: Path, sample_stress)
 
 
 def test_prune_old_data_deletes_old_events(initialized_db: Path, sample_stress):
-    """prune_old_data deletes events older than cutoff."""
+    """prune_old_data deletes old events with prunable status (reviewed/dismissed)."""
     import time
 
     from pause_monitor.storage import Event, insert_event, prune_old_data
 
     conn = sqlite3.connect(initialized_db)
 
-    # Insert old event (100 days ago)
+    # Insert old event (100 days ago) with 'reviewed' status (prunable)
     old_event = Event(
         timestamp=datetime.fromtimestamp(time.time() - 100 * 86400),
         duration=2.5,
         stress=sample_stress,
         culprits=["test_process"],
         event_dir=None,
+        status="reviewed",  # Must be reviewed/dismissed to be prunable
         notes=None,
     )
     insert_event(conn, old_event)
 
-    # Insert recent event (30 days ago)
+    # Insert recent event (30 days ago) - also reviewed but within retention
     recent_event = Event(
         timestamp=datetime.fromtimestamp(time.time() - 30 * 86400),
         duration=1.5,
         stress=sample_stress,
         culprits=["another_process"],
         event_dir=None,
+        status="reviewed",
         notes=None,
     )
     insert_event(conn, recent_event)
@@ -774,3 +777,205 @@ def test_migrate_add_event_status_idempotent(initialized_db: Path, sample_stress
     conn.close()
 
     assert retrieved.status == "pinned"
+
+
+# --- Status-Aware Pruning Tests ---
+
+
+def test_prune_respects_unreviewed_status(initialized_db: Path, sample_stress):
+    """Unreviewed events are never pruned, regardless of age."""
+    import time
+
+    from pause_monitor.storage import Event, get_event_by_id, insert_event, prune_old_data
+
+    conn = sqlite3.connect(initialized_db)
+
+    # Insert old unreviewed event (60 days ago)
+    old_time = datetime.fromtimestamp(time.time() - 60 * 86400)
+    event = Event(
+        timestamp=old_time,
+        duration=2.5,
+        stress=sample_stress,
+        culprits=["test_process"],
+        event_dir=None,
+        status="unreviewed",
+    )
+    event_id = insert_event(conn, event)
+
+    # Prune with 30 day retention
+    samples_deleted, events_deleted = prune_old_data(conn, samples_days=30, events_days=30)
+
+    # Unreviewed event should NOT be pruned
+    assert events_deleted == 0
+    retrieved = get_event_by_id(conn, event_id)
+    conn.close()
+
+    assert retrieved is not None
+    assert retrieved.status == "unreviewed"
+
+
+def test_prune_respects_pinned_status(initialized_db: Path, sample_stress):
+    """Pinned events are never pruned, regardless of age."""
+    import time
+
+    from pause_monitor.storage import Event, get_event_by_id, insert_event, prune_old_data
+
+    conn = sqlite3.connect(initialized_db)
+
+    # Insert old pinned event (60 days ago)
+    old_time = datetime.fromtimestamp(time.time() - 60 * 86400)
+    event = Event(
+        timestamp=old_time,
+        duration=2.5,
+        stress=sample_stress,
+        culprits=["important_process"],
+        event_dir=None,
+        status="pinned",
+        notes="Keep this forever",
+    )
+    event_id = insert_event(conn, event)
+
+    # Prune with 30 day retention
+    samples_deleted, events_deleted = prune_old_data(conn, samples_days=30, events_days=30)
+
+    # Pinned event should NOT be pruned
+    assert events_deleted == 0
+    retrieved = get_event_by_id(conn, event_id)
+    conn.close()
+
+    assert retrieved is not None
+    assert retrieved.status == "pinned"
+
+
+def test_prune_removes_dismissed_events(initialized_db: Path, sample_stress):
+    """Dismissed events are pruned after retention period."""
+    import time
+
+    from pause_monitor.storage import Event, get_event_by_id, insert_event, prune_old_data
+
+    conn = sqlite3.connect(initialized_db)
+
+    # Insert old dismissed event (60 days ago)
+    old_time = datetime.fromtimestamp(time.time() - 60 * 86400)
+    event = Event(
+        timestamp=old_time,
+        duration=2.5,
+        stress=sample_stress,
+        culprits=["dismissed_process"],
+        event_dir=None,
+        status="dismissed",
+    )
+    event_id = insert_event(conn, event)
+
+    # Prune with 30 day retention
+    samples_deleted, events_deleted = prune_old_data(conn, samples_days=30, events_days=30)
+
+    # Dismissed event SHOULD be pruned
+    assert events_deleted == 1
+    retrieved = get_event_by_id(conn, event_id)
+    conn.close()
+
+    assert retrieved is None
+
+
+def test_prune_removes_reviewed_events(initialized_db: Path, sample_stress):
+    """Reviewed events are pruned after retention period."""
+    import time
+
+    from pause_monitor.storage import Event, get_event_by_id, insert_event, prune_old_data
+
+    conn = sqlite3.connect(initialized_db)
+
+    # Insert old reviewed event (60 days ago)
+    old_time = datetime.fromtimestamp(time.time() - 60 * 86400)
+    event = Event(
+        timestamp=old_time,
+        duration=2.5,
+        stress=sample_stress,
+        culprits=["reviewed_process"],
+        event_dir=None,
+        status="reviewed",
+    )
+    event_id = insert_event(conn, event)
+
+    # Prune with 30 day retention
+    samples_deleted, events_deleted = prune_old_data(conn, samples_days=30, events_days=30)
+
+    # Reviewed event SHOULD be pruned
+    assert events_deleted == 1
+    retrieved = get_event_by_id(conn, event_id)
+    conn.close()
+
+    assert retrieved is None
+
+
+def test_prune_mixed_status_events(initialized_db: Path, sample_stress):
+    """Pruning only removes reviewed/dismissed events, keeps unreviewed/pinned."""
+    import time
+
+    from pause_monitor.storage import Event, get_event_by_id, insert_event, prune_old_data
+
+    conn = sqlite3.connect(initialized_db)
+
+    old_time = datetime.fromtimestamp(time.time() - 60 * 86400)
+
+    # Insert one event of each status (all old)
+    events = {}
+    for status in ["unreviewed", "reviewed", "pinned", "dismissed"]:
+        event = Event(
+            timestamp=old_time,
+            duration=2.5,
+            stress=sample_stress,
+            culprits=[f"{status}_process"],
+            event_dir=None,
+            status=status,
+        )
+        events[status] = insert_event(conn, event)
+
+    # Prune with 30 day retention
+    samples_deleted, events_deleted = prune_old_data(conn, samples_days=30, events_days=30)
+
+    # Only reviewed and dismissed should be pruned (2 events)
+    assert events_deleted == 2
+
+    # Unreviewed and pinned should still exist
+    assert get_event_by_id(conn, events["unreviewed"]) is not None
+    assert get_event_by_id(conn, events["pinned"]) is not None
+
+    # Reviewed and dismissed should be gone
+    assert get_event_by_id(conn, events["reviewed"]) is None
+    assert get_event_by_id(conn, events["dismissed"]) is None
+
+    conn.close()
+
+
+def test_prune_recent_dismissed_not_pruned(initialized_db: Path, sample_stress):
+    """Recent dismissed events are NOT pruned even though they are prunable status."""
+    import time
+
+    from pause_monitor.storage import Event, get_event_by_id, insert_event, prune_old_data
+
+    conn = sqlite3.connect(initialized_db)
+
+    # Insert recent dismissed event (10 days ago - within 30 day retention)
+    recent_time = datetime.fromtimestamp(time.time() - 10 * 86400)
+    event = Event(
+        timestamp=recent_time,
+        duration=2.5,
+        stress=sample_stress,
+        culprits=["dismissed_process"],
+        event_dir=None,
+        status="dismissed",
+    )
+    event_id = insert_event(conn, event)
+
+    # Prune with 30 day retention
+    samples_deleted, events_deleted = prune_old_data(conn, samples_days=30, events_days=30)
+
+    # Recent dismissed event should NOT be pruned (within retention)
+    assert events_deleted == 0
+    retrieved = get_event_by_id(conn, event_id)
+    conn.close()
+
+    assert retrieved is not None
+    assert retrieved.status == "dismissed"

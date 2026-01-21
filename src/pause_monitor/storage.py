@@ -421,12 +421,15 @@ def prune_old_data(
     samples_days: int = 30,
     events_days: int = 90,
 ) -> tuple[int, int]:
-    """Delete old samples and events.
+    """Delete old samples and events, respecting event lifecycle status.
+
+    Only prunes events with status 'reviewed' or 'dismissed'.
+    Never prunes 'unreviewed' or 'pinned' events regardless of age.
 
     Args:
         conn: Database connection
         samples_days: Delete samples older than this
-        events_days: Delete events older than this
+        events_days: Delete events older than this (only reviewed/dismissed)
 
     Returns:
         Tuple of (samples_deleted, events_deleted)
@@ -456,9 +459,13 @@ def prune_old_data(
     )
     samples_deleted = cursor.rowcount
 
-    # Delete old events
+    # Delete old events - only if status is 'reviewed' or 'dismissed'
+    # Never prune 'unreviewed' (needs attention) or 'pinned' (kept forever)
     cursor = conn.execute(
-        "DELETE FROM events WHERE timestamp < ?",
+        """
+        DELETE FROM events
+        WHERE timestamp < ? AND status IN ('reviewed', 'dismissed')
+        """,
         (cutoff_events,),
     )
     events_deleted = cursor.rowcount
