@@ -1096,3 +1096,309 @@ class TestInstallCommand:
 
         assert result.exit_code == 0
         assert log_dir.exists()
+
+
+class TestUninstallCommand:
+    """Tests for the uninstall command."""
+
+    def test_uninstall_user_default(self, runner: CliRunner, tmp_path: Path) -> None:
+        """uninstall removes plist from ~/Library/LaunchAgents by default."""
+        plist_dir = tmp_path / "Library" / "LaunchAgents"
+        plist_dir.mkdir(parents=True)
+        plist_path = plist_dir / "com.pause-monitor.daemon.plist"
+        plist_path.write_text("<plist>test</plist>")
+
+        # Create config directories that would be prompted for deletion
+        config_dir = tmp_path / ".config" / "pause-monitor"
+        data_dir = tmp_path / ".local" / "share" / "pause-monitor"
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("os.getuid", return_value=501),
+            patch("subprocess.run") as mock_run,
+            patch.object(Config, "config_dir", new_callable=lambda: _make_path_prop(config_dir)),
+            patch.object(Config, "data_dir", new_callable=lambda: _make_path_prop(data_dir)),
+        ):
+            # Use --keep-data to avoid prompts
+            result = runner.invoke(main, ["uninstall", "--keep-data"])
+
+        assert result.exit_code == 0
+        assert "Service stopped" in result.output or "Warning" in result.output
+        assert f"Removed {plist_path}" in result.output
+        assert "Uninstall complete" in result.output
+        assert not plist_path.exists()
+
+        # Verify launchctl bootout was called
+        mock_run.assert_called_once()
+        call_args = mock_run.call_args[0][0]
+        assert call_args[0] == "launchctl"
+        assert call_args[1] == "bootout"
+        assert call_args[2] == "gui/501/com.pause-monitor.daemon"
+
+    def test_uninstall_not_installed(self, runner: CliRunner, tmp_path: Path) -> None:
+        """uninstall shows message when service was not installed."""
+        # Create config directories that would be prompted for deletion
+        config_dir = tmp_path / ".config" / "pause-monitor"
+        data_dir = tmp_path / ".local" / "share" / "pause-monitor"
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("os.getuid", return_value=501),
+            patch.object(Config, "config_dir", new_callable=lambda: _make_path_prop(config_dir)),
+            patch.object(Config, "data_dir", new_callable=lambda: _make_path_prop(data_dir)),
+        ):
+            result = runner.invoke(main, ["uninstall", "--keep-data"])
+
+        assert result.exit_code == 0
+        assert "Service was not installed" in result.output
+        assert "Uninstall complete" in result.output
+
+    def test_uninstall_system_wide(self, runner: CliRunner, tmp_path: Path) -> None:
+        """uninstall --system removes plist from /Library/LaunchDaemons."""
+        # Create config directories that would be prompted for deletion
+        config_dir = tmp_path / ".config" / "pause-monitor"
+        data_dir = tmp_path / ".local" / "share" / "pause-monitor"
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("pathlib.Path.exists", return_value=True),
+            patch("pathlib.Path.unlink"),
+            patch("subprocess.run") as mock_run,
+            patch("os.getuid", return_value=0),  # Pretend to be root
+            patch.object(Config, "config_dir", new_callable=lambda: _make_path_prop(config_dir)),
+            patch.object(Config, "data_dir", new_callable=lambda: _make_path_prop(data_dir)),
+        ):
+            result = runner.invoke(main, ["uninstall", "--system", "--keep-data"])
+
+        assert result.exit_code == 0
+
+        # Verify launchctl bootout was called with "system" target
+        mock_run.assert_called_once()
+        call_args = mock_run.call_args[0][0]
+        assert call_args[0] == "launchctl"
+        assert call_args[1] == "bootout"
+        assert call_args[2] == "system/com.pause-monitor.daemon"
+
+    def test_uninstall_system_requires_root(self, runner: CliRunner, tmp_path: Path) -> None:
+        """uninstall --system fails without root privileges."""
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("os.getuid", return_value=501),  # Non-root user
+        ):
+            result = runner.invoke(main, ["uninstall", "--system"])
+
+        assert result.exit_code == 1
+        assert "Error: --system requires root privileges" in result.output
+        assert "sudo" in result.output
+
+    def test_uninstall_service_not_running(self, runner: CliRunner, tmp_path: Path) -> None:
+        """uninstall handles 'No such process' error gracefully."""
+        from subprocess import CalledProcessError
+
+        plist_dir = tmp_path / "Library" / "LaunchAgents"
+        plist_dir.mkdir(parents=True)
+        plist_path = plist_dir / "com.pause-monitor.daemon.plist"
+        plist_path.write_text("<plist>test</plist>")
+
+        # Create config directories that would be prompted for deletion
+        config_dir = tmp_path / ".config" / "pause-monitor"
+        data_dir = tmp_path / ".local" / "share" / "pause-monitor"
+
+        error = CalledProcessError(
+            returncode=3,
+            cmd=["launchctl", "bootout"],
+            stderr=b"No such process",
+        )
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("os.getuid", return_value=501),
+            patch("subprocess.run", side_effect=error),
+            patch.object(Config, "config_dir", new_callable=lambda: _make_path_prop(config_dir)),
+            patch.object(Config, "data_dir", new_callable=lambda: _make_path_prop(data_dir)),
+        ):
+            result = runner.invoke(main, ["uninstall", "--keep-data"])
+
+        assert result.exit_code == 0
+        # Should NOT show warning for "No such process"
+        assert "Warning" not in result.output
+        assert f"Removed {plist_path}" in result.output
+        assert not plist_path.exists()
+
+    def test_uninstall_bootout_other_error(self, runner: CliRunner, tmp_path: Path) -> None:
+        """uninstall shows warning on bootout failure (other than No such process)."""
+        from subprocess import CalledProcessError
+
+        plist_dir = tmp_path / "Library" / "LaunchAgents"
+        plist_dir.mkdir(parents=True)
+        plist_path = plist_dir / "com.pause-monitor.daemon.plist"
+        plist_path.write_text("<plist>test</plist>")
+
+        # Create config directories that would be prompted for deletion
+        config_dir = tmp_path / ".config" / "pause-monitor"
+        data_dir = tmp_path / ".local" / "share" / "pause-monitor"
+
+        error = CalledProcessError(
+            returncode=1,
+            cmd=["launchctl", "bootout"],
+            stderr=b"some other error",
+        )
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("os.getuid", return_value=501),
+            patch("subprocess.run", side_effect=error),
+            patch.object(Config, "config_dir", new_callable=lambda: _make_path_prop(config_dir)),
+            patch.object(Config, "data_dir", new_callable=lambda: _make_path_prop(data_dir)),
+        ):
+            result = runner.invoke(main, ["uninstall", "--keep-data"])
+
+        assert result.exit_code == 0
+        assert "Warning: Could not stop service" in result.output
+        assert "some other error" in result.output
+        # Should still remove plist
+        assert f"Removed {plist_path}" in result.output
+
+    def test_uninstall_prompts_for_data_deletion(self, runner: CliRunner, tmp_path: Path) -> None:
+        """uninstall prompts for data directory deletion."""
+        plist_dir = tmp_path / "Library" / "LaunchAgents"
+        plist_dir.mkdir(parents=True)
+        plist_path = plist_dir / "com.pause-monitor.daemon.plist"
+        plist_path.write_text("<plist>test</plist>")
+
+        # Create data and config directories
+        config_dir = tmp_path / ".config" / "pause-monitor"
+        config_dir.mkdir(parents=True)
+        data_dir = tmp_path / ".local" / "share" / "pause-monitor"
+        data_dir.mkdir(parents=True)
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("os.getuid", return_value=501),
+            patch("subprocess.run"),
+            patch.object(Config, "config_dir", new_callable=lambda: _make_path_prop(config_dir)),
+            patch.object(Config, "data_dir", new_callable=lambda: _make_path_prop(data_dir)),
+        ):
+            # Decline both prompts
+            result = runner.invoke(main, ["uninstall"], input="n\nn\n")
+
+        assert result.exit_code == 0
+        assert f"Delete data directory {data_dir}?" in result.output
+        # Data dir should still exist
+        assert data_dir.exists()
+        assert config_dir.exists()
+
+    def test_uninstall_deletes_data_when_confirmed(self, runner: CliRunner, tmp_path: Path) -> None:
+        """uninstall deletes data when user confirms."""
+        plist_dir = tmp_path / "Library" / "LaunchAgents"
+        plist_dir.mkdir(parents=True)
+        plist_path = plist_dir / "com.pause-monitor.daemon.plist"
+        plist_path.write_text("<plist>test</plist>")
+
+        # Create data and config directories
+        config_dir = tmp_path / ".config" / "pause-monitor"
+        config_dir.mkdir(parents=True)
+        (config_dir / "config.toml").write_text("test")
+        data_dir = tmp_path / ".local" / "share" / "pause-monitor"
+        data_dir.mkdir(parents=True)
+        (data_dir / "data.db").write_text("test")
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("os.getuid", return_value=501),
+            patch("subprocess.run"),
+            patch.object(Config, "config_dir", new_callable=lambda: _make_path_prop(config_dir)),
+            patch.object(Config, "data_dir", new_callable=lambda: _make_path_prop(data_dir)),
+        ):
+            # Confirm both prompts
+            result = runner.invoke(main, ["uninstall"], input="y\ny\n")
+
+        assert result.exit_code == 0
+        assert f"Removed {data_dir}" in result.output
+        assert f"Removed {config_dir}" in result.output
+        assert not data_dir.exists()
+        assert not config_dir.exists()
+
+    def test_uninstall_force_skips_prompts(self, runner: CliRunner, tmp_path: Path) -> None:
+        """uninstall --force deletes data without prompting."""
+        plist_dir = tmp_path / "Library" / "LaunchAgents"
+        plist_dir.mkdir(parents=True)
+        plist_path = plist_dir / "com.pause-monitor.daemon.plist"
+        plist_path.write_text("<plist>test</plist>")
+
+        # Create data and config directories
+        config_dir = tmp_path / ".config" / "pause-monitor"
+        config_dir.mkdir(parents=True)
+        (config_dir / "config.toml").write_text("test")
+        data_dir = tmp_path / ".local" / "share" / "pause-monitor"
+        data_dir.mkdir(parents=True)
+        (data_dir / "data.db").write_text("test")
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("os.getuid", return_value=501),
+            patch("subprocess.run"),
+            patch.object(Config, "config_dir", new_callable=lambda: _make_path_prop(config_dir)),
+            patch.object(Config, "data_dir", new_callable=lambda: _make_path_prop(data_dir)),
+        ):
+            result = runner.invoke(main, ["uninstall", "--force"])
+
+        assert result.exit_code == 0
+        # Should NOT prompt
+        assert "Delete data directory" not in result.output
+        assert "Delete config directory" not in result.output
+        # Should delete
+        assert f"Removed {data_dir}" in result.output
+        assert f"Removed {config_dir}" in result.output
+        assert not data_dir.exists()
+        assert not config_dir.exists()
+
+    def test_uninstall_keep_data_skips_deletion(self, runner: CliRunner, tmp_path: Path) -> None:
+        """uninstall --keep-data preserves data and config directories."""
+        plist_dir = tmp_path / "Library" / "LaunchAgents"
+        plist_dir.mkdir(parents=True)
+        plist_path = plist_dir / "com.pause-monitor.daemon.plist"
+        plist_path.write_text("<plist>test</plist>")
+
+        # Create data and config directories
+        config_dir = tmp_path / ".config" / "pause-monitor"
+        config_dir.mkdir(parents=True)
+        data_dir = tmp_path / ".local" / "share" / "pause-monitor"
+        data_dir.mkdir(parents=True)
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("os.getuid", return_value=501),
+            patch("subprocess.run"),
+            patch.object(Config, "config_dir", new_callable=lambda: _make_path_prop(config_dir)),
+            patch.object(Config, "data_dir", new_callable=lambda: _make_path_prop(data_dir)),
+        ):
+            result = runner.invoke(main, ["uninstall", "--keep-data"])
+
+        assert result.exit_code == 0
+        # Should NOT prompt or delete
+        assert "Delete data directory" not in result.output
+        assert data_dir.exists()
+        assert config_dir.exists()
+
+    def test_uninstall_handles_nonexistent_data_dirs(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        """uninstall handles case where data/config dirs don't exist."""
+        # Create config directories that don't exist
+        config_dir = tmp_path / ".config" / "pause-monitor"
+        data_dir = tmp_path / ".local" / "share" / "pause-monitor"
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("os.getuid", return_value=501),
+            patch.object(Config, "config_dir", new_callable=lambda: _make_path_prop(config_dir)),
+            patch.object(Config, "data_dir", new_callable=lambda: _make_path_prop(data_dir)),
+        ):
+            result = runner.invoke(main, ["uninstall", "--force"])
+
+        assert result.exit_code == 0
+        # Should NOT try to delete nonexistent dirs
+        assert f"Removed {data_dir}" not in result.output
+        assert f"Removed {config_dir}" not in result.output
+        assert "Uninstall complete" in result.output

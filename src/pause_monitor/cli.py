@@ -415,9 +415,70 @@ def install(system_wide: bool, force: bool) -> None:
 
 
 @main.command()
-def uninstall() -> None:
+@click.option("--system", "system_wide", is_flag=True, help="Uninstall system-wide (requires root)")
+@click.option("--keep-data", is_flag=True, help="Keep database and config files")
+@click.option("--force", is_flag=True, help="Skip confirmation prompts")
+def uninstall(system_wide: bool, keep_data: bool, force: bool) -> None:
     """Remove launchd service."""
-    click.echo("Uninstall not yet implemented")
+    import os
+    import shutil
+    import subprocess
+    from pathlib import Path
+
+    label = "com.pause-monitor.daemon"
+
+    # Check root for system-wide uninstall
+    if system_wide and os.getuid() != 0:
+        click.echo("Error: --system requires root privileges. Use sudo.", err=True)
+        raise SystemExit(1)
+
+    # Determine paths
+    if system_wide:
+        plist_dir = Path("/Library/LaunchDaemons")
+        service_target = "system"
+    else:
+        plist_dir = Path.home() / "Library" / "LaunchAgents"
+        service_target = f"gui/{os.getuid()}"
+
+    plist_path = plist_dir / f"{label}.plist"
+
+    # Bootout the service (modern launchctl syntax)
+    if plist_path.exists():
+        try:
+            subprocess.run(
+                ["launchctl", "bootout", f"{service_target}/{label}"],
+                check=True,
+                capture_output=True,
+            )
+            click.echo("Service stopped")
+        except subprocess.CalledProcessError as e:
+            # "No such process" is fine - service may not be running
+            if b"No such process" not in e.stderr:
+                click.echo(f"Warning: Could not stop service: {e.stderr.decode()}")
+
+        # Remove plist
+        plist_path.unlink()
+        click.echo(f"Removed {plist_path}")
+    else:
+        click.echo("Service was not installed")
+
+    # Optionally remove data
+    if not keep_data:
+        from pause_monitor.config import Config
+
+        config = Config()
+
+        if config.data_dir.exists():
+            if force or click.confirm(f"Delete data directory {config.data_dir}?"):
+                shutil.rmtree(config.data_dir)
+                click.echo(f"Removed {config.data_dir}")
+
+        if config.config_dir.exists():
+            if force or click.confirm(f"Delete config directory {config.config_dir}?"):
+                shutil.rmtree(config.config_dir)
+                click.echo(f"Removed {config.config_dir}")
+
+    click.echo("Uninstall complete")
 
 
 if __name__ == "__main__":
