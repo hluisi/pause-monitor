@@ -28,8 +28,8 @@ class StressGauge(Static):
     }
     """
 
-    def __init__(self) -> None:
-        super().__init__()
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
         self._stress = 0
 
     def update_stress(self, stress: int) -> None:
@@ -56,8 +56,8 @@ class MetricsPanel(Static):
     }
     """
 
-    def __init__(self) -> None:
-        super().__init__()
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
         self._metrics: dict[str, Any] = {}
 
     def update_metrics(self, metrics: dict[str, Any]) -> None:
