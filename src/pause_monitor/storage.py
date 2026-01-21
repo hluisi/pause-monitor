@@ -364,7 +364,13 @@ def prune_old_data(
 
     Returns:
         Tuple of (samples_deleted, events_deleted)
+
+    Raises:
+        ValueError: If retention days < 1
     """
+    if samples_days < 1 or events_days < 1:
+        raise ValueError("Retention days must be >= 1")
+
     cutoff_samples = time.time() - (samples_days * 86400)
     cutoff_events = time.time() - (events_days * 86400)
 

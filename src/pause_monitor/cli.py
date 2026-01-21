@@ -215,7 +215,8 @@ def history(hours: int, fmt: str) -> None:
 @click.option("--samples-days", default=None, type=int, help="Override sample retention days")
 @click.option("--events-days", default=None, type=int, help="Override event retention days")
 @click.option("--dry-run", is_flag=True, help="Show what would be deleted")
-def prune(samples_days: int | None, events_days: int | None, dry_run: bool) -> None:
+@click.option("--force", "-f", is_flag=True, help="Skip confirmation prompt")
+def prune(samples_days: int | None, events_days: int | None, dry_run: bool, force: bool) -> None:
     """Delete old data per retention policy."""
     from pause_monitor.config import Config
     from pause_monitor.storage import get_connection, prune_old_data
@@ -233,6 +234,12 @@ def prune(samples_days: int | None, events_days: int | None, dry_run: bool) -> N
         click.echo(f"Would prune samples older than {samples_days} days")
         click.echo(f"Would prune events older than {events_days} days")
         return
+
+    if not force:
+        click.confirm(
+            f"Delete samples > {samples_days} days and events > {events_days} days?",
+            abort=True,
+        )
 
     conn = get_connection(config.db_path)
     try:

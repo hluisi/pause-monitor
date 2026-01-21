@@ -445,3 +445,45 @@ def test_prune_old_data_with_nothing_to_delete(initialized_db: Path, sample_stre
 
     assert samples_deleted == 0
     assert events_deleted == 0
+
+
+def test_prune_old_data_rejects_zero_samples_days(initialized_db: Path):
+    """prune_old_data raises ValueError when samples_days < 1."""
+    import pytest
+
+    from pause_monitor.storage import prune_old_data
+
+    conn = sqlite3.connect(initialized_db)
+
+    with pytest.raises(ValueError, match="Retention days must be >= 1"):
+        prune_old_data(conn, samples_days=0, events_days=90)
+
+    conn.close()
+
+
+def test_prune_old_data_rejects_zero_events_days(initialized_db: Path):
+    """prune_old_data raises ValueError when events_days < 1."""
+    import pytest
+
+    from pause_monitor.storage import prune_old_data
+
+    conn = sqlite3.connect(initialized_db)
+
+    with pytest.raises(ValueError, match="Retention days must be >= 1"):
+        prune_old_data(conn, samples_days=30, events_days=0)
+
+    conn.close()
+
+
+def test_prune_old_data_rejects_negative_days(initialized_db: Path):
+    """prune_old_data raises ValueError for negative retention days."""
+    import pytest
+
+    from pause_monitor.storage import prune_old_data
+
+    conn = sqlite3.connect(initialized_db)
+
+    with pytest.raises(ValueError, match="Retention days must be >= 1"):
+        prune_old_data(conn, samples_days=-5, events_days=90)
+
+    conn.close()

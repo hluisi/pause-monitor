@@ -519,7 +519,7 @@ class TestPruneCommand:
             mock_config.retention.samples_days = 30
             mock_config.retention.events_days = 90
             mock_load.return_value = mock_config
-            result = runner.invoke(main, ["prune"])
+            result = runner.invoke(main, ["prune", "--force"])
 
         assert result.exit_code == 0
         assert "Deleted 1 samples, 0 events" in result.output
@@ -535,7 +535,7 @@ class TestPruneCommand:
             mock_config.retention.samples_days = 30
             mock_config.retention.events_days = 90
             mock_load.return_value = mock_config
-            result = runner.invoke(main, ["prune"])
+            result = runner.invoke(main, ["prune", "--force"])
 
         assert result.exit_code == 0
         assert "Deleted 0 samples, 0 events" in result.output
@@ -580,10 +580,44 @@ class TestPruneCommand:
             mock_config.retention.events_days = 90
             mock_load.return_value = mock_config
             # Override to 7 days, so 10-day-old sample will be deleted
-            result = runner.invoke(main, ["prune", "--samples-days", "7"])
+            result = runner.invoke(main, ["prune", "--samples-days", "7", "--force"])
 
         assert result.exit_code == 0
         assert "Deleted 1 samples" in result.output
+
+    def test_prune_requires_confirmation(self, runner: CliRunner, tmp_path: Path) -> None:
+        """prune without --force aborts without confirmation."""
+        db_path = tmp_path / "data.db"
+        init_database(db_path)
+
+        with patch("pause_monitor.config.Config.load") as mock_load:
+            mock_config = MagicMock()
+            mock_config.db_path = db_path
+            mock_config.retention.samples_days = 30
+            mock_config.retention.events_days = 90
+            mock_load.return_value = mock_config
+            # Don't confirm (default is 'n')
+            result = runner.invoke(main, ["prune"])
+
+        assert result.exit_code == 1
+        assert "Aborted" in result.output
+
+    def test_prune_interactive_confirmation(self, runner: CliRunner, tmp_path: Path) -> None:
+        """prune proceeds when user confirms interactively."""
+        db_path = tmp_path / "data.db"
+        init_database(db_path)
+
+        with patch("pause_monitor.config.Config.load") as mock_load:
+            mock_config = MagicMock()
+            mock_config.db_path = db_path
+            mock_config.retention.samples_days = 30
+            mock_config.retention.events_days = 90
+            mock_load.return_value = mock_config
+            result = runner.invoke(main, ["prune"], input="y\n")
+
+        assert result.exit_code == 0
+        assert "Delete samples > 30 days and events > 90 days?" in result.output
+        assert "Deleted 0 samples, 0 events" in result.output
 
 
 def _make_path_prop(path: Path):
