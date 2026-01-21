@@ -9,9 +9,12 @@ from asyncio.subprocess import Process
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import structlog
+
+if TYPE_CHECKING:
+    from pause_monitor.stress import StressBreakdown
 
 log = structlog.get_logger()
 
@@ -316,3 +319,97 @@ class PowermetricsStream:
 
                 result = parse_powermetrics_sample(plist_data)
                 yield result
+
+
+class SamplingState(Enum):
+    """Current sampling rate state."""
+
+    NORMAL = "normal"
+    ELEVATED = "elevated"
+
+
+@dataclass
+class PolicyResult:
+    """Result of policy update."""
+
+    should_snapshot: bool = False
+    state_changed: bool = False
+
+
+class SamplePolicy:
+    """Adaptive sampling policy based on stress levels.
+
+    Uses hysteresis to prevent oscillation: elevate at 30, de-elevate at 20.
+    """
+
+    def __init__(
+        self,
+        normal_interval: int = 5,
+        elevated_interval: int = 1,
+        elevation_threshold: int = 30,
+        de_elevation_threshold: int = 20,  # Hysteresis: lower threshold to return to normal
+        critical_threshold: int = 60,
+        cooldown_samples: int = 5,
+    ):
+        self.normal_interval = normal_interval
+        self.elevated_interval = elevated_interval
+        self.elevation_threshold = elevation_threshold
+        self.de_elevation_threshold = de_elevation_threshold
+        self.critical_threshold = critical_threshold
+        self.cooldown_samples = cooldown_samples
+
+        self._state = SamplingState.NORMAL
+        self._samples_below_threshold = 0
+
+    @property
+    def state(self) -> SamplingState:
+        """Current sampling state."""
+        return self._state
+
+    @property
+    def current_interval(self) -> int:
+        """Current sampling interval in seconds."""
+        if self._state == SamplingState.ELEVATED:
+            return self.elevated_interval
+        return self.normal_interval
+
+    def update(self, stress: "StressBreakdown") -> PolicyResult:
+        """Update policy based on current stress.
+
+        Returns:
+            PolicyResult indicating if snapshot should be taken
+        """
+        result = PolicyResult()
+        total = stress.total
+
+        # Check for critical stress
+        if total >= self.critical_threshold:
+            result.should_snapshot = True
+
+        # State transitions with hysteresis
+        old_state = self._state
+
+        if total >= self.elevation_threshold:
+            # Elevate when stress reaches upper threshold
+            self._state = SamplingState.ELEVATED
+            self._samples_below_threshold = 0
+        elif self._state == SamplingState.ELEVATED and total < self.de_elevation_threshold:
+            # Only de-elevate when below lower threshold (hysteresis)
+            self._samples_below_threshold += 1
+            if self._samples_below_threshold >= self.cooldown_samples:
+                self._state = SamplingState.NORMAL
+        elif self._state == SamplingState.ELEVATED:
+            # Between thresholds - stay elevated but don't accumulate cooldown
+            self._samples_below_threshold = 0
+
+        result.state_changed = old_state != self._state
+
+        if result.state_changed:
+            log.info(
+                "sampling_state_changed",
+                old=old_state.value,
+                new=self._state.value,
+                stress=total,
+            )
+
+        return result
