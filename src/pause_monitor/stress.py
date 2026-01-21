@@ -131,6 +131,8 @@ def calculate_stress(
     latency_ratio: float,
     io_rate: int,
     io_baseline: int,
+    gpu_pct: float | None = None,
+    wakeups_per_sec: int | None = None,
 ) -> StressBreakdown:
     """Calculate stress score from current system metrics.
 
@@ -142,6 +144,8 @@ def calculate_stress(
         latency_ratio: actual_interval / expected_interval
         io_rate: Current I/O bytes/sec (read + write)
         io_baseline: Baseline I/O bytes/sec (EMA)
+        gpu_pct: GPU utilization percentage (0-100), None if unknown
+        wakeups_per_sec: Idle wakeups per second, None if unknown
 
     Returns:
         StressBreakdown with per-factor and total scores
@@ -167,12 +171,18 @@ def calculate_stress(
     sustained_high = io_rate > 100_000_000  # 100 MB/s
     io_score = 20 if (spike_detected or sustained_high) else 0
 
+    # GPU usage (20 points if sustained above 80%)
+    gpu_score = 20 if gpu_pct is not None and gpu_pct > 80.0 else 0
+
+    # Idle wakeups (20 points if above 1000/sec)
+    wakeups_score = 20 if wakeups_per_sec is not None and wakeups_per_sec > 1000 else 0
+
     return StressBreakdown(
         load=load_score,
         memory=mem_score,
         thermal=thermal_score,
         latency=latency_score,
         io=io_score,
-        gpu=0,  # Scoring logic implemented in Task 2
-        wakeups=0,  # Scoring logic implemented in Task 2
+        gpu=gpu_score,
+        wakeups=wakeups_score,
     )

@@ -235,3 +235,67 @@ def test_stress_breakdown_total_uncapped():
     """Verify total with small values."""
     breakdown = StressBreakdown(load=5, memory=5, thermal=0, latency=0, io=0, gpu=3, wakeups=2)
     assert breakdown.total == 15
+
+
+def test_stress_gpu_contribution():
+    """GPU stress when sustained above 80%."""
+    breakdown = calculate_stress(
+        load_avg=1.0,
+        core_count=4,
+        mem_available_pct=50.0,
+        throttled=False,
+        latency_ratio=1.0,
+        io_rate=0,
+        io_baseline=0,
+        gpu_pct=85.0,
+        wakeups_per_sec=100,
+    )
+    assert breakdown.gpu == 20  # Above 80% threshold
+
+
+def test_stress_gpu_below_threshold():
+    """No GPU stress below 80%."""
+    breakdown = calculate_stress(
+        load_avg=1.0,
+        core_count=4,
+        mem_available_pct=50.0,
+        throttled=False,
+        latency_ratio=1.0,
+        io_rate=0,
+        io_baseline=0,
+        gpu_pct=70.0,
+        wakeups_per_sec=100,
+    )
+    assert breakdown.gpu == 0
+
+
+def test_stress_wakeups_contribution():
+    """Wakeups stress when above 1000/sec."""
+    breakdown = calculate_stress(
+        load_avg=1.0,
+        core_count=4,
+        mem_available_pct=50.0,
+        throttled=False,
+        latency_ratio=1.0,
+        io_rate=0,
+        io_baseline=0,
+        gpu_pct=0.0,
+        wakeups_per_sec=1500,
+    )
+    assert breakdown.wakeups == 20  # Above 1000/sec threshold
+
+
+def test_stress_wakeups_below_threshold():
+    """No wakeups stress below 1000/sec."""
+    breakdown = calculate_stress(
+        load_avg=1.0,
+        core_count=4,
+        mem_available_pct=50.0,
+        throttled=False,
+        latency_ratio=1.0,
+        io_rate=0,
+        io_baseline=0,
+        gpu_pct=0.0,
+        wakeups_per_sec=500,
+    )
+    assert breakdown.wakeups == 0
