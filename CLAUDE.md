@@ -24,11 +24,14 @@ uv run ruff format .           # Format
 | Module | Purpose |
 |--------|---------|
 | `cli.py` | Click-based CLI commands |
+| `config.py` | Configuration loading/saving (TOML) |
 | `daemon.py` | Background sampler with adaptive intervals |
-| `collector.py` | Metrics collection via psutil |
+| `collector.py` | Metrics collection via powermetrics |
 | `stress.py` | Multi-factor stress scoring |
-| `forensics.py` | Pause event capture (spindump, logs) |
+| `forensics.py` | Pause event capture (spindump, tailspin, logs) |
 | `storage.py` | SQLite operations with auto-pruning |
+| `notifications.py` | macOS notification center alerts |
+| `sleepwake.py` | Sleep/wake detection via pmset |
 | `tui/` | Textual-based dashboard |
 
 ## Key Design Decisions
@@ -79,6 +82,7 @@ pause-monitor events      # List pause events
 pause-monitor events <id> # Inspect specific event
 pause-monitor history     # Query historical data
 pause-monitor config      # Manage configuration
+pause-monitor prune       # Delete old data per retention policy
 pause-monitor install     # Set up launchd service
 pause-monitor uninstall   # Remove launchd service
 ```
