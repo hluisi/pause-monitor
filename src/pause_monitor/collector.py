@@ -248,7 +248,7 @@ class PowermetricsStream:
         "/usr/bin/powermetrics",
         "--samplers",
         "cpu_power,gpu_power,thermal",
-        "--output-format",
+        "-f",
         "plist",
     ]
 
@@ -274,8 +274,29 @@ class PowermetricsStream:
             self._process = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.PIPE,
             )
+
+            # Give it a moment to fail if it's going to
+            await asyncio.sleep(0.1)
+
+            if self._process.returncode is not None:
+                # Process already exited - likely permission error
+                stderr = b""
+                if self._process.stderr:
+                    stderr = await self._process.stderr.read()
+                stderr_msg = stderr.decode().strip()
+
+                self._status = StreamStatus.FAILED
+                if "superuser" in stderr_msg.lower():
+                    log.error("powermetrics_requires_sudo")
+                    raise PermissionError(
+                        "powermetrics requires root privileges. Run with: sudo pause-monitor daemon"
+                    )
+                else:
+                    log.error("powermetrics_start_failed", error=stderr_msg)
+                    raise RuntimeError(f"powermetrics failed: {stderr_msg}")
+
             self._status = StreamStatus.RUNNING
             log.info("powermetrics_started", interval_ms=self.interval_ms)
         except (FileNotFoundError, PermissionError) as e:
