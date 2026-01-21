@@ -2,7 +2,7 @@
 
 import plistlib
 from datetime import datetime
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -103,6 +103,7 @@ async def test_powermetrics_stream_status_running():
         mock_process.returncode = None
         mock_process.stdout = AsyncMock()
         mock_process.stdout.__aiter__ = AsyncMock(return_value=iter([]))
+        mock_process.terminate = MagicMock()
         mock_exec.return_value = mock_process
 
         await stream.start()
@@ -119,7 +120,7 @@ async def test_powermetrics_stream_stop():
     with patch("asyncio.create_subprocess_exec") as mock_exec:
         mock_process = AsyncMock()
         mock_process.returncode = None
-        mock_process.terminate = AsyncMock()
+        mock_process.terminate = MagicMock()
         mock_process.wait = AsyncMock()
         mock_exec.return_value = mock_process
 
