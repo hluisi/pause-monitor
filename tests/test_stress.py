@@ -1,6 +1,24 @@
 """Tests for stress score calculation."""
 
-from pause_monitor.stress import StressBreakdown, calculate_stress
+from pause_monitor.stress import (
+    MemoryPressureLevel,
+    StressBreakdown,
+    calculate_stress,
+    get_memory_pressure_fast,
+)
+
+
+def test_memory_pressure_returns_level():
+    """get_memory_pressure_fast returns valid percentage."""
+    level = get_memory_pressure_fast()
+    assert 0 <= level <= 100
+
+
+def test_memory_pressure_level_enum():
+    """MemoryPressureLevel categorizes correctly."""
+    assert MemoryPressureLevel.from_percent(80) == MemoryPressureLevel.NORMAL
+    assert MemoryPressureLevel.from_percent(35) == MemoryPressureLevel.WARNING
+    assert MemoryPressureLevel.from_percent(10) == MemoryPressureLevel.CRITICAL
 
 
 def test_stress_breakdown_total():

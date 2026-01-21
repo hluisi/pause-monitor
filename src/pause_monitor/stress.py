@@ -1,6 +1,50 @@
 """Stress score calculation for pause-monitor."""
 
+import ctypes
 from dataclasses import dataclass
+from enum import Enum
+
+
+class MemoryPressureLevel(Enum):
+    """Memory pressure categories."""
+
+    NORMAL = "normal"  # >50% available
+    WARNING = "warning"  # 20-50% available
+    CRITICAL = "critical"  # <20% available
+
+    @classmethod
+    def from_percent(cls, available_pct: int) -> "MemoryPressureLevel":
+        """Categorize memory pressure from availability percentage."""
+        if available_pct > 50:
+            return cls.NORMAL
+        elif available_pct >= 20:
+            return cls.WARNING
+        else:
+            return cls.CRITICAL
+
+
+def get_memory_pressure_fast() -> int:
+    """Get memory pressure level via sysctl (no subprocess).
+
+    Returns:
+        Percentage of memory "free" (0-100). Higher = more available.
+    """
+    libc = ctypes.CDLL("/usr/lib/libc.dylib")
+    size = ctypes.c_size_t(4)
+    level = ctypes.c_int()
+
+    result = libc.sysctlbyname(
+        b"kern.memorystatus_level",
+        ctypes.byref(level),
+        ctypes.byref(size),
+        None,
+        0,
+    )
+
+    if result != 0:
+        return 50  # Fallback: assume moderate pressure
+
+    return level.value
 
 
 @dataclass
