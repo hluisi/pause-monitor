@@ -15,6 +15,9 @@ log = structlog.get_logger()
 
 SCHEMA_VERSION = 1
 
+# Valid event status values
+VALID_EVENT_STATUSES = frozenset({"unreviewed", "reviewed", "pinned", "dismissed"})
+
 SCHEMA = """
 -- Periodic samples (one row per sample interval)
 CREATE TABLE IF NOT EXISTS samples (
@@ -128,7 +131,7 @@ def get_schema_version(conn: sqlite3.Connection) -> int:
 
 
 def migrate_add_event_status(conn: sqlite3.Connection) -> None:
-    """Add status column to events table if missing.
+    """Add status and notes columns to events table if missing.
 
     Migration sets existing events to 'reviewed' (not 'unreviewed')
     since they are legacy events that existed before status tracking.
@@ -139,6 +142,9 @@ def migrate_add_event_status(conn: sqlite3.Connection) -> None:
     if "status" not in columns:
         conn.execute("ALTER TABLE events ADD COLUMN status TEXT DEFAULT 'reviewed'")
         log.info("migration_applied", migration="add_event_status")
+    if "notes" not in columns:
+        conn.execute("ALTER TABLE events ADD COLUMN notes TEXT")
+        log.info("migration_applied", migration="add_event_notes")
     conn.commit()
 
 
@@ -389,7 +395,14 @@ def update_event_status(
         event_id: The event ID to update
         status: New status (unreviewed, reviewed, pinned, dismissed)
         notes: Optional notes (if None, existing notes are preserved)
+
+    Raises:
+        ValueError: If status is not a valid event status
     """
+    if status not in VALID_EVENT_STATUSES:
+        raise ValueError(
+            f"Invalid status '{status}'. Must be one of: {sorted(VALID_EVENT_STATUSES)}"
+        )
     if notes is not None:
         conn.execute(
             "UPDATE events SET status = ?, notes = ? WHERE id = ?",

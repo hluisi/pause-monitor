@@ -1,5 +1,6 @@
 """Tests for SQLite storage layer."""
 
+import pytest
 import sqlite3
 from datetime import datetime
 from pathlib import Path
@@ -651,6 +652,31 @@ def test_update_event_status_preserves_notes(initialized_db: Path, sample_stress
     assert retrieved.notes == "Original note"
 
 
+def test_update_event_status_invalid_status(initialized_db: Path, sample_stress):
+    """update_event_status rejects invalid status values."""
+    from pause_monitor.storage import Event, insert_event, update_event_status
+
+    event = Event(
+        timestamp=datetime.now(),
+        duration=2.5,
+        stress=sample_stress,
+        culprits=["test_process"],
+        event_dir=None,
+        status="unreviewed",
+    )
+
+    conn = sqlite3.connect(initialized_db)
+    event_id = insert_event(conn, event)
+
+    # Invalid status should raise ValueError
+    with pytest.raises(ValueError) as exc_info:
+        update_event_status(conn, event_id, "invalid_status")
+
+    assert "Invalid status 'invalid_status'" in str(exc_info.value)
+    assert "dismissed" in str(exc_info.value)  # Shows valid options
+    conn.close()
+
+
 def test_get_events_returns_status(initialized_db: Path, sample_stress):
     """get_events includes status field in results."""
     from pause_monitor.storage import Event, get_events, insert_event
@@ -677,10 +703,10 @@ def test_get_events_returns_status(initialized_db: Path, sample_stress):
 
 
 def test_migrate_add_event_status(tmp_path: Path):
-    """migrate_add_event_status adds status column to existing database."""
+    """migrate_add_event_status adds status and notes columns to existing database."""
     from pause_monitor.storage import migrate_add_event_status
 
-    # Create a database with old schema (no status column)
+    # Create a database with old schema (no status or notes columns)
     db_path = tmp_path / "old.db"
     conn = sqlite3.connect(db_path)
     conn.execute("""
@@ -695,8 +721,7 @@ def test_migrate_add_event_status(tmp_path: Path):
             stress_latency  INTEGER,
             stress_io       INTEGER,
             culprits        TEXT,
-            event_dir       TEXT,
-            notes           TEXT
+            event_dir       TEXT
         )
     """)
 
@@ -710,14 +735,16 @@ def test_migrate_add_event_status(tmp_path: Path):
     # Run migration
     migrate_add_event_status(conn)
 
-    # Verify column exists
+    # Verify both columns exist
     cursor = conn.execute("PRAGMA table_info(events)")
     columns = {row[1] for row in cursor.fetchall()}
     assert "status" in columns
+    assert "notes" in columns
 
     # Verify existing event has 'reviewed' status (not 'unreviewed')
-    row = conn.execute("SELECT status FROM events WHERE id = 1").fetchone()
+    row = conn.execute("SELECT status, notes FROM events WHERE id = 1").fetchone()
     assert row[0] == "reviewed"
+    assert row[1] is None  # Notes should be NULL
 
     conn.close()
 
