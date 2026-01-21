@@ -268,3 +268,62 @@ def test_forensics_capture_includes_ring_buffer(tmp_path):
     # Verify contents
     data = json.loads((tmp_path / "ring_buffer.json").read_text())
     assert len(data["samples"]) == 2
+
+
+def test_forensics_capture_ring_buffer_with_snapshots(tmp_path):
+    """ForensicsCapture correctly serializes process snapshots."""
+    import json
+
+    from pause_monitor.forensics import ForensicsCapture
+    from pause_monitor.ringbuffer import ProcessInfo, ProcessSnapshot, RingBuffer
+    from pause_monitor.stress import StressBreakdown
+
+    # Create buffer with samples and a snapshot
+    buffer = RingBuffer(max_samples=10)
+    stress = StressBreakdown(load=10, memory=5, thermal=0, latency=0, io=0, gpu=0, wakeups=0)
+    buffer.push(stress, tier=1)
+    buffer.push(stress, tier=2)
+
+    # Manually add a snapshot to test serialization
+    from datetime import datetime
+
+    snapshot = ProcessSnapshot(
+        timestamp=datetime.now(),
+        trigger="tier2_entry",
+        by_cpu=[
+            ProcessInfo(pid=123, name="chrome", cpu_pct=45.0, memory_mb=512.0),
+            ProcessInfo(pid=456, name="python", cpu_pct=30.0, memory_mb=256.0),
+        ],
+        by_memory=[
+            ProcessInfo(pid=123, name="chrome", cpu_pct=45.0, memory_mb=512.0),
+            ProcessInfo(pid=789, name="vscode", cpu_pct=5.0, memory_mb=1024.0),
+        ],
+    )
+    buffer._snapshots.append(snapshot)
+    frozen = buffer.freeze()
+
+    # Create capture and write
+    capture = ForensicsCapture(event_dir=tmp_path)
+    capture.write_ring_buffer(frozen)
+
+    # Verify contents
+    data = json.loads((tmp_path / "ring_buffer.json").read_text())
+
+    # Verify samples structure
+    assert len(data["samples"]) == 2
+    sample = data["samples"][0]
+    assert "timestamp" in sample
+    assert "stress" in sample
+    assert "tier" in sample
+    assert sample["tier"] == 1
+    assert sample["stress"]["load"] == 10
+
+    # Verify snapshots structure
+    assert len(data["snapshots"]) == 1
+    snap = data["snapshots"][0]
+    assert "timestamp" in snap
+    assert snap["trigger"] == "tier2_entry"
+    assert len(snap["by_cpu"]) == 2
+    assert len(snap["by_memory"]) == 2
+    assert snap["by_cpu"][0]["name"] == "chrome"
+    assert snap["by_cpu"][0]["cpu_pct"] == 45.0
