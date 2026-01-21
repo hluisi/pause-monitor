@@ -155,10 +155,11 @@ def get_recent_sleep_events(since: datetime | None = None) -> list[SleepWakeEven
         result = subprocess.run(
             ["pmset", "-g", "log"],
             capture_output=True,
-            text=True,
             timeout=5,
         )
-        events = parse_pmset_log(result.stdout)
+        # Decode with error handling - pmset log can contain non-UTF-8 bytes
+        stdout = result.stdout.decode("utf-8", errors="replace")
+        events = parse_pmset_log(stdout)
         return [e for e in events if e.timestamp >= since]
     except (subprocess.TimeoutExpired, FileNotFoundError) as e:
         log.warning("pmset_log_failed", error=str(e))
