@@ -111,7 +111,7 @@ class TestEventsCommand:
             mock_config = MagicMock(spec=Config)
             mock_config.db_path = db_path
             mock_load.return_value = mock_config
-            result = runner.invoke(main, ["events", str(event_id)])
+            result = runner.invoke(main, ["events", "show", str(event_id)])
 
         assert result.exit_code == 0
         assert f"Event #{event_id}" in result.output
@@ -134,7 +134,7 @@ class TestEventsCommand:
             mock_config = MagicMock(spec=Config)
             mock_config.db_path = db_path
             mock_load.return_value = mock_config
-            result = runner.invoke(main, ["events", "99999"])
+            result = runner.invoke(main, ["events", "show", "99999"])
 
         assert result.exit_code == 0
         assert "Event 99999 not found" in result.output
@@ -1100,6 +1100,348 @@ class TestInstallCommand:
 
         assert result.exit_code == 0
         assert log_dir.exists()
+
+
+class TestEventsStatusManagement:
+    """Tests for events status management commands."""
+
+    def test_events_list_shows_status(self, runner: CliRunner, tmp_path: Path) -> None:
+        """Events list shows status column."""
+        db_path = tmp_path / "data.db"
+        init_database(db_path)
+
+        # Insert test event
+        import sqlite3
+
+        conn = sqlite3.connect(db_path)
+        stress = StressBreakdown(load=10, memory=5, thermal=0, latency=0, io=0, gpu=0, wakeups=0)
+        event = Event(
+            timestamp=datetime(2026, 1, 20, 14, 30, 0),
+            duration=2.5,
+            stress=stress,
+            culprits=["codemeter"],
+            event_dir=None,
+            notes=None,
+        )
+        insert_event(conn, event)
+        conn.close()
+
+        with patch("pause_monitor.config.Config.load") as mock_load:
+            mock_config = MagicMock(spec=Config)
+            mock_config.db_path = db_path
+            mock_load.return_value = mock_config
+            result = runner.invoke(main, ["events"])
+
+        assert result.exit_code == 0
+        assert "unreviewed" in result.output or "reviewed" in result.output
+
+    def test_events_filter_by_status(self, runner: CliRunner, tmp_path: Path) -> None:
+        """Events can be filtered by status."""
+        db_path = tmp_path / "data.db"
+        init_database(db_path)
+
+        # Insert test events with different statuses
+        import sqlite3
+
+        from pause_monitor.storage import update_event_status
+
+        conn = sqlite3.connect(db_path)
+        stress = StressBreakdown(load=10, memory=5, thermal=0, latency=0, io=0, gpu=0, wakeups=0)
+
+        # Create two events
+        event1 = Event(
+            timestamp=datetime(2026, 1, 20, 14, 30, 0),
+            duration=2.5,
+            stress=stress,
+            culprits=[],
+            event_dir=None,
+            notes=None,
+        )
+        event2 = Event(
+            timestamp=datetime(2026, 1, 20, 15, 30, 0),
+            duration=3.0,
+            stress=stress,
+            culprits=[],
+            event_dir=None,
+            notes=None,
+        )
+        insert_event(conn, event1)
+        event2_id = insert_event(conn, event2)
+
+        # Mark one as reviewed
+        update_event_status(conn, event2_id, "reviewed")
+        conn.close()
+
+        with patch("pause_monitor.config.Config.load") as mock_load:
+            mock_config = MagicMock(spec=Config)
+            mock_config.db_path = db_path
+            mock_load.return_value = mock_config
+            result = runner.invoke(main, ["events", "--status", "unreviewed"])
+
+        assert result.exit_code == 0
+        # Should only show the unreviewed event (event1)
+
+    def test_events_mark_reviewed(self, runner: CliRunner, tmp_path: Path) -> None:
+        """Mark command changes event status."""
+        db_path = tmp_path / "data.db"
+        init_database(db_path)
+
+        # Insert test event
+        import sqlite3
+
+        conn = sqlite3.connect(db_path)
+        stress = StressBreakdown(load=10, memory=5, thermal=0, latency=0, io=0, gpu=0, wakeups=0)
+        event = Event(
+            timestamp=datetime(2026, 1, 20, 14, 30, 0),
+            duration=2.5,
+            stress=stress,
+            culprits=[],
+            event_dir=None,
+            notes=None,
+        )
+        event_id = insert_event(conn, event)
+        conn.close()
+
+        with patch("pause_monitor.config.Config.load") as mock_load:
+            mock_config = MagicMock(spec=Config)
+            mock_config.db_path = db_path
+            mock_load.return_value = mock_config
+            result = runner.invoke(main, ["events", "mark", str(event_id), "--reviewed"])
+
+        assert result.exit_code == 0
+        assert "reviewed" in result.output.lower()
+
+    def test_events_mark_with_notes(self, runner: CliRunner, tmp_path: Path) -> None:
+        """Mark command can add notes."""
+        db_path = tmp_path / "data.db"
+        init_database(db_path)
+
+        # Insert test event
+        import sqlite3
+
+        conn = sqlite3.connect(db_path)
+        stress = StressBreakdown(load=10, memory=5, thermal=0, latency=0, io=0, gpu=0, wakeups=0)
+        event = Event(
+            timestamp=datetime(2026, 1, 20, 14, 30, 0),
+            duration=2.5,
+            stress=stress,
+            culprits=[],
+            event_dir=None,
+            notes=None,
+        )
+        event_id = insert_event(conn, event)
+        conn.close()
+
+        with patch("pause_monitor.config.Config.load") as mock_load:
+            mock_config = MagicMock(spec=Config)
+            mock_config.db_path = db_path
+            mock_load.return_value = mock_config
+            result = runner.invoke(
+                main,
+                ["events", "mark", str(event_id), "--reviewed", "--notes", "Chrome memory leak"],
+            )
+
+        assert result.exit_code == 0
+
+    def test_events_mark_pinned(self, runner: CliRunner, tmp_path: Path) -> None:
+        """Mark command can pin events."""
+        db_path = tmp_path / "data.db"
+        init_database(db_path)
+
+        # Insert test event
+        import sqlite3
+
+        conn = sqlite3.connect(db_path)
+        stress = StressBreakdown(load=10, memory=5, thermal=0, latency=0, io=0, gpu=0, wakeups=0)
+        event = Event(
+            timestamp=datetime(2026, 1, 20, 14, 30, 0),
+            duration=2.5,
+            stress=stress,
+            culprits=[],
+            event_dir=None,
+            notes=None,
+        )
+        event_id = insert_event(conn, event)
+        conn.close()
+
+        with patch("pause_monitor.config.Config.load") as mock_load:
+            mock_config = MagicMock(spec=Config)
+            mock_config.db_path = db_path
+            mock_load.return_value = mock_config
+            result = runner.invoke(main, ["events", "mark", str(event_id), "--pinned"])
+
+        assert result.exit_code == 0
+        assert "pinned" in result.output.lower()
+
+    def test_events_mark_dismissed(self, runner: CliRunner, tmp_path: Path) -> None:
+        """Mark command can dismiss events."""
+        db_path = tmp_path / "data.db"
+        init_database(db_path)
+
+        # Insert test event
+        import sqlite3
+
+        conn = sqlite3.connect(db_path)
+        stress = StressBreakdown(load=10, memory=5, thermal=0, latency=0, io=0, gpu=0, wakeups=0)
+        event = Event(
+            timestamp=datetime(2026, 1, 20, 14, 30, 0),
+            duration=2.5,
+            stress=stress,
+            culprits=[],
+            event_dir=None,
+            notes=None,
+        )
+        event_id = insert_event(conn, event)
+        conn.close()
+
+        with patch("pause_monitor.config.Config.load") as mock_load:
+            mock_config = MagicMock(spec=Config)
+            mock_config.db_path = db_path
+            mock_load.return_value = mock_config
+            result = runner.invoke(main, ["events", "mark", str(event_id), "--dismissed"])
+
+        assert result.exit_code == 0
+        assert "dismissed" in result.output.lower()
+
+    def test_events_mark_multiple_flags_error(self, runner: CliRunner, tmp_path: Path) -> None:
+        """Mark command errors when multiple status flags given."""
+        db_path = tmp_path / "data.db"
+        init_database(db_path)
+
+        # Insert test event
+        import sqlite3
+
+        conn = sqlite3.connect(db_path)
+        stress = StressBreakdown(load=10, memory=5, thermal=0, latency=0, io=0, gpu=0, wakeups=0)
+        event = Event(
+            timestamp=datetime(2026, 1, 20, 14, 30, 0),
+            duration=2.5,
+            stress=stress,
+            culprits=[],
+            event_dir=None,
+            notes=None,
+        )
+        event_id = insert_event(conn, event)
+        conn.close()
+
+        with patch("pause_monitor.config.Config.load") as mock_load:
+            mock_config = MagicMock(spec=Config)
+            mock_config.db_path = db_path
+            mock_load.return_value = mock_config
+            result = runner.invoke(
+                main, ["events", "mark", str(event_id), "--reviewed", "--pinned"]
+            )
+
+        assert result.exit_code == 1
+        assert "only one status flag" in result.output.lower()
+
+    def test_events_mark_no_flags_error(self, runner: CliRunner, tmp_path: Path) -> None:
+        """Mark command errors when no flags given."""
+        db_path = tmp_path / "data.db"
+        init_database(db_path)
+
+        # Insert test event
+        import sqlite3
+
+        conn = sqlite3.connect(db_path)
+        stress = StressBreakdown(load=10, memory=5, thermal=0, latency=0, io=0, gpu=0, wakeups=0)
+        event = Event(
+            timestamp=datetime(2026, 1, 20, 14, 30, 0),
+            duration=2.5,
+            stress=stress,
+            culprits=[],
+            event_dir=None,
+            notes=None,
+        )
+        event_id = insert_event(conn, event)
+        conn.close()
+
+        with patch("pause_monitor.config.Config.load") as mock_load:
+            mock_config = MagicMock(spec=Config)
+            mock_config.db_path = db_path
+            mock_load.return_value = mock_config
+            result = runner.invoke(main, ["events", "mark", str(event_id)])
+
+        assert result.exit_code == 1
+        assert "specify" in result.output.lower()
+
+    def test_events_mark_nonexistent_event(self, runner: CliRunner, tmp_path: Path) -> None:
+        """Mark command errors for nonexistent event."""
+        db_path = tmp_path / "data.db"
+        init_database(db_path)
+
+        with patch("pause_monitor.config.Config.load") as mock_load:
+            mock_config = MagicMock(spec=Config)
+            mock_config.db_path = db_path
+            mock_load.return_value = mock_config
+            result = runner.invoke(main, ["events", "mark", "99999", "--reviewed"])
+
+        assert result.exit_code == 1
+        assert "not found" in result.output.lower()
+
+    def test_events_mark_notes_only(self, runner: CliRunner, tmp_path: Path) -> None:
+        """Mark command can add notes without changing status."""
+        db_path = tmp_path / "data.db"
+        init_database(db_path)
+
+        # Insert test event
+        import sqlite3
+
+        conn = sqlite3.connect(db_path)
+        stress = StressBreakdown(load=10, memory=5, thermal=0, latency=0, io=0, gpu=0, wakeups=0)
+        event = Event(
+            timestamp=datetime(2026, 1, 20, 14, 30, 0),
+            duration=2.5,
+            stress=stress,
+            culprits=[],
+            event_dir=None,
+            notes=None,
+        )
+        event_id = insert_event(conn, event)
+        conn.close()
+
+        with patch("pause_monitor.config.Config.load") as mock_load:
+            mock_config = MagicMock(spec=Config)
+            mock_config.db_path = db_path
+            mock_load.return_value = mock_config
+            result = runner.invoke(
+                main, ["events", "mark", str(event_id), "--notes", "Just adding notes"]
+            )
+
+        assert result.exit_code == 0
+        assert "notes" in result.output.lower()
+
+    def test_events_show_status_icon(self, runner: CliRunner, tmp_path: Path) -> None:
+        """Events list shows status icons."""
+        db_path = tmp_path / "data.db"
+        init_database(db_path)
+
+        # Insert test event
+        import sqlite3
+
+        conn = sqlite3.connect(db_path)
+        stress = StressBreakdown(load=10, memory=5, thermal=0, latency=0, io=0, gpu=0, wakeups=0)
+        event = Event(
+            timestamp=datetime(2026, 1, 20, 14, 30, 0),
+            duration=2.5,
+            stress=stress,
+            culprits=[],
+            event_dir=None,
+            notes=None,
+        )
+        insert_event(conn, event)
+        conn.close()
+
+        with patch("pause_monitor.config.Config.load") as mock_load:
+            mock_config = MagicMock(spec=Config)
+            mock_config.db_path = db_path
+            mock_load.return_value = mock_config
+            result = runner.invoke(main, ["events"])
+
+        assert result.exit_code == 0
+        # Should show status icon for unreviewed
+        # The icon is "●" for unreviewed
+        assert "●" in result.output or "[unreviewed]" in result.output
 
 
 class TestUninstallCommand:

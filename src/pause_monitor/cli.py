@@ -85,15 +85,34 @@ def status() -> None:
         conn.close()
 
 
-@main.command()
-@click.argument("event_id", required=False, type=int)
+@main.group(invoke_without_command=True)
 @click.option("--limit", "-n", default=20, help="Number of events to show")
-def events(event_id: int | None, limit: int) -> None:
-    """List or inspect pause events."""
-    from pause_monitor.config import Config
-    from pause_monitor.storage import get_connection, get_event_by_id, get_events
+@click.option(
+    "--status",
+    type=click.Choice(["unreviewed", "reviewed", "pinned", "dismissed"]),
+    help="Filter by status",
+)
+@click.pass_context
+def events(ctx, limit: int, status: str | None) -> None:
+    """List pause events.
 
-    config = Config.load()
+    Without subcommand, lists recent events.
+    Use 'events show <id>' to view event details.
+    Use 'events mark <id>' to change event status.
+    """
+    # Store config in context for subcommands
+    from pause_monitor.config import Config
+
+    ctx.ensure_object(dict)
+    ctx.obj["config"] = Config.load()
+
+    # If a subcommand was invoked, let it handle things
+    if ctx.invoked_subcommand is not None:
+        return
+
+    from pause_monitor.storage import get_connection, get_events
+
+    config = ctx.obj["config"]
 
     if not config.db_path.exists():
         click.echo("Database not found. Run 'pause-monitor daemon' first.")
@@ -101,48 +120,132 @@ def events(event_id: int | None, limit: int) -> None:
 
     conn = get_connection(config.db_path)
     try:
-        if event_id:
-            # Show single event details
-            event = get_event_by_id(conn, event_id)
-            if not event:
-                click.echo(f"Event {event_id} not found.")
-                return
+        # List events
+        event_list = get_events(conn, limit=limit, status=status)
 
-            click.echo(f"Event #{event.id}")
-            click.echo(f"Time: {event.timestamp}")
-            click.echo(f"Duration: {event.duration:.1f}s")
-            click.echo(f"Stress: {event.stress.total}/100")
-            click.echo(f"  Load: {event.stress.load}")
-            click.echo(f"  Memory: {event.stress.memory}")
-            click.echo(f"  Thermal: {event.stress.thermal}")
-            click.echo(f"  Latency: {event.stress.latency}")
-            click.echo(f"  I/O: {event.stress.io}")
+        if not event_list:
+            click.echo("No events recorded.")
+            return
 
-            if event.culprits:
-                click.echo(f"Culprits: {', '.join(event.culprits)}")
+        # Status icons for visual distinction
+        status_icons = {
+            "unreviewed": "●",
+            "reviewed": "○",
+            "pinned": "◆",
+            "dismissed": "◇",
+        }
 
-            if event.event_dir:
-                click.echo(f"Forensics: {event.event_dir}")
+        click.echo(
+            f"{'':3}{'ID':>5}  {'Time':20}  {'Duration':>10}  "
+            f"{'Stress':>7}  {'Status':12}  Culprits"
+        )
+        click.echo("-" * 85)
 
-            if event.notes:
-                click.echo(f"Notes: {event.notes}")
-        else:
-            # List events
-            event_list = get_events(conn, limit=limit)
+        for event in event_list:
+            icon = status_icons.get(event.status, "?")
+            culprits_str = ", ".join(event.culprits[:2]) if event.culprits else "-"
+            click.echo(
+                f"{icon:3}{event.id:>5}  {event.timestamp.strftime('%Y-%m-%d %H:%M:%S'):20}  "
+                f"{event.duration:>8.1f}s  {event.stress.total:>6}/100  "
+                f"{event.status:12}  {culprits_str}"
+            )
+    finally:
+        conn.close()
 
-            if not event_list:
-                click.echo("No events recorded.")
-                return
 
-            click.echo(f"{'ID':>5}  {'Time':20}  {'Duration':>10}  {'Stress':>7}  Culprits")
-            click.echo("-" * 70)
+@events.command("show")
+@click.argument("event_id", type=int)
+@click.pass_context
+def events_show(ctx, event_id: int) -> None:
+    """Show details of a specific event."""
+    from pause_monitor.storage import get_connection, get_event_by_id
 
-            for event in event_list:
-                culprits_str = ", ".join(event.culprits[:2]) if event.culprits else "-"
-                click.echo(
-                    f"{event.id:>5}  {event.timestamp.strftime('%Y-%m-%d %H:%M:%S'):20}  "
-                    f"{event.duration:>8.1f}s  {event.stress.total:>6}/100  {culprits_str}"
-                )
+    config = ctx.obj["config"]
+
+    if not config.db_path.exists():
+        click.echo("Database not found. Run 'pause-monitor daemon' first.")
+        return
+
+    conn = get_connection(config.db_path)
+    try:
+        event = get_event_by_id(conn, event_id)
+        if not event:
+            click.echo(f"Event {event_id} not found.")
+            return
+
+        click.echo(f"Event #{event.id}")
+        click.echo(f"Time: {event.timestamp}")
+        click.echo(f"Duration: {event.duration:.1f}s")
+        click.echo(f"Status: {event.status}")
+        click.echo(f"Stress: {event.stress.total}/100")
+        click.echo(f"  Load: {event.stress.load}")
+        click.echo(f"  Memory: {event.stress.memory}")
+        click.echo(f"  Thermal: {event.stress.thermal}")
+        click.echo(f"  Latency: {event.stress.latency}")
+        click.echo(f"  I/O: {event.stress.io}")
+
+        if event.culprits:
+            click.echo(f"Culprits: {', '.join(event.culprits)}")
+
+        if event.event_dir:
+            click.echo(f"Forensics: {event.event_dir}")
+
+        if event.notes:
+            click.echo(f"Notes: {event.notes}")
+    finally:
+        conn.close()
+
+
+@events.command("mark")
+@click.argument("event_id", type=int)
+@click.option("--reviewed", is_flag=True, help="Mark as reviewed")
+@click.option("--pinned", is_flag=True, help="Pin event (protected from pruning)")
+@click.option("--dismissed", is_flag=True, help="Dismiss event (eligible for pruning)")
+@click.option("--notes", help="Add notes to event")
+def events_mark(
+    event_id: int, reviewed: bool, pinned: bool, dismissed: bool, notes: str | None
+) -> None:
+    """Change event status."""
+    from pause_monitor.config import Config
+    from pause_monitor.storage import get_connection, get_event_by_id, update_event_status
+
+    # Determine status
+    status_flags = sum([reviewed, pinned, dismissed])
+    if status_flags > 1:
+        click.echo("Error: Only one status flag allowed", err=True)
+        raise SystemExit(1)
+
+    status = None
+    if reviewed:
+        status = "reviewed"
+    elif pinned:
+        status = "pinned"
+    elif dismissed:
+        status = "dismissed"
+
+    if not status and not notes:
+        click.echo("Error: Specify --reviewed, --pinned, --dismissed, or --notes", err=True)
+        raise SystemExit(1)
+
+    config = Config.load()
+
+    if not config.db_path.exists():
+        click.echo("Error: Database not found", err=True)
+        raise SystemExit(1)
+
+    conn = get_connection(config.db_path)
+    try:
+        event = get_event_by_id(conn, event_id)
+        if not event:
+            click.echo(f"Error: Event {event_id} not found", err=True)
+            raise SystemExit(1)
+
+        if status:
+            update_event_status(conn, event_id, status, notes)
+            click.echo(f"Event {event_id} marked as {status}")
+        elif notes:
+            update_event_status(conn, event_id, event.status, notes)
+            click.echo(f"Notes added to event {event_id}")
     finally:
         conn.close()
 

@@ -300,25 +300,29 @@ def get_events(
     start: datetime | None = None,
     end: datetime | None = None,
     limit: int = 100,
+    status: str | None = None,
 ) -> list[Event]:
-    """Get events, optionally filtered by time range."""
+    """Get events, optionally filtered by time range and/or status."""
     query = """
         SELECT id, timestamp, duration, stress_total, stress_load, stress_memory,
                stress_thermal, stress_latency, stress_io, culprits, event_dir, status, notes
         FROM events
     """
     params: list = []
+    conditions = []
 
-    if start or end:
-        query += " WHERE "
-        conditions = []
-        if start:
-            conditions.append("timestamp >= ?")
-            params.append(start.timestamp())
-        if end:
-            conditions.append("timestamp <= ?")
-            params.append(end.timestamp())
-        query += " AND ".join(conditions)
+    if start:
+        conditions.append("timestamp >= ?")
+        params.append(start.timestamp())
+    if end:
+        conditions.append("timestamp <= ?")
+        params.append(end.timestamp())
+    if status:
+        conditions.append("status = ?")
+        params.append(status)
+
+    if conditions:
+        query += " WHERE " + " AND ".join(conditions)
 
     query += " ORDER BY timestamp DESC LIMIT ?"
     params.append(limit)
