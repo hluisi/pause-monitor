@@ -102,6 +102,11 @@ def identify_culprits(contents: "BufferContents") -> list[dict]:
     - High load stress -> top CPU consumers
     - High GPU stress -> GPU-intensive processes
 
+    Note: Thermal and latency factors are NOT included because they are
+    system-wide conditions without clear per-process attribution.
+    Thermal throttling affects all processes equally, and latency spikes
+    are a symptom rather than a cause.
+
     Args:
         contents: Frozen ring buffer contents with samples and snapshots
 
@@ -138,7 +143,10 @@ def identify_culprits(contents: "BufferContents") -> list[dict]:
 
     culprits = []
 
-    # Threshold for considering a factor "elevated"
+    # Threshold for considering a factor "elevated".
+    # Individual factors contribute 0-20 to 0-40 points to the total stress score.
+    # A threshold of 10 means the factor is contributing meaningfully (~25-50% of
+    # its maximum) and warrants investigation.
     threshold = 10
 
     if avg_memory >= threshold:

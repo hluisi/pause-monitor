@@ -674,11 +674,12 @@ async def test_daemon_handles_pause_with_buffer_contents(tmp_path: Path):
                 contents = BufferContents(samples=[], snapshots=[])
 
                 # Mock was_recently_asleep and forensics
+                # Note: actual duration must be >= config.alerts.pause_min_duration (default 2.0)
                 with patch("pause_monitor.daemon.was_recently_asleep", return_value=None):
                     with patch("pause_monitor.daemon.run_full_capture", new_callable=AsyncMock):
                         with patch("pause_monitor.daemon.identify_culprits", return_value=[]):
                             await daemon._handle_pause_from_sentinel(
-                                actual=0.5,
+                                actual=2.5,
                                 expected=0.1,
                                 contents=contents,
                             )
@@ -688,7 +689,7 @@ async def test_daemon_handles_pause_with_buffer_contents(tmp_path: Path):
 
                 events = get_events(daemon._conn)
                 assert len(events) == 1
-                assert events[0].duration == 0.5
+                assert events[0].duration == 2.5
 
 
 @pytest.mark.asyncio

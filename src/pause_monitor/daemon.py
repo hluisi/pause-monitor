@@ -143,6 +143,7 @@ class Daemon:
         self._powermetrics: PowermetricsStream | None = None
         self._caffeinate_proc: asyncio.subprocess.Process | None = None
         self._shutdown_event = asyncio.Event()
+        self._auto_prune_task: asyncio.Task | None = None
 
     async def start(self) -> None:
         """Start the daemon."""
@@ -171,8 +172,8 @@ class Daemon:
         self.state.running = True
         log.info("daemon_started")
 
-        # Start auto-prune task
-        asyncio.create_task(self._auto_prune())
+        # Start auto-prune task (tracked for cleanup)
+        self._auto_prune_task = asyncio.create_task(self._auto_prune())
 
         # Run sentinel (replaces the old powermetrics-based _run_loop)
         await self.sentinel.start()
@@ -184,6 +185,15 @@ class Daemon:
 
         # Stop sentinel
         self.sentinel.stop()
+
+        # Cancel auto-prune task
+        if self._auto_prune_task:
+            self._auto_prune_task.cancel()
+            try:
+                await self._auto_prune_task
+            except asyncio.CancelledError:
+                pass
+            self._auto_prune_task = None
 
         # Stop powermetrics (kept for backwards compatibility)
         if self._powermetrics:
@@ -523,6 +533,15 @@ class Daemon:
                 actual=actual,
                 expected=expected,
                 wake_reason=recent_wake.reason,
+            )
+            return
+
+        # Check minimum duration threshold
+        if actual < self.config.alerts.pause_min_duration:
+            log.debug(
+                "pause_below_threshold",
+                duration=actual,
+                min_duration=self.config.alerts.pause_min_duration,
             )
             return
 
