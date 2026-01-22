@@ -57,6 +57,23 @@ class SuspectsConfig:
 
 
 @dataclass
+class SentinelConfig:
+    """Sentinel timing configuration."""
+
+    fast_interval_ms: int = 100
+    slow_interval_ms: int = 1000
+    ring_buffer_seconds: int = 30
+
+
+@dataclass
+class TiersConfig:
+    """Tier threshold configuration."""
+
+    elevated_threshold: int = 15
+    critical_threshold: int = 50
+
+
+@dataclass
 class Config:
     """Main configuration container."""
 
@@ -64,6 +81,8 @@ class Config:
     retention: RetentionConfig = field(default_factory=RetentionConfig)
     alerts: AlertsConfig = field(default_factory=AlertsConfig)
     suspects: SuspectsConfig = field(default_factory=SuspectsConfig)
+    sentinel: SentinelConfig = field(default_factory=SentinelConfig)
+    tiers: TiersConfig = field(default_factory=TiersConfig)
     learning_mode: bool = False
 
     @property
@@ -140,6 +159,19 @@ class Config:
         suspects = tomlkit.table()
         suspects.add("patterns", self.suspects.patterns)
         doc.add("suspects", suspects)
+        doc.add(tomlkit.nl())
+
+        sentinel = tomlkit.table()
+        sentinel.add("fast_interval_ms", self.sentinel.fast_interval_ms)
+        sentinel.add("slow_interval_ms", self.sentinel.slow_interval_ms)
+        sentinel.add("ring_buffer_seconds", self.sentinel.ring_buffer_seconds)
+        doc.add("sentinel", sentinel)
+        doc.add(tomlkit.nl())
+
+        tiers = tomlkit.table()
+        tiers.add("elevated_threshold", self.tiers.elevated_threshold)
+        tiers.add("critical_threshold", self.tiers.critical_threshold)
+        doc.add("tiers", tiers)
 
         path.write_text(tomlkit.dumps(doc))
 
@@ -158,6 +190,8 @@ class Config:
         retention_data = data.get("retention", {})
         alerts_data = data.get("alerts", {})
         suspects_data = data.get("suspects", {})
+        sentinel_data = data.get("sentinel", {})
+        tiers_data = data.get("tiers", {})
 
         return cls(
             sampling=SamplingConfig(
@@ -194,6 +228,15 @@ class Config:
                         "WindowServer",
                     ],
                 ),
+            ),
+            sentinel=SentinelConfig(
+                fast_interval_ms=sentinel_data.get("fast_interval_ms", 100),
+                slow_interval_ms=sentinel_data.get("slow_interval_ms", 1000),
+                ring_buffer_seconds=sentinel_data.get("ring_buffer_seconds", 30),
+            ),
+            tiers=TiersConfig(
+                elevated_threshold=tiers_data.get("elevated_threshold", 15),
+                critical_threshold=tiers_data.get("critical_threshold", 50),
             ),
             learning_mode=data.get("learning_mode", False),
         )

@@ -114,3 +114,66 @@ def test_config_load_missing_file_returns_defaults(tmp_path):
     config = Config.load(config_path)
     assert config.sampling.normal_interval == 5
     assert config.learning_mode is False
+
+
+def test_sentinel_config_defaults():
+    """SentinelConfig has correct defaults."""
+    from pause_monitor.config import SentinelConfig
+
+    config = SentinelConfig()
+    assert config.fast_interval_ms == 100
+    assert config.slow_interval_ms == 1000
+    assert config.ring_buffer_seconds == 30
+
+
+def test_tiers_config_defaults():
+    """TiersConfig has correct defaults."""
+    from pause_monitor.config import TiersConfig
+
+    config = TiersConfig()
+    assert config.elevated_threshold == 15
+    assert config.critical_threshold == 50
+
+
+def test_config_loads_sentinel_section(tmp_path):
+    """Config loads [sentinel] section from TOML."""
+    config_file = tmp_path / "config.toml"
+    config_file.write_text("""
+[sentinel]
+fast_interval_ms = 200
+slow_interval_ms = 2000
+ring_buffer_seconds = 60
+
+[tiers]
+elevated_threshold = 20
+critical_threshold = 60
+""")
+
+    config = Config.load(config_file)
+    assert config.sentinel.fast_interval_ms == 200
+    assert config.sentinel.slow_interval_ms == 2000
+    assert config.sentinel.ring_buffer_seconds == 60
+    assert config.tiers.elevated_threshold == 20
+    assert config.tiers.critical_threshold == 60
+
+
+def test_config_save_includes_sentinel_section(tmp_path):
+    """Config.save() writes sentinel and tiers sections."""
+    config_path = tmp_path / "config.toml"
+    config = Config()
+    config.sentinel.fast_interval_ms = 150
+    config.tiers.elevated_threshold = 25
+    config.save(config_path)
+
+    content = config_path.read_text()
+    assert "fast_interval_ms = 150" in content
+    assert "elevated_threshold = 25" in content
+
+
+def test_full_config_includes_sentinel_and_tiers():
+    """Full Config object has sentinel and tiers fields."""
+    config = Config()
+    assert hasattr(config, "sentinel")
+    assert hasattr(config, "tiers")
+    assert config.sentinel.fast_interval_ms == 100
+    assert config.tiers.elevated_threshold == 15
