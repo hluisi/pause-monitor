@@ -163,15 +163,15 @@ def events_show(ctx, event_id: int) -> None:
     config = ctx.obj["config"]
 
     if not config.db_path.exists():
-        click.echo("Database not found. Run 'pause-monitor daemon' first.")
-        return
+        click.echo("Error: Database not found", err=True)
+        raise SystemExit(1)
 
     conn = get_connection(config.db_path)
     try:
         event = get_event_by_id(conn, event_id)
         if not event:
-            click.echo(f"Event {event_id} not found.")
-            return
+            click.echo(f"Error: Event {event_id} not found", err=True)
+            raise SystemExit(1)
 
         click.echo(f"Event #{event.id}")
         click.echo(f"Time: {event.timestamp}")
@@ -202,11 +202,11 @@ def events_show(ctx, event_id: int) -> None:
 @click.option("--pinned", is_flag=True, help="Pin event (protected from pruning)")
 @click.option("--dismissed", is_flag=True, help="Dismiss event (eligible for pruning)")
 @click.option("--notes", help="Add notes to event")
+@click.pass_context
 def events_mark(
-    event_id: int, reviewed: bool, pinned: bool, dismissed: bool, notes: str | None
+    ctx, event_id: int, reviewed: bool, pinned: bool, dismissed: bool, notes: str | None
 ) -> None:
     """Change event status."""
-    from pause_monitor.config import Config
     from pause_monitor.storage import get_connection, get_event_by_id, update_event_status
 
     # Determine status
@@ -227,7 +227,7 @@ def events_mark(
         click.echo("Error: Specify --reviewed, --pinned, --dismissed, or --notes", err=True)
         raise SystemExit(1)
 
-    config = Config.load()
+    config = ctx.obj["config"]
 
     if not config.db_path.exists():
         click.echo("Error: Database not found", err=True)

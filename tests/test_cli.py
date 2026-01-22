@@ -136,8 +136,8 @@ class TestEventsCommand:
             mock_load.return_value = mock_config
             result = runner.invoke(main, ["events", "show", "99999"])
 
-        assert result.exit_code == 0
-        assert "Event 99999 not found" in result.output
+        assert result.exit_code == 1
+        assert "Error: Event 99999 not found" in result.output
 
     def test_events_limit_option(self, runner: CliRunner, tmp_path: Path) -> None:
         """events --limit restricts number of events shown."""
