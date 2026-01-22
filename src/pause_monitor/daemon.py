@@ -20,8 +20,15 @@ from pause_monitor.collector import (
     get_system_metrics,
 )
 from pause_monitor.config import Config
-from pause_monitor.forensics import ForensicsCapture, create_event_dir, run_full_capture
+from pause_monitor.forensics import (
+    ForensicsCapture,
+    create_event_dir,
+    identify_culprits,
+    run_full_capture,
+)
 from pause_monitor.notifications import Notifier
+from pause_monitor.ringbuffer import BufferContents, RingBuffer
+from pause_monitor.sentinel import Sentinel
 from pause_monitor.sleepwake import PauseDetector, PauseEvent, was_recently_asleep
 from pause_monitor.storage import (
     Event,
@@ -99,7 +106,7 @@ class Daemon:
         self.config = config
         self.state = DaemonState()
 
-        # Initialize components
+        # Initialize components (keep for backwards compatibility with existing tests)
         self.policy = SamplePolicy(
             normal_interval=config.sampling.normal_interval,
             elevated_interval=config.sampling.elevated_interval,
@@ -113,6 +120,23 @@ class Daemon:
             expected_interval=config.sampling.normal_interval,
         )
         self.core_count = get_core_count()
+
+        # Initialize ring buffer: ring_buffer_seconds * 10 samples (10Hz fast loop)
+        max_samples = config.sentinel.ring_buffer_seconds * 10
+        self.ring_buffer = RingBuffer(max_samples=max_samples)
+
+        # Initialize sentinel with config values
+        self.sentinel = Sentinel(
+            buffer=self.ring_buffer,
+            fast_interval_ms=config.sentinel.fast_interval_ms,
+            slow_interval_ms=config.sentinel.slow_interval_ms,
+            elevated_threshold=config.tiers.elevated_threshold,
+            critical_threshold=config.tiers.critical_threshold,
+        )
+
+        # Wire up sentinel callbacks
+        self.sentinel.on_tier_change = self._handle_tier_change
+        self.sentinel.on_pause_detected = self._handle_pause_from_sentinel
 
         # Will be initialized on start
         self._conn: sqlite3.Connection | None = None
@@ -144,24 +168,24 @@ class Daemon:
         # Start caffeinate to prevent App Nap
         await self._start_caffeinate()
 
-        # Initialize powermetrics stream (started in _run_loop)
-        self._powermetrics = PowermetricsStream(interval_ms=self.policy.current_interval * 1000)
-
         self.state.running = True
         log.info("daemon_started")
 
         # Start auto-prune task
         asyncio.create_task(self._auto_prune())
 
-        # Main loop
-        await self._run_loop()
+        # Run sentinel (replaces the old powermetrics-based _run_loop)
+        await self.sentinel.start()
 
     async def stop(self) -> None:
         """Stop the daemon gracefully."""
         log.info("daemon_stopping")
         self.state.running = False
 
-        # Stop powermetrics
+        # Stop sentinel
+        self.sentinel.stop()
+
+        # Stop powermetrics (kept for backwards compatibility)
         if self._powermetrics:
             await self._powermetrics.stop()
             self._powermetrics = None
@@ -182,6 +206,8 @@ class Daemon:
         """Handle shutdown signals."""
         log.info("signal_received", signal=sig.name)
         self._shutdown_event.set()
+        # Stop sentinel synchronously (it will cause sentinel.start() to return)
+        self.sentinel.stop()
 
     async def _start_caffeinate(self) -> None:
         """Start caffeinate to prevent App Nap."""
@@ -444,6 +470,122 @@ class Daemon:
             )
             capture = ForensicsCapture(event_dir)
             asyncio.create_task(self._run_forensics(capture))
+
+    # === Sentinel Callbacks ===
+
+    async def _handle_tier_change(self, action: str, tier: int) -> None:
+        """Handle tier state changes from sentinel.
+
+        Args:
+            action: The tier action (tier2_entry, tier2_exit, tier3_entry, tier3_exit, tier2_peak)
+            tier: The current tier (1, 2, or 3)
+        """
+        log.info("tier_change", action=action, tier=tier)
+
+        # Update state based on tier
+        if action == "tier2_entry" or action == "tier3_entry":
+            self.state.enter_elevated()
+            if action == "tier3_entry":
+                self.state.enter_critical()
+        elif action == "tier2_exit":
+            self.state.exit_elevated()
+        elif action == "tier3_exit":
+            self.state.exit_critical()
+
+        # Send notifications for tier changes
+        if action == "tier2_entry":
+            self.notifier.elevated_entered(self.sentinel.tier_manager.peak_stress)
+        elif action == "tier3_entry":
+            # Critical stress notification
+            self.notifier.critical_stress(
+                self.sentinel.tier_manager.peak_stress,
+                0.0,  # Just entered, no duration yet
+            )
+
+    async def _handle_pause_from_sentinel(
+        self,
+        actual: float,
+        expected: float,
+        contents: BufferContents,
+    ) -> None:
+        """Handle pause detection from sentinel.
+
+        Args:
+            actual: Actual elapsed time
+            expected: Expected interval
+            contents: Frozen ring buffer contents
+        """
+        # Check for recent sleep/wake
+        recent_wake = was_recently_asleep(within_seconds=actual)
+        if recent_wake is not None:
+            log.info(
+                "pause_excluded_sleep",
+                actual=actual,
+                expected=expected,
+                wake_reason=recent_wake.reason,
+            )
+            return
+
+        duration = actual
+        timestamp = datetime.now()
+
+        log.warning(
+            "pause_detected",
+            duration=duration,
+            latency_ratio=actual / expected,
+        )
+
+        # Create forensics capture
+        event_dir = create_event_dir(self.config.events_dir, timestamp)
+        capture = ForensicsCapture(event_dir)
+
+        # Write ring buffer contents
+        capture.write_ring_buffer(contents)
+
+        # Identify culprits from buffer contents
+        culprits = identify_culprits(contents)
+
+        # Write metadata
+        capture.write_metadata(
+            {
+                "timestamp": timestamp.isoformat(),
+                "duration": duration,
+                "expected_interval": expected,
+                "latency_ratio": actual / expected,
+                "tier": self.sentinel.tier_manager.current_tier,
+                "peak_stress": self.sentinel.tier_manager.peak_stress,
+                "culprits": culprits,
+            }
+        )
+
+        # Run forensics capture in background
+        asyncio.create_task(self._run_forensics(capture))
+
+        # Compute average stress from buffer for the event record
+        if contents.samples:
+            avg_stress = contents.samples[-1].stress  # Use most recent stress
+        else:
+            avg_stress = StressBreakdown(
+                load=0, memory=0, thermal=0, latency=0, io=0, gpu=0, wakeups=0
+            )
+
+        # Create event record
+        event = Event(
+            timestamp=timestamp,
+            duration=duration,
+            stress=avg_stress,
+            culprits=culprits,
+            event_dir=str(event_dir),
+            notes=None,
+        )
+
+        if self._conn:
+            insert_event(self._conn, event)
+
+        self.state.event_count += 1
+
+        # Send notification
+        self.notifier.pause_detected(duration, event_dir)
 
 
 async def run_daemon(config: Config | None = None) -> None:

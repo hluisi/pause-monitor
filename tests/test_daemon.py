@@ -77,7 +77,7 @@ async def test_daemon_start_initializes_database(tmp_path: Path):
             ):
                 daemon = Daemon(config)
 
-                with patch.object(daemon, "_run_loop", new_callable=AsyncMock):
+                with patch.object(daemon.sentinel, "start", new_callable=AsyncMock):
                     with patch.object(daemon, "_start_caffeinate", new_callable=AsyncMock):
                         # Start and immediately stop
                         daemon._shutdown_event.set()
@@ -320,7 +320,7 @@ async def test_daemon_start_writes_pid_file(tmp_path: Path):
                 ):
                     daemon = Daemon(config)
 
-                    with patch.object(daemon, "_run_loop", new_callable=AsyncMock):
+                    with patch.object(daemon.sentinel, "start", new_callable=AsyncMock):
                         with patch.object(daemon, "_start_caffeinate", new_callable=AsyncMock):
                             daemon._shutdown_event.set()
                             await daemon.start()
@@ -585,3 +585,137 @@ async def test_auto_prune_uses_config_retention_days(tmp_path: Path):
                     samples_days=7,
                     events_days=14,
                 )
+
+
+# === Sentinel Integration Tests ===
+
+
+@pytest.mark.asyncio
+async def test_daemon_uses_sentinel(tmp_path: Path):
+    """Daemon starts sentinel instead of old adaptive sampling."""
+    config = Config()
+
+    with patch.object(Config, "data_dir", new_callable=lambda: property(lambda self: tmp_path)):
+        with patch.object(
+            Config, "db_path", new_callable=lambda: property(lambda self: tmp_path / "test.db")
+        ):
+            with patch.object(
+                Config,
+                "events_dir",
+                new_callable=lambda: property(lambda self: tmp_path / "events"),
+            ):
+                with patch.object(
+                    Config, "pid_path", new_callable=lambda: property(lambda self: tmp_path / "pid")
+                ):
+                    daemon = Daemon(config)
+
+                    # Verify sentinel and ring_buffer are initialized
+                    assert daemon.sentinel is not None
+                    assert daemon.ring_buffer is not None
+
+                    # Mock collect_fast_metrics to avoid real system calls
+                    with patch("pause_monitor.sentinel.collect_fast_metrics") as mock_metrics:
+                        mock_metrics.return_value = {
+                            "load_avg": 1.0,
+                            "memory_pressure": 80,
+                            "page_free_count": 100000,
+                        }
+
+                        with patch.object(daemon, "_start_caffeinate", new_callable=AsyncMock):
+                            # Start daemon in background
+                            task = asyncio.create_task(daemon.start())
+                            await asyncio.sleep(0.3)  # Let it run
+                            daemon.sentinel.stop()
+
+                            # Wait for task to complete
+                            try:
+                                await asyncio.wait_for(task, timeout=1.0)
+                            except asyncio.TimeoutError:
+                                pass
+
+                    # Verify sentinel was used
+                    assert len(daemon.ring_buffer.samples) > 0
+
+
+@pytest.mark.asyncio
+async def test_daemon_sentinel_callbacks_wired(tmp_path: Path):
+    """Daemon wires up sentinel callbacks correctly."""
+    config = Config()
+
+    with patch.object(Config, "data_dir", new_callable=lambda: property(lambda self: tmp_path)):
+        daemon = Daemon(config)
+
+        # Verify callbacks are wired
+        assert daemon.sentinel.on_tier_change is not None
+        assert daemon.sentinel.on_pause_detected is not None
+
+
+@pytest.mark.asyncio
+async def test_daemon_handles_pause_with_buffer_contents(tmp_path: Path):
+    """Daemon handles pause with buffer contents from sentinel."""
+    config = Config()
+
+    with patch.object(Config, "data_dir", new_callable=lambda: property(lambda self: tmp_path)):
+        with patch.object(
+            Config, "db_path", new_callable=lambda: property(lambda self: tmp_path / "test.db")
+        ):
+            events_prop = lambda: property(lambda self: tmp_path / "events")  # noqa: E731
+            with patch.object(Config, "events_dir", new_callable=events_prop):
+                daemon = Daemon(config)
+
+                from pause_monitor.storage import init_database
+
+                init_database(config.db_path)
+                daemon._conn = sqlite3.connect(config.db_path)
+
+                # Create mock buffer contents
+                from pause_monitor.ringbuffer import BufferContents
+
+                contents = BufferContents(samples=[], snapshots=[])
+
+                # Mock was_recently_asleep and forensics
+                with patch("pause_monitor.daemon.was_recently_asleep", return_value=None):
+                    with patch("pause_monitor.daemon.run_full_capture", new_callable=AsyncMock):
+                        with patch("pause_monitor.daemon.identify_culprits", return_value=[]):
+                            await daemon._handle_pause_from_sentinel(
+                                actual=0.5,
+                                expected=0.1,
+                                contents=contents,
+                            )
+
+                # Verify event was stored
+                from pause_monitor.storage import get_events
+
+                events = get_events(daemon._conn)
+                assert len(events) == 1
+                assert events[0].duration == 0.5
+
+
+@pytest.mark.asyncio
+async def test_daemon_tier_change_updates_state(tmp_path: Path):
+    """Daemon updates state on tier changes from sentinel."""
+    config = Config()
+
+    with patch.object(Config, "data_dir", new_callable=lambda: property(lambda self: tmp_path)):
+        daemon = Daemon(config)
+
+        # Initially not elevated
+        assert daemon.state.elevated_since is None
+
+        # Trigger tier2_entry - should enter elevated
+        await daemon._handle_tier_change("tier2_entry", 2)
+        assert daemon.state.elevated_since is not None
+
+        # Trigger tier2_exit - should exit elevated
+        await daemon._handle_tier_change("tier2_exit", 1)
+        assert daemon.state.elevated_since is None
+
+        # Trigger tier3_entry - should enter both elevated and critical
+        await daemon._handle_tier_change("tier3_entry", 3)
+        assert daemon.state.elevated_since is not None
+        assert daemon.state.critical_since is not None
+
+        # Trigger tier3_exit - should exit critical but stay elevated
+        await daemon._handle_tier_change("tier3_exit", 2)
+        assert daemon.state.elevated_since is not None
+        assert daemon.state.critical_since is None
