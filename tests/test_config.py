@@ -175,3 +175,20 @@ def test_full_config_includes_sentinel_and_tiers():
     assert hasattr(config, "tiers")
     assert config.sentinel.fast_interval_ms == 100
     assert config.tiers.elevated_threshold == 15
+
+
+def test_config_loads_partial_sentinel_section(tmp_path):
+    """Config loads [sentinel] with partial fields, using defaults for missing."""
+    config_file = tmp_path / "config.toml"
+    config_file.write_text("""
+[sentinel]
+fast_interval_ms = 200
+# slow_interval_ms and ring_buffer_seconds omitted
+""")
+    config = Config.load(config_file)
+
+    # Specified value
+    assert config.sentinel.fast_interval_ms == 200
+    # Default values for omitted fields
+    assert config.sentinel.slow_interval_ms == 1000
+    assert config.sentinel.ring_buffer_seconds == 30

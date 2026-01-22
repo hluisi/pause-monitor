@@ -1179,7 +1179,9 @@ class TestEventsStatusManagement:
             result = runner.invoke(main, ["events", "--status", "unreviewed"])
 
         assert result.exit_code == 0
-        # Should only show the unreviewed event (event1)
+        # Verify filter worked: only unreviewed event (2.5s duration) shown
+        assert "2.5s" in result.output
+        assert "3.0s" not in result.output  # reviewed event should be filtered out
 
     def test_events_mark_reviewed(self, runner: CliRunner, tmp_path: Path) -> None:
         """Mark command changes event status."""

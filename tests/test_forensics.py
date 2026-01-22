@@ -269,6 +269,18 @@ def test_forensics_capture_includes_ring_buffer(tmp_path):
     data = json.loads((tmp_path / "ring_buffer.json").read_text())
     assert len(data["samples"]) == 2
 
+    # Verify sample structure
+    sample = data["samples"][0]
+    assert "timestamp" in sample
+    assert "stress" in sample
+    assert "tier" in sample
+    assert sample["tier"] == 1
+    assert sample["stress"]["load"] == 10
+
+    # Verify snapshots key exists (empty in this test)
+    assert "snapshots" in data
+    assert data["snapshots"] == []
+
 
 def test_forensics_capture_ring_buffer_with_snapshots(tmp_path):
     """ForensicsCapture correctly serializes process snapshots."""
@@ -490,3 +502,39 @@ def test_identify_culprits_below_threshold():
     culprits = identify_culprits(contents)
 
     assert culprits == []
+
+
+def test_identify_culprits_gpu_factor():
+    """identify_culprits correctly identifies high GPU stress."""
+    from datetime import datetime
+
+    from pause_monitor.forensics import identify_culprits
+    from pause_monitor.ringbuffer import BufferContents, ProcessInfo, ProcessSnapshot, RingSample
+    from pause_monitor.stress import StressBreakdown
+
+    # High GPU stress (above threshold of 10)
+    samples = [
+        RingSample(
+            timestamp=datetime.now(),
+            stress=StressBreakdown(load=5, memory=5, thermal=0, latency=0, io=0, gpu=15, wakeups=0),
+            tier=2,
+        )
+    ]
+
+    snapshots = [
+        ProcessSnapshot(
+            timestamp=datetime.now(),
+            trigger="tier2_entry",
+            by_cpu=[ProcessInfo(pid=1, name="blender", cpu_pct=200, memory_mb=4096)],
+            by_memory=[ProcessInfo(pid=1, name="blender", cpu_pct=200, memory_mb=4096)],
+        )
+    ]
+
+    contents = BufferContents(samples=samples, snapshots=snapshots)
+    culprits = identify_culprits(contents)
+
+    # Should identify GPU factor with CPU processes (GPU-heavy processes typically high CPU)
+    assert len(culprits) == 1
+    assert culprits[0]["factor"] == "gpu"
+    assert culprits[0]["score"] == 15
+    assert "blender" in culprits[0]["processes"]
