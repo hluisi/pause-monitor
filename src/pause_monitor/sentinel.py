@@ -163,19 +163,18 @@ class Sentinel:
         self,
         buffer: RingBuffer,
         fast_interval_ms: int = 100,
-        slow_interval_ms: int = 1000,
         elevated_threshold: int = 15,
         critical_threshold: int = 50,
     ) -> None:
         self.buffer = buffer
         self.fast_interval = fast_interval_ms / 1000.0
-        self.slow_interval = slow_interval_ms / 1000.0
         self.tier_manager = TierManager(elevated_threshold, critical_threshold)
 
         self._running = False
         self._core_count = get_core_count()
 
-        # Cached slow metrics (updated by slow loop)
+        # GPU/wakeups/thermal passed to calculate_stress as None
+        # (will be populated when refactored to powermetrics-driven loop)
         self._cached_gpu_pct: float | None = None
         self._cached_wakeups: int | None = None
         self._cached_throttled: bool | None = None
@@ -191,18 +190,13 @@ class Sentinel:
         self._running = False
 
     async def start(self) -> None:
-        """Run the sentinel loops."""
+        """Run the sentinel loop."""
         self._running = True
-        results = await asyncio.gather(
-            self._fast_loop(),
-            self._slow_loop(),
-            return_exceptions=True,
-        )
-        # Surface any exceptions that occurred - per CLAUDE.md "Crashes Are Good"
-        for result in results:
-            if isinstance(result, Exception):
-                log.error("loop_failed", error=str(result), exc_info=result)
-                raise result
+        try:
+            await self._fast_loop()
+        except Exception as e:
+            log.error("loop_failed", error=str(e), exc_info=e)
+            raise
 
     async def _fast_loop(self) -> None:
         """100ms stress sampling loop."""
@@ -235,12 +229,6 @@ class Sentinel:
                 await self._handle_potential_pause(elapsed, self.fast_interval)
 
             await asyncio.sleep(self.fast_interval)
-
-    async def _slow_loop(self) -> None:
-        """1s loop for expensive metrics (GPU, wakeups)."""
-        while self._running:
-            # TODO: Collect GPU/wakeups/thermal via powermetrics
-            await asyncio.sleep(self.slow_interval)
 
     def _calculate_fast_stress(self, metrics: dict, latency_ratio: float) -> StressBreakdown:
         """Calculate stress from fast metrics + cached slow metrics."""

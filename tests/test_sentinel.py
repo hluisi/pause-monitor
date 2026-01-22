@@ -204,7 +204,6 @@ def sentinel(ring_buffer):
     return Sentinel(
         buffer=ring_buffer,
         fast_interval_ms=50,  # 50ms for faster tests
-        slow_interval_ms=200,
         elevated_threshold=15,
         critical_threshold=50,
     )
@@ -216,7 +215,6 @@ async def test_sentinel_fast_loop_pushes_to_buffer(ring_buffer):
     sentinel = Sentinel(
         buffer=ring_buffer,
         fast_interval_ms=50,
-        slow_interval_ms=200,
     )
 
     # Run for ~250ms, expect at least 3 samples (with some margin for timing)
@@ -247,7 +245,6 @@ async def test_sentinel_triggers_snapshot_on_tier2_entry(ring_buffer):
     sentinel = Sentinel(
         buffer=ring_buffer,
         fast_interval_ms=50,
-        slow_interval_ms=500,
         elevated_threshold=15,
         critical_threshold=50,
     )
@@ -293,7 +290,6 @@ async def test_sentinel_triggers_snapshot_on_tier3_entry(ring_buffer):
     sentinel = Sentinel(
         buffer=ring_buffer,
         fast_interval_ms=50,
-        slow_interval_ms=500,
         elevated_threshold=15,
         critical_threshold=50,
     )
@@ -337,7 +333,6 @@ async def test_sentinel_detects_potential_pause(ring_buffer):
     sentinel = Sentinel(
         buffer=ring_buffer,
         fast_interval_ms=50,
-        slow_interval_ms=500,
     )
 
     pause_events = []
@@ -362,7 +357,6 @@ async def test_sentinel_clears_snapshots_on_tier2_exit(ring_buffer):
     sentinel = Sentinel(
         buffer=ring_buffer,
         fast_interval_ms=50,
-        slow_interval_ms=500,
         elevated_threshold=15,
         critical_threshold=50,
     )
@@ -380,7 +374,6 @@ async def test_sentinel_stop_halts_loops(ring_buffer):
     sentinel = Sentinel(
         buffer=ring_buffer,
         fast_interval_ms=50,
-        slow_interval_ms=100,
     )
 
     with patch("pause_monitor.sentinel.collect_fast_metrics") as mock_metrics:
@@ -406,7 +399,6 @@ def test_sentinel_initialization(ring_buffer):
     sentinel = Sentinel(buffer=ring_buffer)
 
     assert sentinel.fast_interval == 0.1  # 100ms default
-    assert sentinel.slow_interval == 1.0  # 1s default
     assert sentinel.tier_manager.elevated_threshold == 15
     assert sentinel.tier_manager.critical_threshold == 50
     assert sentinel._running is False
@@ -419,12 +411,10 @@ def test_sentinel_custom_thresholds(ring_buffer):
     sentinel = Sentinel(
         buffer=ring_buffer,
         fast_interval_ms=200,
-        slow_interval_ms=2000,
         elevated_threshold=20,
         critical_threshold=60,
     )
 
     assert sentinel.fast_interval == 0.2
-    assert sentinel.slow_interval == 2.0
     assert sentinel.tier_manager.elevated_threshold == 20
     assert sentinel.tier_manager.critical_threshold == 60

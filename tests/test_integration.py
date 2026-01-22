@@ -25,7 +25,6 @@ def make_test_config(tmp_path: Path) -> Config:
     config = Config()
     config.sentinel = SentinelConfig(
         fast_interval_ms=10,
-        slow_interval_ms=100,
         ring_buffer_seconds=1,
     )
     config.tiers = TiersConfig(

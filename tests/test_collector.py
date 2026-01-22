@@ -10,7 +10,6 @@ from pause_monitor.collector import (
     PowermetricsStream,
     StreamStatus,
     get_core_count,
-    get_system_metrics,
     parse_powermetrics_sample,
 )
 
@@ -135,14 +134,3 @@ def test_get_core_count():
     """get_core_count returns positive integer."""
     count = get_core_count()
     assert count > 0
-
-
-def test_get_system_metrics_returns_complete():
-    """get_system_metrics returns all required fields."""
-    metrics = get_system_metrics()
-
-    assert metrics.load_avg is not None
-    assert metrics.mem_available is not None
-    assert metrics.swap_used is not None
-    assert metrics.io_read is not None
-    assert metrics.io_write is not None

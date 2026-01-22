@@ -107,7 +107,6 @@ class Daemon:
         self.sentinel = Sentinel(
             buffer=self.ring_buffer,
             fast_interval_ms=config.sentinel.fast_interval_ms,
-            slow_interval_ms=config.sentinel.slow_interval_ms,
             elevated_threshold=config.tiers.elevated_threshold,
             critical_threshold=config.tiers.critical_threshold,
         )

@@ -61,7 +61,6 @@ class SentinelConfig:
     """Sentinel timing configuration."""
 
     fast_interval_ms: int = 100
-    slow_interval_ms: int = 1000
     ring_buffer_seconds: int = 30
 
 
@@ -163,7 +162,6 @@ class Config:
 
         sentinel = tomlkit.table()
         sentinel.add("fast_interval_ms", self.sentinel.fast_interval_ms)
-        sentinel.add("slow_interval_ms", self.sentinel.slow_interval_ms)
         sentinel.add("ring_buffer_seconds", self.sentinel.ring_buffer_seconds)
         doc.add("sentinel", sentinel)
         doc.add(tomlkit.nl())
@@ -231,7 +229,6 @@ class Config:
             ),
             sentinel=SentinelConfig(
                 fast_interval_ms=sentinel_data.get("fast_interval_ms", 100),
-                slow_interval_ms=sentinel_data.get("slow_interval_ms", 1000),
                 ring_buffer_seconds=sentinel_data.get("ring_buffer_seconds", 30),
             ),
             tiers=TiersConfig(

@@ -985,9 +985,7 @@ def test_insert_sample_with_gpu_and_wakeups(initialized_db: Path):
     """Samples store and retrieve GPU and wakeups stress correctly."""
     from pause_monitor.storage import Sample, get_recent_samples, insert_sample
 
-    stress = StressBreakdown(
-        load=10, memory=5, thermal=0, latency=0, io=0, gpu=15, wakeups=12
-    )
+    stress = StressBreakdown(load=10, memory=5, thermal=0, latency=0, io=0, gpu=15, wakeups=12)
     sample = Sample(
         timestamp=datetime.now(),
         interval=1.0,
@@ -1021,9 +1019,7 @@ def test_insert_event_with_gpu_and_wakeups(initialized_db: Path):
     """Events store and retrieve GPU and wakeups stress correctly."""
     from pause_monitor.storage import Event, get_event_by_id, insert_event
 
-    stress = StressBreakdown(
-        load=20, memory=10, thermal=5, latency=0, io=0, gpu=25, wakeups=8
-    )
+    stress = StressBreakdown(load=20, memory=10, thermal=5, latency=0, io=0, gpu=25, wakeups=8)
     event = Event(
         timestamp=datetime.now(),
         duration=3.5,

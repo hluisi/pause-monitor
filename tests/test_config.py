@@ -122,7 +122,6 @@ def test_sentinel_config_defaults():
     """SentinelConfig has correct defaults."""
     config = SentinelConfig()
     assert config.fast_interval_ms == 100
-    assert config.slow_interval_ms == 1000
     assert config.ring_buffer_seconds == 30
 
 
@@ -139,7 +138,6 @@ def test_config_loads_sentinel_section(tmp_path):
     config_file.write_text("""
 [sentinel]
 fast_interval_ms = 200
-slow_interval_ms = 2000
 ring_buffer_seconds = 60
 
 [tiers]
@@ -149,7 +147,6 @@ critical_threshold = 60
 
     config = Config.load(config_file)
     assert config.sentinel.fast_interval_ms == 200
-    assert config.sentinel.slow_interval_ms == 2000
     assert config.sentinel.ring_buffer_seconds == 60
     assert config.tiers.elevated_threshold == 20
     assert config.tiers.critical_threshold == 60
@@ -183,12 +180,11 @@ def test_config_loads_partial_sentinel_section(tmp_path):
     config_file.write_text("""
 [sentinel]
 fast_interval_ms = 200
-# slow_interval_ms and ring_buffer_seconds omitted
+# ring_buffer_seconds omitted
 """)
     config = Config.load(config_file)
 
     # Specified value
     assert config.sentinel.fast_interval_ms == 200
-    # Default values for omitted fields
-    assert config.sentinel.slow_interval_ms == 1000
+    # Default value for omitted field
     assert config.sentinel.ring_buffer_seconds == 30

@@ -184,7 +184,11 @@ class EventDetailScreen(Screen):
             ),
             Label("Culprits:", classes="section"),
             VerticalScroll(
-                *[Label(f"  • {c}") for c in event.culprits] if event.culprits else [Label("  (none)")],
+                *(
+                    [Label(f"  • {c}") for c in event.culprits]
+                    if event.culprits
+                    else [Label("  (none)")]
+                ),
                 classes="culprit-list",
             ),
             Label("Notes:", classes="section"),
