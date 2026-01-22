@@ -979,3 +979,132 @@ def test_prune_recent_dismissed_not_pruned(initialized_db: Path, sample_stress):
 
     assert retrieved is not None
     assert retrieved.status == "dismissed"
+
+
+def test_insert_sample_with_gpu_and_wakeups(initialized_db: Path):
+    """Samples store and retrieve GPU and wakeups stress correctly."""
+    from pause_monitor.storage import Sample, get_recent_samples, insert_sample
+
+    stress = StressBreakdown(
+        load=10, memory=5, thermal=0, latency=0, io=0, gpu=15, wakeups=12
+    )
+    sample = Sample(
+        timestamp=datetime.now(),
+        interval=1.0,
+        cpu_pct=50.0,
+        load_avg=2.0,
+        mem_available=8_000_000_000,
+        swap_used=0,
+        io_read=0,
+        io_write=0,
+        net_sent=0,
+        net_recv=0,
+        cpu_temp=None,
+        cpu_freq=None,
+        throttled=None,
+        gpu_pct=None,
+        stress=stress,
+    )
+
+    conn = sqlite3.connect(initialized_db)
+    insert_sample(conn, sample)
+    samples = get_recent_samples(conn, limit=1)
+    conn.close()
+
+    assert samples[0].stress.gpu == 15
+    assert samples[0].stress.wakeups == 12
+    # Verify total includes gpu and wakeups
+    assert samples[0].stress.total == 10 + 5 + 0 + 0 + 0 + 15 + 12
+
+
+def test_insert_event_with_gpu_and_wakeups(initialized_db: Path):
+    """Events store and retrieve GPU and wakeups stress correctly."""
+    from pause_monitor.storage import Event, get_event_by_id, insert_event
+
+    stress = StressBreakdown(
+        load=20, memory=10, thermal=5, latency=0, io=0, gpu=25, wakeups=8
+    )
+    event = Event(
+        timestamp=datetime.now(),
+        duration=3.5,
+        stress=stress,
+        culprits=["gpu_process"],
+        event_dir=None,
+    )
+
+    conn = sqlite3.connect(initialized_db)
+    event_id = insert_event(conn, event)
+    retrieved = get_event_by_id(conn, event_id)
+    conn.close()
+
+    assert retrieved is not None
+    assert retrieved.stress.gpu == 25
+    assert retrieved.stress.wakeups == 8
+
+
+def test_migrate_add_stress_columns(tmp_path: Path):
+    """Migration adds stress_gpu and stress_wakeups columns to existing tables."""
+    from pause_monitor.storage import migrate_add_stress_columns
+
+    db_path = tmp_path / "legacy.db"
+
+    # Create a v1 schema without stress_gpu/stress_wakeups columns
+    conn = sqlite3.connect(db_path)
+    conn.execute("""
+        CREATE TABLE samples (
+            id INTEGER PRIMARY KEY,
+            timestamp REAL,
+            interval REAL,
+            stress_total INTEGER,
+            stress_load INTEGER,
+            stress_memory INTEGER,
+            stress_thermal INTEGER,
+            stress_latency INTEGER,
+            stress_io INTEGER
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE events (
+            id INTEGER PRIMARY KEY,
+            timestamp REAL,
+            duration REAL,
+            stress_total INTEGER,
+            stress_load INTEGER,
+            stress_memory INTEGER,
+            stress_thermal INTEGER,
+            stress_latency INTEGER,
+            stress_io INTEGER,
+            culprits TEXT
+        )
+    """)
+    conn.commit()
+
+    # Run migration
+    migrate_add_stress_columns(conn)
+
+    # Verify columns were added
+    cursor = conn.execute("PRAGMA table_info(samples)")
+    sample_columns = {row[1] for row in cursor.fetchall()}
+    assert "stress_gpu" in sample_columns
+    assert "stress_wakeups" in sample_columns
+
+    cursor = conn.execute("PRAGMA table_info(events)")
+    event_columns = {row[1] for row in cursor.fetchall()}
+    assert "stress_gpu" in event_columns
+    assert "stress_wakeups" in event_columns
+
+    conn.close()
+
+
+def test_migrate_add_stress_columns_idempotent(tmp_path: Path):
+    """Running migration multiple times is safe."""
+    from pause_monitor.storage import migrate_add_stress_columns
+
+    db_path = tmp_path / "test.db"
+    init_database(db_path)
+
+    conn = sqlite3.connect(db_path)
+    # Run migration twice - should not raise
+    migrate_add_stress_columns(conn)
+    migrate_add_stress_columns(conn)
+    conn.close()

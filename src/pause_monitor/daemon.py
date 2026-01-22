@@ -36,6 +36,8 @@ from pause_monitor.storage import (
     init_database,
     insert_event,
     insert_sample,
+    migrate_add_event_status,
+    migrate_add_stress_columns,
     prune_old_data,
 )
 from pause_monitor.stress import (
@@ -165,6 +167,10 @@ class Daemon:
         self.config.data_dir.mkdir(parents=True, exist_ok=True)
         init_database(self.config.db_path)
         self._conn = sqlite3.connect(self.config.db_path)
+
+        # Run migrations for existing databases
+        migrate_add_event_status(self._conn)
+        migrate_add_stress_columns(self._conn)
 
         # Start caffeinate to prevent App Nap
         await self._start_caffeinate()

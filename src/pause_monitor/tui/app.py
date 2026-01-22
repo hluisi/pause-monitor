@@ -179,7 +179,8 @@ class EventDetailScreen(Screen):
                 f"  Total: {event.stress.total}  "
                 f"Load: {event.stress.load}  Memory: {event.stress.memory}  "
                 f"Thermal: {event.stress.thermal}  Latency: {event.stress.latency}  "
-                f"I/O: {event.stress.io}"
+                f"I/O: {event.stress.io}  GPU: {event.stress.gpu}  "
+                f"Wakeups: {event.stress.wakeups}"
             ),
             Label("Culprits:", classes="section"),
             VerticalScroll(
@@ -484,8 +485,10 @@ class PauseMonitorApp(App):
             # Update stress breakdown
             breakdown = self.query_one("#breakdown", Static)
             breakdown.update(
-                f"Load: {sample.stress.load:3d}  Memory: {sample.stress.memory:3d}\n"
-                f"Thermal: {sample.stress.thermal:3d}  Latency: {sample.stress.latency:3d}\n"
+                f"Load: {sample.stress.load:3d}  Memory: {sample.stress.memory:3d}  "
+                f"GPU: {sample.stress.gpu:3d}\n"
+                f"Thermal: {sample.stress.thermal:3d}  Latency: {sample.stress.latency:3d}  "
+                f"Wakeups: {sample.stress.wakeups:3d}\n"
                 f"I/O: {sample.stress.io:3d}"
             )
 

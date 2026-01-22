@@ -13,7 +13,7 @@ from pause_monitor.stress import StressBreakdown
 
 log = structlog.get_logger()
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 # Valid event status values
 VALID_EVENT_STATUSES = frozenset({"unreviewed", "reviewed", "pinned", "dismissed"})
@@ -41,7 +41,9 @@ CREATE TABLE IF NOT EXISTS samples (
     stress_memory   INTEGER,
     stress_thermal  INTEGER,
     stress_latency  INTEGER,
-    stress_io       INTEGER
+    stress_io       INTEGER,
+    stress_gpu      INTEGER,
+    stress_wakeups  INTEGER
 );
 
 CREATE INDEX IF NOT EXISTS idx_samples_timestamp ON samples(timestamp);
@@ -73,6 +75,8 @@ CREATE TABLE IF NOT EXISTS events (
     stress_thermal  INTEGER,
     stress_latency  INTEGER,
     stress_io       INTEGER,
+    stress_gpu      INTEGER,
+    stress_wakeups  INTEGER,
     culprits        TEXT,
     event_dir       TEXT,
     status          TEXT DEFAULT 'unreviewed',
@@ -148,6 +152,36 @@ def migrate_add_event_status(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def migrate_add_stress_columns(conn: sqlite3.Connection) -> None:
+    """Add stress_gpu and stress_wakeups columns to samples and events tables.
+
+    Migration sets existing rows to 0 (neutral stress contribution).
+    """
+    # Migrate samples table
+    cursor = conn.execute("PRAGMA table_info(samples)")
+    columns = {row[1] for row in cursor.fetchall()}
+
+    if "stress_gpu" not in columns:
+        conn.execute("ALTER TABLE samples ADD COLUMN stress_gpu INTEGER DEFAULT 0")
+        log.info("migration_applied", migration="add_samples_stress_gpu")
+    if "stress_wakeups" not in columns:
+        conn.execute("ALTER TABLE samples ADD COLUMN stress_wakeups INTEGER DEFAULT 0")
+        log.info("migration_applied", migration="add_samples_stress_wakeups")
+
+    # Migrate events table
+    cursor = conn.execute("PRAGMA table_info(events)")
+    columns = {row[1] for row in cursor.fetchall()}
+
+    if "stress_gpu" not in columns:
+        conn.execute("ALTER TABLE events ADD COLUMN stress_gpu INTEGER DEFAULT 0")
+        log.info("migration_applied", migration="add_events_stress_gpu")
+    if "stress_wakeups" not in columns:
+        conn.execute("ALTER TABLE events ADD COLUMN stress_wakeups INTEGER DEFAULT 0")
+        log.info("migration_applied", migration="add_events_stress_wakeups")
+
+    conn.commit()
+
+
 @dataclass
 class Sample:
     """Single metrics sample.
@@ -180,8 +214,8 @@ def insert_sample(conn: sqlite3.Connection, sample: Sample) -> int:
             timestamp, interval, cpu_pct, load_avg, mem_available, swap_used,
             io_read, io_write, net_sent, net_recv, cpu_temp, cpu_freq,
             throttled, gpu_pct, stress_total, stress_load, stress_memory,
-            stress_thermal, stress_latency, stress_io
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            stress_thermal, stress_latency, stress_io, stress_gpu, stress_wakeups
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             sample.timestamp.timestamp(),
@@ -204,6 +238,8 @@ def insert_sample(conn: sqlite3.Connection, sample: Sample) -> int:
             sample.stress.thermal,
             sample.stress.latency,
             sample.stress.io,
+            sample.stress.gpu,
+            sample.stress.wakeups,
         ),
     )
     conn.commit()
@@ -217,7 +253,7 @@ def get_recent_samples(conn: sqlite3.Connection, limit: int = 100) -> list[Sampl
         SELECT timestamp, interval, cpu_pct, load_avg, mem_available, swap_used,
                io_read, io_write, net_sent, net_recv, cpu_temp, cpu_freq,
                throttled, gpu_pct, stress_total, stress_load, stress_memory,
-               stress_thermal, stress_latency, stress_io
+               stress_thermal, stress_latency, stress_io, stress_gpu, stress_wakeups
         FROM samples ORDER BY timestamp DESC LIMIT ?
         """,
         (limit,),
@@ -245,8 +281,8 @@ def get_recent_samples(conn: sqlite3.Connection, limit: int = 100) -> list[Sampl
                 thermal=row[17] or 0,
                 latency=row[18] or 0,
                 io=row[19] or 0,
-                gpu=0,  # DB schema update in Task 4
-                wakeups=0,  # DB schema update in Task 4
+                gpu=row[20] or 0,
+                wakeups=row[21] or 0,
             ),
         )
         for row in rows
@@ -273,8 +309,9 @@ def insert_event(conn: sqlite3.Connection, event: Event) -> int:
         """
         INSERT INTO events (
             timestamp, duration, stress_total, stress_load, stress_memory,
-            stress_thermal, stress_latency, stress_io, culprits, event_dir, status, notes
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            stress_thermal, stress_latency, stress_io, stress_gpu, stress_wakeups,
+            culprits, event_dir, status, notes
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             event.timestamp.timestamp(),
@@ -285,6 +322,8 @@ def insert_event(conn: sqlite3.Connection, event: Event) -> int:
             event.stress.thermal,
             event.stress.latency,
             event.stress.io,
+            event.stress.gpu,
+            event.stress.wakeups,
             json.dumps(event.culprits),
             event.event_dir,
             event.status,
@@ -305,7 +344,8 @@ def get_events(
     """Get events, optionally filtered by time range and/or status."""
     query = """
         SELECT id, timestamp, duration, stress_total, stress_load, stress_memory,
-               stress_thermal, stress_latency, stress_io, culprits, event_dir, status, notes
+               stress_thermal, stress_latency, stress_io, stress_gpu, stress_wakeups,
+               culprits, event_dir, status, notes
         FROM events
     """
     params: list = []
@@ -340,13 +380,13 @@ def get_events(
                 thermal=row[6] or 0,
                 latency=row[7] or 0,
                 io=row[8] or 0,
-                gpu=0,  # DB schema update in Task 4
-                wakeups=0,  # DB schema update in Task 4
+                gpu=row[9] or 0,
+                wakeups=row[10] or 0,
             ),
-            culprits=json.loads(row[9]) if row[9] else [],
-            event_dir=row[10],
-            status=row[11] or "unreviewed",
-            notes=row[12],
+            culprits=json.loads(row[11]) if row[11] else [],
+            event_dir=row[12],
+            status=row[13] or "unreviewed",
+            notes=row[14],
         )
         for row in rows
     ]
@@ -357,7 +397,8 @@ def get_event_by_id(conn: sqlite3.Connection, event_id: int) -> Event | None:
     row = conn.execute(
         """
         SELECT id, timestamp, duration, stress_total, stress_load, stress_memory,
-               stress_thermal, stress_latency, stress_io, culprits, event_dir, status, notes
+               stress_thermal, stress_latency, stress_io, stress_gpu, stress_wakeups,
+               culprits, event_dir, status, notes
         FROM events WHERE id = ?
         """,
         (event_id,),
@@ -376,13 +417,13 @@ def get_event_by_id(conn: sqlite3.Connection, event_id: int) -> Event | None:
             thermal=row[6] or 0,
             latency=row[7] or 0,
             io=row[8] or 0,
-            gpu=0,  # DB schema update in Task 4
-            wakeups=0,  # DB schema update in Task 4
+            gpu=row[9] or 0,
+            wakeups=row[10] or 0,
         ),
-        culprits=json.loads(row[9]) if row[9] else [],
-        event_dir=row[10],
-        status=row[11] or "unreviewed",
-        notes=row[12],
+        culprits=json.loads(row[11]) if row[11] else [],
+        event_dir=row[12],
+        status=row[13] or "unreviewed",
+        notes=row[14],
     )
 
 
