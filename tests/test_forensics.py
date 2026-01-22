@@ -327,3 +327,166 @@ def test_forensics_capture_ring_buffer_with_snapshots(tmp_path):
     assert len(snap["by_memory"]) == 2
     assert snap["by_cpu"][0]["name"] == "chrome"
     assert snap["by_cpu"][0]["cpu_pct"] == 45.0
+
+
+def test_identify_culprits_from_buffer():
+    """identify_culprits correlates high stress factors with processes."""
+    from datetime import datetime
+
+    from pause_monitor.forensics import identify_culprits
+    from pause_monitor.ringbuffer import BufferContents, ProcessInfo, ProcessSnapshot, RingSample
+    from pause_monitor.stress import StressBreakdown
+
+    # High memory stress
+    samples = [
+        RingSample(
+            timestamp=datetime.now(),
+            stress=StressBreakdown(load=5, memory=25, thermal=0, latency=0, io=0, gpu=0, wakeups=0),
+            tier=2,
+        )
+    ]
+
+    # Process snapshot with memory hog
+    snapshots = [
+        ProcessSnapshot(
+            timestamp=datetime.now(),
+            trigger="tier2_entry",
+            by_cpu=[],
+            by_memory=[ProcessInfo(pid=1, name="Chrome", cpu_pct=10, memory_mb=2048)],
+        )
+    ]
+
+    contents = BufferContents(samples=samples, snapshots=snapshots)
+    culprits = identify_culprits(contents)
+
+    assert len(culprits) == 1
+    assert culprits[0]["factor"] == "memory"
+    assert "Chrome" in culprits[0]["processes"]
+
+
+def test_identify_culprits_multiple_factors():
+    """identify_culprits returns multiple factors sorted by score."""
+    from datetime import datetime
+
+    from pause_monitor.forensics import identify_culprits
+    from pause_monitor.ringbuffer import BufferContents, ProcessInfo, ProcessSnapshot, RingSample
+    from pause_monitor.stress import StressBreakdown
+
+    # High load and memory stress
+    samples = [
+        RingSample(
+            timestamp=datetime.now(),
+            stress=StressBreakdown(
+                load=30, memory=15, thermal=0, latency=0, io=0, gpu=0, wakeups=0
+            ),
+            tier=2,
+        )
+    ]
+
+    snapshots = [
+        ProcessSnapshot(
+            timestamp=datetime.now(),
+            trigger="tier2_entry",
+            by_cpu=[ProcessInfo(pid=1, name="python", cpu_pct=150, memory_mb=500)],
+            by_memory=[ProcessInfo(pid=2, name="Chrome", cpu_pct=10, memory_mb=2048)],
+        )
+    ]
+
+    contents = BufferContents(samples=samples, snapshots=snapshots)
+    culprits = identify_culprits(contents)
+
+    # Should have both factors, sorted by score (load=30 > memory=15)
+    assert len(culprits) == 2
+    assert culprits[0]["factor"] == "load"
+    assert culprits[0]["score"] == 30
+    assert culprits[1]["factor"] == "memory"
+    assert culprits[1]["score"] == 15
+
+
+def test_identify_culprits_empty_buffer():
+    """identify_culprits returns empty list for empty buffer."""
+    from pause_monitor.forensics import identify_culprits
+    from pause_monitor.ringbuffer import BufferContents
+
+    contents = BufferContents(samples=[], snapshots=[])
+    culprits = identify_culprits(contents)
+
+    assert culprits == []
+
+
+def test_identify_culprits_averages_samples():
+    """identify_culprits averages stress over all samples."""
+    from datetime import datetime, timedelta
+
+    from pause_monitor.forensics import identify_culprits
+    from pause_monitor.ringbuffer import BufferContents, ProcessInfo, ProcessSnapshot, RingSample
+    from pause_monitor.stress import StressBreakdown
+
+    now = datetime.now()
+    # Three samples with memory stress: 20, 10, 0 -> average 10
+    samples = [
+        RingSample(
+            timestamp=now - timedelta(seconds=2),
+            stress=StressBreakdown(load=0, memory=20, thermal=0, latency=0, io=0, gpu=0, wakeups=0),
+            tier=2,
+        ),
+        RingSample(
+            timestamp=now - timedelta(seconds=1),
+            stress=StressBreakdown(load=0, memory=10, thermal=0, latency=0, io=0, gpu=0, wakeups=0),
+            tier=2,
+        ),
+        RingSample(
+            timestamp=now,
+            stress=StressBreakdown(load=0, memory=0, thermal=0, latency=0, io=0, gpu=0, wakeups=0),
+            tier=1,
+        ),
+    ]
+
+    snapshots = [
+        ProcessSnapshot(
+            timestamp=now,
+            trigger="tier2_entry",
+            by_cpu=[],
+            by_memory=[ProcessInfo(pid=1, name="Safari", cpu_pct=5, memory_mb=1024)],
+        )
+    ]
+
+    contents = BufferContents(samples=samples, snapshots=snapshots)
+    culprits = identify_culprits(contents)
+
+    # Average memory is 10, which is threshold
+    assert len(culprits) == 1
+    assert culprits[0]["factor"] == "memory"
+    assert culprits[0]["score"] == 10
+
+
+def test_identify_culprits_below_threshold():
+    """identify_culprits returns empty when all factors below threshold."""
+    from datetime import datetime
+
+    from pause_monitor.forensics import identify_culprits
+    from pause_monitor.ringbuffer import BufferContents, ProcessInfo, ProcessSnapshot, RingSample
+    from pause_monitor.stress import StressBreakdown
+
+    # All factors below threshold of 10
+    samples = [
+        RingSample(
+            timestamp=datetime.now(),
+            stress=StressBreakdown(load=5, memory=5, thermal=0, latency=0, io=5, gpu=5, wakeups=5),
+            tier=1,
+        )
+    ]
+
+    snapshots = [
+        ProcessSnapshot(
+            timestamp=datetime.now(),
+            trigger="tier2_entry",
+            by_cpu=[ProcessInfo(pid=1, name="python", cpu_pct=50, memory_mb=500)],
+            by_memory=[ProcessInfo(pid=1, name="python", cpu_pct=50, memory_mb=500)],
+        )
+    ]
+
+    contents = BufferContents(samples=samples, snapshots=snapshots)
+    culprits = identify_culprits(contents)
+
+    assert culprits == []

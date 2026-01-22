@@ -94,6 +94,101 @@ class ForensicsCapture:
         log.debug("ring_buffer_written", path=str(path), samples=len(contents.samples))
 
 
+def identify_culprits(contents: "BufferContents") -> list[dict]:
+    """Identify likely culprits from ring buffer contents.
+
+    Correlates high stress factors with processes from snapshots:
+    - High memory stress -> top memory consumers
+    - High load stress -> top CPU consumers
+    - High GPU stress -> GPU-intensive processes
+
+    Args:
+        contents: Frozen ring buffer contents with samples and snapshots
+
+    Returns:
+        List of {"factor": str, "score": int, "processes": [str]}
+        sorted by score descending
+    """
+    if not contents.samples:
+        return []
+
+    # Average stress factors over all samples
+    avg_load = sum(s.stress.load for s in contents.samples) / len(contents.samples)
+    avg_memory = sum(s.stress.memory for s in contents.samples) / len(contents.samples)
+    avg_gpu = sum(s.stress.gpu for s in contents.samples) / len(contents.samples)
+    avg_io = sum(s.stress.io for s in contents.samples) / len(contents.samples)
+    avg_wakeups = sum(s.stress.wakeups for s in contents.samples) / len(contents.samples)
+
+    # Collect processes from all snapshots
+    all_by_cpu: list = []
+    all_by_memory: list = []
+    for snapshot in contents.snapshots:
+        all_by_cpu.extend(snapshot.by_cpu)
+        all_by_memory.extend(snapshot.by_memory)
+
+    # Dedupe and sort - get top 5 process names
+    cpu_names = list(
+        dict.fromkeys(p.name for p in sorted(all_by_cpu, key=lambda p: p.cpu_pct, reverse=True))
+    )[:5]
+    mem_names = list(
+        dict.fromkeys(
+            p.name for p in sorted(all_by_memory, key=lambda p: p.memory_mb, reverse=True)
+        )
+    )[:5]
+
+    culprits = []
+
+    # Threshold for considering a factor "elevated"
+    threshold = 10
+
+    if avg_memory >= threshold:
+        culprits.append(
+            {
+                "factor": "memory",
+                "score": int(avg_memory),
+                "processes": mem_names,
+            }
+        )
+
+    if avg_load >= threshold:
+        culprits.append(
+            {
+                "factor": "load",
+                "score": int(avg_load),
+                "processes": cpu_names,
+            }
+        )
+
+    if avg_gpu >= threshold:
+        culprits.append(
+            {
+                "factor": "gpu",
+                "score": int(avg_gpu),
+                "processes": cpu_names,  # GPU processes typically high CPU too
+            }
+        )
+
+    if avg_io >= threshold:
+        culprits.append(
+            {
+                "factor": "io",
+                "score": int(avg_io),
+                "processes": [],  # I/O per-process not tracked yet
+            }
+        )
+
+    if avg_wakeups >= threshold:
+        culprits.append(
+            {
+                "factor": "wakeups",
+                "score": int(avg_wakeups),
+                "processes": [],  # Wakeups per-process not tracked yet
+            }
+        )
+
+    return sorted(culprits, key=lambda c: c["score"], reverse=True)
+
+
 async def capture_spindump(event_dir: Path, timeout: float = 30.0) -> bool:
     """Capture thread stacks via spindump.
 
