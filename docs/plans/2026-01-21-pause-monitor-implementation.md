@@ -54,6 +54,145 @@ The audit revealed:
 
 ---
 
+## Data Dictionary: powermetrics → Database Schema
+
+This section documents the canonical data model. **powermetrics plist output is the source of truth.** All field names and types derive from it.
+
+### Why powermetrics Is the Source of Truth
+
+powermetrics is Apple's official tool for system telemetry. It provides:
+- **Consistent structure**: Same plist format across macOS versions
+- **Per-process attribution**: Identifies which process is consuming resources
+- **Low overhead**: Designed for continuous monitoring
+- **Privileged access**: Can see kernel-level data unavailable to user tools
+
+Using powermetrics means we don't need psutil, IOKit bindings, or multiple data sources — everything comes from one authoritative stream.
+
+### powermetrics Plist Structure
+
+When run with `--samplers cpu_power,gpu_power,thermal,tasks,disk -f plist`, powermetrics outputs:
+
+```
+Top-level dict
+├── is_delta: bool (always true for streaming)
+├── elapsed_ns: integer (actual sample interval in nanoseconds)
+├── timestamp: date (ISO 8601)
+├── thermal_pressure: string ("Nominal"|"Moderate"|"Heavy"|"Critical"|"Sleeping")
+├── tasks: array (per-process data)
+│   └── [each task dict]
+│       ├── pid: integer
+│       ├── name: string
+│       ├── cputime_ms_per_s: real (CPU usage: 1000 = 1 core fully used)
+│       ├── intr_wakeups_per_s: real (interrupt-driven wakeups)
+│       ├── idle_wakeups_per_s: real (idle wakeups — most relevant for energy)
+│       ├── diskio_bytesread_per_s: real (per-process disk read)
+│       ├── diskio_byteswritten_per_s: real (per-process disk write)
+│       └── timer_wakeups: array
+│           └── [{interval_ns, wakeups_per_s}, ...]
+├── disk: dict (system-wide I/O)
+│   ├── rbytes_per_s: real (read bytes/sec)
+│   ├── wbytes_per_s: real (write bytes/sec)
+│   ├── rops_per_s: real (read ops/sec)
+│   └── wops_per_s: real (write ops/sec)
+├── processor: dict
+│   ├── clusters: array (per-cluster frequency/utilization)
+│   ├── cpu_power: real (watts)
+│   └── combined_power: real (total SoC power in watts)
+└── gpu: dict
+    ├── freq_hz: real
+    ├── idle_ratio: real (1.0 = fully idle, 0.0 = fully busy)
+    └── gpu_power: real (watts)
+```
+
+### Field Mapping: powermetrics → PowermetricsResult
+
+| powermetrics key | PowermetricsResult field | Type | Transform | Why |
+|------------------|--------------------------|------|-----------|-----|
+| `elapsed_ns` | `elapsed_ns` | int | direct | Actual interval for latency ratio calculation |
+| `thermal_pressure` | `throttled` | bool | `!= "Nominal"` | Simplify to throttled/not-throttled for stress scoring |
+| `processor.cpu_power` | `cpu_power` | float | direct | Power indicates load better than frequency |
+| `processor.combined_power` | `combined_power` | float | direct | Total SoC power for trend analysis |
+| `gpu.idle_ratio` | `gpu_pct` | float | `(1 - idle_ratio) * 100` | Convert to familiar percentage |
+| `gpu.gpu_power` | `gpu_power` | float | direct | Power indicates GPU work better than frequency |
+| `disk.rbytes_per_s` | `io_read_per_s` | float | direct | Keep read/write separate for culprit ID |
+| `disk.wbytes_per_s` | `io_write_per_s` | float | direct | Write-heavy vs read-heavy workloads differ |
+| `tasks` | `top_processes` | list | Top 10 by cputime_ms_per_s | For culprit identification |
+| Sum of `tasks[].idle_wakeups_per_s` | `wakeups_per_s` | float | sum all tasks | System-wide wakeup rate |
+
+### Field Mapping: PowermetricsResult → Database (samples table)
+
+| PowermetricsResult | samples column | Type | Why stored |
+|--------------------|----------------|------|------------|
+| timestamp | timestamp | REAL | Index for time-based queries |
+| (computed) | interval | REAL | `elapsed_ns / 1e9` — for pause detection |
+| (from stress) | stress_total | INTEGER | Primary metric for alerting |
+| (from stress) | stress_load | INTEGER | Decomposed for trend analysis |
+| (from stress) | stress_memory | INTEGER | (memory from `sysctl kern.memorystatus_level`) |
+| (from stress) | stress_thermal | INTEGER | Contribution from throttled state |
+| (from stress) | stress_latency | INTEGER | Contribution from interval deviation |
+| (from stress) | stress_io | INTEGER | Contribution from I/O spikes |
+| (from stress) | stress_gpu | INTEGER | Contribution from GPU saturation |
+| (from stress) | stress_wakeups | INTEGER | Contribution from excessive wakeups |
+| cpu_power | cpu_power | REAL | Power trend analysis |
+| gpu_pct | gpu_pct | REAL | For historical charts |
+| io_read_per_s | io_read_per_s | REAL | For I/O trend analysis |
+| io_write_per_s | io_write_per_s | REAL | For I/O trend analysis |
+| throttled | throttled | INTEGER | 0/1 for thermal tracking |
+| wakeups_per_s | wakeups_per_s | REAL | For wakeup trend analysis |
+
+**Note:** `cpu_pct`, `load_avg`, `mem_available`, `swap_used`, `net_sent`, `net_recv` are NOT from powermetrics. These come from:
+- `load_avg`: `os.getloadavg()[0]`
+- `mem_available`: `sysctl hw.memsize` minus wired/active (or `vm_stat`)
+- Memory pressure: `sysctl kern.memorystatus_level` (0-100 scale, inverted)
+
+### Design Decisions with Rationale
+
+| Decision | Rationale |
+|----------|-----------|
+| **Use `idle_wakeups_per_s` not `intr_wakeups_per_s`** | Idle wakeups indicate a process waking from idle state (energy impact). Interrupt wakeups can be normal system activity. |
+| **Store rates, not cumulative values** | powermetrics already computes rates. Storing rates means samples are directly comparable regardless of interval length. |
+| **Keep `io_read` and `io_write` separate** | Distinguishes read-heavy (database queries) from write-heavy (logging, backups) workloads. Combined I/O obscures the cause. |
+| **Sum wakeups across all processes** | Individual process wakeups matter for culprit ID, but system-wide total indicates scheduler pressure. |
+| **Use `thermal_pressure` string, not temp** | Apple silicon doesn't expose CPU temperature via powermetrics. Thermal pressure is the actionable signal. |
+| **`gpu_pct` from `1 - idle_ratio`** | GPU "busy" is complement of idle. 96% idle = 4% busy. More intuitive as percentage. |
+| **Top 10 processes by CPU time** | Captures the culprits without storing hundreds of processes per sample. |
+| **`elapsed_ns` for latency calculation** | The actual interval lets us detect pauses: if we asked for 100ms but got 500ms, something blocked. |
+
+### Schema Changes Required
+
+Current schema has:
+```sql
+io_read   INTEGER,  -- ambiguous: bytes? bytes/sec?
+io_write  INTEGER,  -- from _get_io_counters() stub (always returns 0!)
+```
+
+Should become:
+```sql
+io_read_per_s   REAL,   -- bytes/sec from powermetrics disk.rbytes_per_s
+io_write_per_s  REAL,   -- bytes/sec from powermetrics disk.wbytes_per_s
+wakeups_per_s   REAL,   -- sum of tasks[].idle_wakeups_per_s
+cpu_power       REAL,   -- watts from processor.cpu_power
+gpu_power       REAL,   -- watts from gpu.gpu_power
+```
+
+### Code Cleanup Required (Part of Phase 1)
+
+**Remove from `collector.py`:**
+- `_get_io_counters()` stub — I/O now comes from powermetrics `disk` dict
+- `_get_network_counters()` stub — network metrics not used in stress calculation
+
+**Update `SystemMetrics` dataclass:**
+- Remove `io_read`, `io_write`, `net_sent`, `net_recv` fields
+- These were always 0 due to stub functions
+
+**Update `get_system_metrics()`:**
+- Remove calls to `_get_io_counters()` and `_get_network_counters()`
+- Keep `load_avg`, `mem_available`, `swap_used` (not from powermetrics)
+
+This is addressed in Phase 1 tasks.
+
+---
+
 ## Architecture Overview
 
 ```
@@ -91,6 +230,137 @@ powermetrics (100ms stream)
 ---
 
 ## Phase 1: Update PowermetricsStream for 100ms + Complete Data
+
+> **⚠️ IMPORTANT: Tasks 1.3+ Have Incorrect Assumptions**
+>
+> The original task specifications were written before examining actual powermetrics output.
+> The **Data Dictionary** section above (based on real `/tmp/powermetrics-sample.plist` capture)
+> is authoritative. Key corrections:
+>
+> | Original Plan | Correction (per Data Dictionary) |
+> |---------------|----------------------------------|
+> | `io_bytes_per_sec` (combined) | `io_read_per_s` and `io_write_per_s` (separate — needed for culprit ID) |
+> | `wakeups_per_sec` from nested `wakeups[]` | `wakeups_per_s` = sum of `tasks[].idle_wakeups_per_s` (direct field, not nested) |
+> | `gpu_pct` from `gpu.busy_percent` | `gpu_pct` = `(1 - gpu.idle_ratio) * 100` (busy_percent doesn't exist) |
+> | Missing fields | Add `elapsed_ns`, `cpu_power`, `gpu_power` |
+>
+> When implementing, **follow the Data Dictionary**, not the original task code snippets below.
+
+### Corrected PowermetricsResult (Use This, Not Task 1.3 Snippets)
+
+```python
+@dataclass
+class PowermetricsResult:
+    """Parsed powermetrics sample data.
+    
+    All fields derived from powermetrics plist output. See Data Dictionary
+    for field mappings and rationale.
+    """
+    # Timing
+    elapsed_ns: int  # Actual sample interval (for latency ratio)
+    
+    # CPU (from processor dict)
+    cpu_pct: float | None  # Computed from cluster idle_ratio
+    cpu_power: float | None  # Watts from processor.cpu_power
+    
+    # Thermal
+    throttled: bool  # True if thermal_pressure != "Nominal"
+    
+    # GPU (from gpu dict)
+    gpu_pct: float | None  # (1 - idle_ratio) * 100
+    gpu_power: float | None  # Watts from gpu.gpu_power
+    
+    # Disk I/O (from disk dict) — kept separate for culprit identification
+    io_read_per_s: float  # bytes/sec from disk.rbytes_per_s
+    io_write_per_s: float  # bytes/sec from disk.wbytes_per_s
+    
+    # Wakeups (summed from tasks array)
+    wakeups_per_s: float  # Sum of tasks[].idle_wakeups_per_s
+    
+    # Top processes for culprit identification
+    top_processes: list[dict]  # [{name, pid, cpu_ms_per_s, io_bytes_per_s, wakeups_per_s}]
+```
+
+```python
+def parse_powermetrics_sample(data: bytes) -> PowermetricsResult:
+    """Parse a single powermetrics plist sample.
+    
+    Extracts metrics per the Data Dictionary field mappings.
+    """
+    try:
+        plist = plistlib.loads(data)
+    except plistlib.InvalidFileException:
+        log.warning("invalid_plist_data")
+        return PowermetricsResult(
+            elapsed_ns=0,
+            cpu_pct=None, cpu_power=None,
+            throttled=False,
+            gpu_pct=None, gpu_power=None,
+            io_read_per_s=0.0, io_write_per_s=0.0,
+            wakeups_per_s=0.0,
+            top_processes=[],
+        )
+    
+    # Timing
+    elapsed_ns = plist.get("elapsed_ns", 0)
+    
+    # Thermal throttling: anything other than "Nominal" means throttled
+    thermal_pressure = plist.get("thermal_pressure", "Nominal")
+    throttled = thermal_pressure != "Nominal"
+    
+    # CPU from processor dict
+    processor = plist.get("processor", {})
+    cpu_power = processor.get("cpu_power")  # Watts
+    cpu_pct = _extract_cpu_usage(processor)  # Existing helper
+    
+    # GPU from gpu dict: busy = 1 - idle_ratio
+    gpu_data = plist.get("gpu", {})
+    idle_ratio = gpu_data.get("idle_ratio")
+    gpu_pct = (1.0 - idle_ratio) * 100.0 if idle_ratio is not None else None
+    gpu_power = gpu_data.get("gpu_power")  # Watts
+    
+    # Disk I/O — keep read/write separate
+    disk_data = plist.get("disk", {})
+    io_read_per_s = disk_data.get("rbytes_per_s", 0.0)
+    io_write_per_s = disk_data.get("wbytes_per_s", 0.0)
+    
+    # Tasks: sum wakeups, collect top processes
+    wakeups_per_s = 0.0
+    top_processes: list[dict] = []
+    
+    for task in plist.get("tasks", []):
+        # Idle wakeups are the energy-relevant ones
+        task_wakeups = task.get("idle_wakeups_per_s", 0.0)
+        wakeups_per_s += task_wakeups
+        
+        # Collect process info for culprit identification
+        proc = {
+            "name": task.get("name", "unknown"),
+            "pid": task.get("pid", 0),
+            "cpu_ms_per_s": task.get("cputime_ms_per_s", 0.0),
+            "io_bytes_per_s": task.get("diskio_bytesread_per_s", 0.0) 
+                           + task.get("diskio_byteswritten_per_s", 0.0),
+            "wakeups_per_s": task_wakeups,
+        }
+        top_processes.append(proc)
+    
+    # Sort by CPU usage descending, keep top 10
+    top_processes.sort(key=lambda p: p["cpu_ms_per_s"], reverse=True)
+    top_processes = top_processes[:10]
+    
+    return PowermetricsResult(
+        elapsed_ns=elapsed_ns,
+        cpu_pct=cpu_pct,
+        cpu_power=cpu_power,
+        throttled=throttled,
+        gpu_pct=gpu_pct,
+        gpu_power=gpu_power,
+        io_read_per_s=io_read_per_s,
+        io_write_per_s=io_write_per_s,
+        wakeups_per_s=wakeups_per_s,
+        top_processes=top_processes,
+    )
+```
 
 ### Task 1.1: Change PowermetricsStream Interval to 100ms
 
