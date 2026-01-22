@@ -5,7 +5,9 @@ from pause_monitor.config import (
     Config,
     RetentionConfig,
     SamplingConfig,
+    SentinelConfig,
     SuspectsConfig,
+    TiersConfig,
 )
 
 
@@ -118,8 +120,6 @@ def test_config_load_missing_file_returns_defaults(tmp_path):
 
 def test_sentinel_config_defaults():
     """SentinelConfig has correct defaults."""
-    from pause_monitor.config import SentinelConfig
-
     config = SentinelConfig()
     assert config.fast_interval_ms == 100
     assert config.slow_interval_ms == 1000
@@ -128,8 +128,6 @@ def test_sentinel_config_defaults():
 
 def test_tiers_config_defaults():
     """TiersConfig has correct defaults."""
-    from pause_monitor.config import TiersConfig
-
     config = TiersConfig()
     assert config.elevated_threshold == 15
     assert config.critical_threshold == 50
