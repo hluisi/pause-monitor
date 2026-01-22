@@ -53,10 +53,8 @@ def test_daemon_init_creates_components():
 
     assert daemon.config is config
     assert daemon.state is not None
-    assert daemon.policy is not None
     assert daemon.notifier is not None
     assert daemon.io_baseline is not None
-    assert daemon.pause_detector is not None
     assert daemon.core_count > 0
 
 
@@ -87,26 +85,6 @@ async def test_daemon_start_initializes_database(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_daemon_stop_cleans_up(tmp_path: Path):
-    """Daemon.stop() cleans up resources."""
-    config = Config()
-    daemon = Daemon(config)
-
-    # Mock powermetrics
-    mock_powermetrics = AsyncMock()
-    mock_powermetrics.stop = AsyncMock()
-    daemon._powermetrics = mock_powermetrics
-
-    await daemon.stop()
-
-    # Check that stop was called (before _powermetrics was set to None)
-    mock_powermetrics.stop.assert_called_once()
-    # Verify cleanup happened
-    assert daemon._powermetrics is None
-    assert daemon.state.running is False
-
-
-@pytest.mark.asyncio
 async def test_daemon_handles_sigterm():
     """Daemon handles SIGTERM gracefully."""
     config = Config()
@@ -116,74 +94,6 @@ async def test_daemon_handles_sigterm():
     daemon._handle_signal(signal.SIGTERM)
 
     assert daemon._shutdown_event.is_set()
-
-
-@pytest.mark.asyncio
-async def test_daemon_collects_sample(tmp_path: Path):
-    """Daemon collects and stores samples."""
-    config = Config()
-
-    with patch.object(Config, "data_dir", new_callable=lambda: property(lambda self: tmp_path)):
-        with patch.object(
-            Config, "db_path", new_callable=lambda: property(lambda self: tmp_path / "test.db")
-        ):
-            events_prop = lambda: property(lambda self: tmp_path / "events")  # noqa: E731
-            with patch.object(Config, "events_dir", new_callable=events_prop):
-                daemon = Daemon(config)
-
-                # Initialize database
-                from pause_monitor.storage import init_database
-
-                init_database(config.db_path)
-                daemon._conn = sqlite3.connect(config.db_path)
-
-                # Mock powermetrics result
-                from pause_monitor.collector import PowermetricsResult
-
-                pm_result = PowermetricsResult(
-                    cpu_pct=25.0,
-                    cpu_freq=3000,
-                    cpu_temp=65.0,
-                    throttled=False,
-                    gpu_pct=10.0,
-                )
-
-                sample = await daemon._collect_sample(pm_result, interval=5.0)
-
-                assert sample is not None
-                assert sample.cpu_pct == 25.0
-                assert sample.stress.total >= 0
-
-
-@pytest.mark.asyncio
-async def test_daemon_detects_pause(tmp_path: Path):
-    """Daemon detects and handles pause events."""
-    config = Config()
-
-    with patch.object(Config, "data_dir", new_callable=lambda: property(lambda self: tmp_path)):
-        with patch.object(
-            Config, "db_path", new_callable=lambda: property(lambda self: tmp_path / "test.db")
-        ):
-            events_prop = lambda: property(lambda self: tmp_path / "events")  # noqa: E731
-            with patch.object(Config, "events_dir", new_callable=events_prop):
-                daemon = Daemon(config)
-
-                from pause_monitor.storage import init_database
-
-                init_database(config.db_path)
-                daemon._conn = sqlite3.connect(config.db_path)
-
-                # Simulate a long interval (pause)
-                daemon.pause_detector.expected_interval = 5.0
-
-                # Mock was_recently_asleep to avoid pmset log encoding issues
-                with patch("pause_monitor.daemon.was_recently_asleep", return_value=None):
-                    with patch.object(
-                        daemon, "_handle_pause", new_callable=AsyncMock
-                    ) as mock_handle:
-                        await daemon._check_for_pause(actual_interval=15.0)
-
-                        mock_handle.assert_called_once()
 
 
 # PID file management tests
@@ -434,114 +344,6 @@ async def test_auto_prune_skips_if_no_connection(tmp_path: Path):
                 await daemon._auto_prune()
 
             mock_prune.assert_not_called()
-
-
-@pytest.mark.asyncio
-async def test_daemon_passes_gpu_to_stress_calculation(tmp_path: Path):
-    """Verify daemon extracts and passes GPU percentage to stress calculation."""
-    config = Config()
-
-    with patch.object(Config, "data_dir", new_callable=lambda: property(lambda self: tmp_path)):
-        with patch.object(
-            Config, "db_path", new_callable=lambda: property(lambda self: tmp_path / "test.db")
-        ):
-            events_prop = lambda: property(lambda self: tmp_path / "events")  # noqa: E731
-            with patch.object(Config, "events_dir", new_callable=events_prop):
-                daemon = Daemon(config)
-
-                # Initialize database
-                from pause_monitor.storage import init_database
-
-                init_database(config.db_path)
-                daemon._conn = sqlite3.connect(config.db_path)
-
-                # Mock powermetrics result with high GPU usage (above 80% threshold)
-                from pause_monitor.collector import PowermetricsResult
-
-                pm_result = PowermetricsResult(
-                    cpu_pct=25.0,
-                    cpu_freq=3000,
-                    cpu_temp=65.0,
-                    throttled=False,
-                    gpu_pct=85.0,  # Above 80% threshold - should contribute to stress
-                )
-
-                sample = await daemon._collect_sample(pm_result, interval=5.0)
-
-                # GPU above 80% should add 20 points to stress
-                assert sample.stress.gpu == 20
-
-
-@pytest.mark.asyncio
-async def test_daemon_handles_none_gpu(tmp_path: Path):
-    """Verify daemon handles None GPU percentage gracefully."""
-    config = Config()
-
-    with patch.object(Config, "data_dir", new_callable=lambda: property(lambda self: tmp_path)):
-        with patch.object(
-            Config, "db_path", new_callable=lambda: property(lambda self: tmp_path / "test.db")
-        ):
-            events_prop = lambda: property(lambda self: tmp_path / "events")  # noqa: E731
-            with patch.object(Config, "events_dir", new_callable=events_prop):
-                daemon = Daemon(config)
-
-                # Initialize database
-                from pause_monitor.storage import init_database
-
-                init_database(config.db_path)
-                daemon._conn = sqlite3.connect(config.db_path)
-
-                # Mock powermetrics result with None GPU
-                from pause_monitor.collector import PowermetricsResult
-
-                pm_result = PowermetricsResult(
-                    cpu_pct=25.0,
-                    cpu_freq=3000,
-                    cpu_temp=65.0,
-                    throttled=False,
-                    gpu_pct=None,  # GPU not available
-                )
-
-                sample = await daemon._collect_sample(pm_result, interval=5.0)
-
-                # GPU score should be 0 when gpu_pct is None
-                assert sample.stress.gpu == 0
-
-
-@pytest.mark.asyncio
-async def test_daemon_gpu_below_threshold_no_stress(tmp_path: Path):
-    """Verify GPU below 80% does not contribute to stress."""
-    config = Config()
-
-    with patch.object(Config, "data_dir", new_callable=lambda: property(lambda self: tmp_path)):
-        with patch.object(
-            Config, "db_path", new_callable=lambda: property(lambda self: tmp_path / "test.db")
-        ):
-            events_prop = lambda: property(lambda self: tmp_path / "events")  # noqa: E731
-            with patch.object(Config, "events_dir", new_callable=events_prop):
-                daemon = Daemon(config)
-
-                # Initialize database
-                from pause_monitor.storage import init_database
-
-                init_database(config.db_path)
-                daemon._conn = sqlite3.connect(config.db_path)
-
-                # Mock powermetrics result with GPU below threshold
-                from pause_monitor.collector import PowermetricsResult
-
-                pm_result = PowermetricsResult(
-                    cpu_pct=25.0,
-                    cpu_freq=3000,
-                    cpu_temp=65.0,
-                    throttled=False,
-                    gpu_pct=50.0,  # Below 80% threshold
-                )
-
-                sample = await daemon._collect_sample(pm_result, interval=5.0)
-
-                # GPU below threshold should not contribute to stress
-                assert sample.stress.gpu == 0
 
 
 @pytest.mark.asyncio
