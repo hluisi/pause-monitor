@@ -223,8 +223,6 @@ class Daemon:
         """Handle shutdown signals."""
         log.info("signal_received", signal=sig.name)
         self._shutdown_event.set()
-        # Stop sentinel synchronously (it will cause sentinel.start() to return)
-        self.sentinel.stop()
 
     async def _start_caffeinate(self) -> None:
         """Start caffeinate to prevent App Nap."""
@@ -840,7 +838,12 @@ class Daemon:
                 break
             except Exception as e:
                 log.error("powermetrics_crashed", error=str(e))
-                await asyncio.sleep(1.0)  # Wait before restart
+                # Wait 1 second before restart, but exit immediately if shutdown
+                try:
+                    await asyncio.wait_for(self._shutdown_event.wait(), timeout=1.0)
+                    break  # Shutdown requested during wait
+                except asyncio.TimeoutError:
+                    pass  # Timeout expired, continue with restart
             finally:
                 if self._powermetrics:
                     await self._powermetrics.stop()

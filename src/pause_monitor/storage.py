@@ -13,7 +13,7 @@ from pause_monitor.stress import StressBreakdown
 
 log = structlog.get_logger()
 
-SCHEMA_VERSION = 4  # Added peak_stress to events
+SCHEMA_VERSION = 5  # Added stress_pageins column
 
 # Valid event status values
 VALID_EVENT_STATUSES = frozenset({"unreviewed", "reviewed", "pinned", "dismissed"})
