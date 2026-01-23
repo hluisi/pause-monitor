@@ -744,6 +744,83 @@ git commit -m "refactor(collector): update parse_powermetrics_sample per Data Di
 
 ---
 
+### Task 1.2.5: Update StressBreakdown to Add pageins (8th Factor)
+
+**Files:**
+- Modify: `src/pause_monitor/stress.py`
+- Modify: `tests/test_stress.py`
+
+**Rationale:** The design specifies 8 stress factors, with `pageins` being critical for pause detection. The current `StressBreakdown` only has 7 factors. This must be updated BEFORE any code that constructs `StressBreakdown` with `pageins=...`.
+
+**Current State:**
+```python
+@dataclass
+class StressBreakdown:
+    load: int      # 0-40
+    memory: int    # 0-30
+    thermal: int   # 0-20
+    latency: int   # 0-30
+    io: int        # 0-20
+    gpu: int       # 0-20
+    wakeups: int   # 0-20
+    # pageins is MISSING
+```
+
+**Required State:**
+```python
+@dataclass
+class StressBreakdown:
+    """Per-factor stress scores (8 factors).
+    
+    This is the CANONICAL definition - storage.py imports from here.
+    Note: 8 factors as of redesign (pageins added for pause detection).
+    """
+    load: int      # 0-30: load/cores ratio
+    memory: int    # 0-30: memory pressure  
+    thermal: int   # 0-10: throttling active
+    latency: int   # 0-20: self-latency
+    io: int        # 0-10: disk I/O activity
+    gpu: int       # 0-20: GPU usage sustained high
+    wakeups: int   # 0-10: idle wakeups sustained high
+    pageins: int = 0  # 0-30: swap activity (CRITICAL for pause detection)
+
+    @property
+    def total(self) -> int:
+        """Combined stress score, capped at 100."""
+        raw = (
+            self.load + self.memory + self.thermal + self.latency +
+            self.io + self.gpu + self.wakeups + self.pageins
+        )
+        return min(100, raw)
+```
+
+**IMPORTANT:** The `pageins` field has a default value of `0`. This allows existing code (like `calculate_stress()`) to continue working until it's deleted in Phase 6. The old `calculate_stress()` function will return `StressBreakdown` objects with `pageins=0`, which is acceptable as a temporary state.
+
+**Step 1: Update the dataclass**
+
+Replace `StressBreakdown` in `src/pause_monitor/stress.py` with the Required State above.
+
+**Step 2: Update the score ranges comment**
+
+The max ranges changed slightly in the redesign. Update the docstring comments to match the new architecture.
+
+**Step 3: Run tests**
+
+```bash
+uv run pytest tests/test_stress.py -v
+```
+
+All existing tests should pass because `pageins` has a default value.
+
+**Step 4: Commit**
+
+```bash
+git add src/pause_monitor/stress.py
+git commit -m "feat(stress): add pageins as 8th factor with default=0"
+```
+
+---
+
 ### Task 1.3: Update RingSample to Store Raw Metrics
 
 **Files:**
@@ -1336,7 +1413,7 @@ powermetrics (100ms stream)
 ┌─────────────────────────────────────┐
 │  Daemon Main Loop                   │
 │  - Parse powermetrics sample        │
-│  - Calculate stress (7 factors)     │
+│  - Calculate stress (8 factors)     │
 │  - Measure latency (pause detect)   │
 │  - Push to ring buffer              │
 │  - Push to socket (direct, no poll) │  ← SIMPLIFIED
@@ -1828,7 +1905,7 @@ from pause_monitor.collector import PowermetricsResult
 
 
 def test_daemon_calculate_stress_all_factors(tmp_path):
-    """Daemon should calculate stress with all 7 factors from powermetrics."""
+    """Daemon should calculate stress with all 8 factors from powermetrics."""
     config = Config()
     config._data_dir = tmp_path
     daemon = Daemon(config)
@@ -1982,7 +2059,7 @@ Expected: PASS
 
 ```bash
 git add src/pause_monitor/daemon.py tests/test_daemon.py
-git commit -m "feat(daemon): add stress calculation with all 7 factors"
+git commit -m "feat(daemon): add stress calculation with all 8 factors"
 ```
 
 ---
@@ -3781,6 +3858,20 @@ The file should contain only `Tier`, `TierAction`, and `TierManager`.
 
 Search for `from pause_monitor.sentinel import Sentinel` and remove. The Daemon creates its own TierManager directly.
 
+**Step 2a: Remove IOBaselineManager from daemon.py**
+
+The daemon currently imports and uses `IOBaselineManager` for I/O spike detection:
+
+```python
+# DELETE this import
+from pause_monitor.stress import IOBaselineManager
+
+# DELETE this line in __init__
+self.io_baseline = IOBaselineManager(persisted_baseline=None)
+```
+
+The new `_calculate_stress()` method handles I/O directly from powermetrics data, so `IOBaselineManager` is no longer needed.
+
 **Step 3: Delete Sentinel tests**
 
 Update `tests/test_sentinel.py`:
@@ -3798,6 +3889,51 @@ Expected: All PASS (no references to deleted Sentinel)
 ```bash
 git add src/pause_monitor/sentinel.py tests/
 git commit -m "refactor: delete Sentinel class, keep TierManager only"
+```
+
+---
+
+### Task 6.1.5: Delete Old Stress Functions
+
+**Files:**
+- Modify: `src/pause_monitor/stress.py`
+- Modify: `tests/test_stress.py`
+
+**Rationale:** The old `calculate_stress()` function and `IOBaselineManager` class are now orphaned. The new architecture uses `Daemon._calculate_stress()` which computes all 8 factors directly from powermetrics data.
+
+**Step 1: Delete from stress.py**
+
+Delete entirely:
+- `calculate_stress()` function
+- `IOBaselineManager` class
+- Any imports only used by deleted code
+
+Keep:
+- `StressBreakdown` dataclass (used throughout)
+- `MemoryPressureLevel` enum (used by Daemon)
+- `get_memory_pressure_fast()` function (used by Daemon)
+
+**Step 2: Delete orphaned tests**
+
+Delete from `tests/test_stress.py`:
+- All tests that call `calculate_stress()` directly (approximately 13 tests)
+- All tests for `IOBaselineManager`
+
+Keep:
+- Tests for `StressBreakdown.total` property
+- Tests for `get_memory_pressure_fast()`
+
+**Step 3: Run tests**
+
+```bash
+uv run pytest tests/test_stress.py -v
+```
+
+**Step 4: Commit**
+
+```bash
+git add src/pause_monitor/stress.py tests/test_stress.py
+git commit -m "refactor: delete orphaned calculate_stress() and IOBaselineManager"
 ```
 
 ---
@@ -3832,7 +3968,7 @@ Mark as completed:
 
 - ~~Sentinel slow loop~~ → Replaced by Daemon powermetrics integration
 - ~~TUI socket streaming~~ → Implemented via SocketServer/SocketClient
-- ~~Complete 7-factor stress~~ → All factors now calculated from powermetrics
+- ~~Complete 8-factor stress (including pageins)~~ → All factors now calculated from powermetrics
 - ~~Process attribution~~ → Using powermetrics top_cpu_processes + top_pagein_processes
 ```
 
@@ -3850,7 +3986,7 @@ Document the new architecture:
 
 ### Key Components
 - `Daemon._main_loop()` - Main 10Hz processing loop
-- `Daemon._calculate_stress()` - 7-factor stress from powermetrics
+- `Daemon._calculate_stress()` - 8-factor stress from powermetrics
 - `TierManager` - Tier state machine (extracted from Sentinel)
 - `SocketServer` - Broadcasts ring buffer to TUI
 - `SocketClient` - TUI receives real-time data
