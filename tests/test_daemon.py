@@ -289,12 +289,18 @@ async def test_auto_prune_runs_on_timeout(tmp_path: Path):
                     (0, 0),
                 )[1]
 
-                # Patch the timeout to be very short so we don't wait 24 hours
-                with patch("pause_monitor.daemon.asyncio.wait_for") as mock_wait_for:
-                    # First call times out (triggers prune), second would block but shutdown is set
-                    mock_wait_for.side_effect = [asyncio.TimeoutError(), asyncio.CancelledError()]
+                # Create a side effect that properly closes the unawaited coroutine
+                call_count = 0
 
-                    # Run actual _auto_prune method - it will exit after prune sets shutdown
+                async def mock_wait_for_impl(coro, timeout):
+                    nonlocal call_count
+                    coro.close()  # Close the coroutine to prevent "never awaited" warning
+                    call_count += 1
+                    if call_count == 1:
+                        raise asyncio.TimeoutError()
+                    raise asyncio.CancelledError()
+
+                with patch("pause_monitor.daemon.asyncio.wait_for", side_effect=mock_wait_for_impl):
                     try:
                         await daemon._auto_prune()
                     except asyncio.CancelledError:
@@ -335,15 +341,14 @@ async def test_auto_prune_skips_if_no_connection(tmp_path: Path):
 
         with patch("pause_monitor.daemon.prune_old_data") as mock_prune:
             # Patch wait_for to timeout once, then we set shutdown
-            with patch("pause_monitor.daemon.asyncio.wait_for") as mock_wait_for:
 
-                def timeout_then_shutdown(*args, **kwargs):
-                    # After first timeout, set shutdown so loop exits
-                    daemon._shutdown_event.set()
-                    raise asyncio.TimeoutError()
+            async def mock_wait_for_impl(coro, timeout):
+                coro.close()  # Close the coroutine to prevent "never awaited" warning
+                # After first timeout, set shutdown so loop exits
+                daemon._shutdown_event.set()
+                raise asyncio.TimeoutError()
 
-                mock_wait_for.side_effect = timeout_then_shutdown
-
+            with patch("pause_monitor.daemon.asyncio.wait_for", side_effect=mock_wait_for_impl):
                 # Run actual _auto_prune - since _conn is None, prune should not be called
                 await daemon._auto_prune()
 
@@ -377,10 +382,18 @@ async def test_auto_prune_uses_config_retention_days(tmp_path: Path):
                     (0, 0),
                 )[1]
 
-                # Patch the timeout to be very short
-                with patch("pause_monitor.daemon.asyncio.wait_for") as mock_wait_for:
-                    mock_wait_for.side_effect = [asyncio.TimeoutError(), asyncio.CancelledError()]
+                # Create a side effect that properly closes the unawaited coroutine
+                call_count = 0
 
+                async def mock_wait_for_impl(coro, timeout):
+                    nonlocal call_count
+                    coro.close()  # Close the coroutine to prevent "never awaited" warning
+                    call_count += 1
+                    if call_count == 1:
+                        raise asyncio.TimeoutError()
+                    raise asyncio.CancelledError()
+
+                with patch("pause_monitor.daemon.asyncio.wait_for", side_effect=mock_wait_for_impl):
                     try:
                         await daemon._auto_prune()
                     except asyncio.CancelledError:
