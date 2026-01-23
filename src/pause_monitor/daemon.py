@@ -9,7 +9,7 @@ from datetime import datetime
 
 import structlog
 
-from pause_monitor.collector import get_core_count
+from pause_monitor.collector import PowermetricsResult, get_core_count
 from pause_monitor.config import Config
 from pause_monitor.forensics import (
     ForensicsCapture,
@@ -32,6 +32,7 @@ from pause_monitor.storage import (
 from pause_monitor.stress import (
     IOBaselineManager,
     StressBreakdown,
+    get_memory_pressure_fast,
 )
 
 log = structlog.get_logger()
@@ -408,6 +409,99 @@ class Daemon:
 
         # Send notification
         self.notifier.pause_detected(duration, event_dir)
+
+    def _calculate_stress(
+        self, pm_result: PowermetricsResult, latency_ratio: float
+    ) -> StressBreakdown:
+        """Calculate stress breakdown from powermetrics data.
+
+        Args:
+            pm_result: Parsed powermetrics sample
+            latency_ratio: Actual interval / expected interval (1.0 = on time)
+
+        Returns:
+            StressBreakdown with all 8 factors (including pageins - critical for pause detection)
+        """
+        # Get system metrics
+        load_avg = os.getloadavg()[0]
+        mem_pressure = get_memory_pressure_fast()
+
+        # Load stress (0-30 points)
+        load_ratio = load_avg / self.core_count if self.core_count > 0 else 0
+        if load_ratio < 1.0:
+            load = 0
+        elif load_ratio < 2.0:
+            load = int((load_ratio - 1.0) * 15)  # 0-15 for 1x-2x
+        else:
+            load = int(min(30, 15 + (load_ratio - 2.0) * 7.5))  # 15-30 for 2x+
+
+        # Memory stress (0-30 points)
+        # mem_pressure is "memory free" (0-100, higher = more available)
+        # Low free memory = high stress, high free memory = low stress
+        mem_used_pct = 100 - mem_pressure  # Convert to "used" perspective
+        if mem_used_pct < 70:
+            memory = 0  # Under 70% used = no stress
+        elif mem_used_pct < 85:
+            memory = int((mem_used_pct - 70) * 1.0)  # 0-15 for 70-85% used
+        else:
+            memory = int(min(30, 15 + (mem_used_pct - 85) * 1.0))  # 15-30 for 85%+ used
+
+        # Thermal stress (0-10 points)
+        thermal = 10 if pm_result.throttled else 0
+
+        # Latency stress (0-20 points) - uses config threshold
+        pause_threshold = self.config.sentinel.pause_threshold_ratio
+        if latency_ratio <= 1.2:
+            latency = 0
+        elif pause_threshold > 1.2 and latency_ratio <= pause_threshold:
+            # Scale from 0-10 between 1.2x and threshold
+            # Guard: pause_threshold must be > 1.2 to avoid division by zero
+            latency = int((latency_ratio - 1.2) / (pause_threshold - 1.2) * 10)
+        else:
+            # 10-20 for ratios above threshold
+            latency = int(min(20, 10 + (latency_ratio - pause_threshold) * 5))
+
+        # GPU stress (0-20 points)
+        gpu = 0
+        if pm_result.gpu_pct is not None:
+            if pm_result.gpu_pct > 80:
+                gpu = int(min(20, (pm_result.gpu_pct - 80) * 1.0))  # 0-20 for 80-100%
+            elif pm_result.gpu_pct > 50:
+                gpu = int((pm_result.gpu_pct - 50) * 0.33)  # 0-10 for 50-80%
+
+        # Wakeups stress (0-10 points)
+        wakeups = 0
+        if pm_result.wakeups_per_s > 100:
+            wakeups = int(min(10, (pm_result.wakeups_per_s - 100) / 40))  # 100-500 -> 0-10
+
+        # I/O stress (0-10 points)
+        # Scale: 0-10 MB/s = 0, 10-100 MB/s = 0-10 points
+        # Per Data Dictionary: use io_read_per_s + io_write_per_s
+        io = 0
+        io_mb_per_sec = (pm_result.io_read_per_s + pm_result.io_write_per_s) / (1024 * 1024)
+        if io_mb_per_sec > 10:
+            io = int(min(10, (io_mb_per_sec - 10) / 9))  # 10-100 MB/s -> 0-10
+
+        # Pageins stress (0-30 points) - CRITICAL for pause detection
+        # Scale: 0-10 pageins/s = 0, 10-100 = 0-15, 100+ = 15-30
+        # This is the #1 indicator of user-visible pauses
+        pageins = 0
+        if pm_result.pageins_per_s > 10:
+            if pm_result.pageins_per_s < 100:
+                pageins = int((pm_result.pageins_per_s - 10) / 6)  # 10-100 -> 0-15
+            else:
+                pageins = int(min(30, 15 + (pm_result.pageins_per_s - 100) / 20))  # 100+ -> 15-30
+
+        return StressBreakdown(
+            load=load,
+            memory=memory,
+            thermal=thermal,
+            latency=latency,
+            io=io,
+            gpu=gpu,
+            wakeups=wakeups,
+            pageins=pageins,
+        )
 
 
 async def run_daemon(config: Config | None = None) -> None:

@@ -534,3 +534,40 @@ def test_daemon_has_tier_manager(tmp_path: Path):
     assert hasattr(daemon, "tier_manager")
     # current_tier returns int directly, not Tier enum
     assert daemon.tier_manager.current_tier == 1  # SENTINEL
+
+
+def test_daemon_calculate_stress_all_factors(tmp_path):
+    """Daemon should calculate stress with all 8 factors from powermetrics."""
+    from pause_monitor.collector import PowermetricsResult
+
+    config = Config()
+    config._data_dir = tmp_path
+    daemon = Daemon(config)
+
+    # Phase 1 updated PowermetricsResult - uses Data Dictionary fields
+    pm_result = PowermetricsResult(
+        elapsed_ns=100_000_000,
+        throttled=True,
+        cpu_power=15.0,
+        gpu_pct=90.0,
+        gpu_power=8.0,
+        io_read_per_s=30_000_000.0,  # 30 MB/s read
+        io_write_per_s=20_000_000.0,  # 20 MB/s write = 50 MB/s total
+        wakeups_per_s=300.0,
+        pageins_per_s=50.0,  # Some swap activity
+        top_cpu_processes=[{"name": "test", "pid": 123, "cpu_ms_per_s": 500.0}],
+        top_pagein_processes=[{"name": "swapper", "pid": 456, "pageins_per_s": 50.0}],
+    )
+
+    stress = daemon._calculate_stress(pm_result, latency_ratio=1.5)
+
+    # Verify all factors are calculated
+    assert stress.load >= 0  # Based on system load
+    assert stress.memory >= 0
+    assert stress.thermal == 10  # throttled = 10 points
+    assert stress.latency > 0  # latency_ratio 1.5 should contribute
+    assert stress.gpu > 0  # 90% GPU
+    assert stress.wakeups > 0  # 300 wakeups/sec
+    assert stress.io > 0  # 50 MB/s should contribute
+    assert stress.pageins > 0  # 50 pageins/sec should contribute
+    assert stress.total > 0  # Total should be sum of all 8 factors
