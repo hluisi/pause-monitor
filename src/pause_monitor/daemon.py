@@ -242,9 +242,11 @@ class Daemon:
     async def _stop_caffeinate(self) -> None:
         """Stop caffeinate subprocess."""
         if self._caffeinate_proc:
-            self._caffeinate_proc.terminate()
             try:
+                self._caffeinate_proc.terminate()
                 await asyncio.wait_for(self._caffeinate_proc.wait(), timeout=5.0)
+            except ProcessLookupError:
+                pass  # Process already exited
             except asyncio.TimeoutError:
                 self._caffeinate_proc.kill()
             self._caffeinate_proc = None
