@@ -4,8 +4,9 @@ import asyncio
 import os
 import signal
 import sqlite3
+import time
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import structlog
 
@@ -122,11 +123,30 @@ class Daemon:
             critical_threshold=config.tiers.critical_threshold,
         )
 
+        # Tier 2 peak tracking
+        self._tier2_entry_time: float | None = None
+        self._tier2_peak_stress: int = 0
+        self._tier2_peak_breakdown: StressBreakdown | None = None
+        self._tier2_peak_process: str | None = None
+
+        # Peak tracking timer
+        self._last_peak_check: float = 0.0
+
         # Will be initialized on start
         self._conn: sqlite3.Connection | None = None
         self._caffeinate_proc: asyncio.subprocess.Process | None = None
         self._shutdown_event = asyncio.Event()
         self._auto_prune_task: asyncio.Task | None = None
+
+    async def _init_database(self) -> None:
+        """Initialize database connection.
+
+        Extracted from start() so tests can initialize DB without full daemon startup.
+        No migrations - if schema version mismatches, init_database() deletes and recreates.
+        """
+        self.config.data_dir.mkdir(parents=True, exist_ok=True)
+        init_database(self.config.db_path)  # Handles version check + recreate
+        self._conn = sqlite3.connect(self.config.db_path)
 
     async def start(self) -> None:
         """Start the daemon."""
@@ -315,6 +335,61 @@ class Daemon:
                 self.sentinel.tier_manager.peak_stress,
                 0.0,  # Just entered, no duration yet
             )
+
+    async def _handle_tier_action(self, action: TierAction, stress: StressBreakdown) -> None:
+        """Handle tier transition actions.
+
+        Requires: _init_database() must have been called (self._conn must be set).
+        """
+        if action == TierAction.TIER2_ENTRY:
+            self._tier2_entry_time = time.monotonic()
+            self._tier2_peak_stress = stress.total
+            self._tier2_peak_breakdown = stress
+            self.ring_buffer.snapshot_processes(trigger=action.value)
+            log.info("tier2_entered", stress=stress.total)
+
+        elif action == TierAction.TIER2_PEAK:
+            self._tier2_peak_stress = stress.total
+            self._tier2_peak_breakdown = stress
+            self.ring_buffer.snapshot_processes(trigger=action.value)
+            log.info("tier2_new_peak", stress=stress.total)
+
+        elif action == TierAction.TIER2_EXIT:
+            # Read entry time from Daemon (tracked at entry)
+            entry_time = self._tier2_entry_time
+            if entry_time is not None:
+                duration = time.monotonic() - entry_time
+                # Compute wall-clock entry time from duration
+                entry_timestamp = datetime.now() - timedelta(seconds=duration)
+                event = Event(
+                    timestamp=entry_timestamp,
+                    duration=duration,
+                    stress=self._tier2_peak_breakdown or stress,
+                    culprits=[],  # Populated from ring buffer snapshot
+                    event_dir=None,  # Bookmarks don't have forensics
+                    status="unreviewed",
+                    peak_stress=self._tier2_peak_stress,
+                )
+                insert_event(self._conn, event)
+                self.state.event_count += 1
+                log.info("tier2_exited", duration=duration, peak=self._tier2_peak_stress)
+
+            self._tier2_entry_time = None
+            self._tier2_peak_stress = 0
+            self._tier2_peak_breakdown = None
+            self._tier2_peak_process = None
+            self.ring_buffer.clear_snapshots()
+
+        elif action == TierAction.TIER3_ENTRY:
+            self.ring_buffer.snapshot_processes(trigger=action.value)
+            log.warning("tier3_entered", stress=stress.total)
+
+        elif action == TierAction.TIER3_EXIT:
+            # De-escalating to tier 2 - TierManager handles entry time tracking
+            # Peak tracking starts fresh for recovery period
+            self._tier2_peak_stress = stress.total
+            self._tier2_peak_breakdown = stress
+            log.info("tier3_exited", stress=stress.total)
 
     async def _handle_pause_from_sentinel(
         self,

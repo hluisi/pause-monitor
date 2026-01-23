@@ -4,6 +4,7 @@ import asyncio
 import os
 import signal
 import sqlite3
+import time
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
@@ -13,6 +14,8 @@ import pytest
 from pause_monitor.config import Config
 from pause_monitor.daemon import Daemon, DaemonState
 from pause_monitor.sentinel import TierAction
+from pause_monitor.storage import get_events
+from pause_monitor.stress import StressBreakdown
 
 
 def test_daemon_state_initial():
@@ -536,8 +539,43 @@ def test_daemon_has_tier_manager(tmp_path: Path):
     assert daemon.tier_manager.current_tier == 1  # SENTINEL
 
 
+@pytest.mark.asyncio
+async def test_daemon_handles_tier2_exit_writes_bookmark(tmp_path):
+    """Daemon should write bookmark to DB on tier2_exit."""
+    config = Config()
+
+    with patch.object(Config, "data_dir", new_callable=lambda: property(lambda self: tmp_path)):
+        with patch.object(
+            Config, "db_path", new_callable=lambda: property(lambda self: tmp_path / "test.db")
+        ):
+            daemon = Daemon(config)
+            await daemon._init_database()
+
+            # Trigger tier2 entry to capture entry time in daemon
+            entry_stress = StressBreakdown(
+                load=10, memory=8, thermal=5, latency=3, io=2, gpu=5, wakeups=2, pageins=0
+            )
+            await daemon._handle_tier_action(TierAction.TIER2_ENTRY, entry_stress)
+
+            # Simulate time passing by manipulating daemon's entry time
+            daemon._tier2_entry_time = time.monotonic() - 60  # Simulate 60s ago
+
+            # Handle tier2_exit
+            exit_stress = StressBreakdown(
+                load=5, memory=3, thermal=0, latency=0, io=0, gpu=2, wakeups=1, pageins=0
+            )
+            await daemon._handle_tier_action(TierAction.TIER2_EXIT, exit_stress)
+
+            # Verify event was written with peak_stress
+            events = get_events(daemon._conn, limit=1)
+            assert len(events) == 1
+            assert events[0].peak_stress == 35  # Peak from entry stress total
+            assert events[0].duration >= 59  # Should be ~60s (with some tolerance)
+            # Entry time should be cleared after exit
+            assert daemon._tier2_entry_time is None
+
+
 def test_daemon_calculate_stress_all_factors(tmp_path):
-    """Daemon should calculate stress with all 8 factors from powermetrics."""
     from pause_monitor.collector import PowermetricsResult
 
     config = Config()
