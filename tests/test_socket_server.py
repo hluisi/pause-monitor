@@ -14,6 +14,15 @@ from pause_monitor.socket_server import SocketServer
 from pause_monitor.stress import StressBreakdown
 
 
+async def wait_until(condition, timeout=1.0, interval=0.01):
+    """Wait until condition() returns True, or timeout."""
+    deadline = asyncio.get_event_loop().time() + timeout
+    while not condition():
+        if asyncio.get_event_loop().time() > deadline:
+            raise TimeoutError(f"Condition not met within {timeout}s")
+        await asyncio.sleep(interval)
+
+
 @pytest.fixture
 def short_tmp_path():
     """Create a short temporary path for Unix sockets.
@@ -149,15 +158,15 @@ async def test_socket_server_has_clients_property(short_tmp_path):
 
         # Connect client
         reader, writer = await asyncio.open_unix_connection(str(socket_path))
-        # Wait for connection to be registered
-        await asyncio.sleep(0.1)
+        # Client is registered before initial state is sent, so reading it confirms registration
+        await asyncio.wait_for(reader.readline(), timeout=2.0)
 
         assert server.has_clients
 
         writer.close()
         await writer.wait_closed()
-        # Wait for disconnect to be processed
-        await asyncio.sleep(0.1)
+        # Poll for disconnect to be processed
+        await wait_until(lambda: not server.has_clients)
 
         assert not server.has_clients
     finally:
