@@ -10,7 +10,7 @@ import asyncio
 import os
 import time
 from collections.abc import Awaitable, Callable
-from enum import IntEnum
+from enum import IntEnum, StrEnum
 from typing import TYPE_CHECKING
 
 import structlog
@@ -31,6 +31,16 @@ class Tier(IntEnum):
     SENTINEL = 1  # Normal: stress < elevated_threshold
     ELEVATED = 2  # Increased attention: elevated <= stress < critical
     CRITICAL = 3  # Maximum alert: stress >= critical_threshold
+
+
+class TierAction(StrEnum):
+    """Actions returned by TierManager on state transitions."""
+
+    TIER2_ENTRY = "tier2_entry"
+    TIER2_EXIT = "tier2_exit"
+    TIER2_PEAK = "tier2_peak"
+    TIER3_ENTRY = "tier3_entry"
+    TIER3_EXIT = "tier3_exit"
 
 
 class TierManager:
@@ -80,17 +90,13 @@ class TierManager:
         """Time (monotonic) when tier 3 was entered, or None if not in tier 3."""
         return self._tier3_entry_time
 
-    def update(self, stress_total: int) -> str | None:
+    def update(self, stress_total: int) -> TierAction | None:
         """Update tier state based on current stress.
 
-        Returns action string if state change occurred:
-        - "tier2_entry", "tier2_exit"
-        - "tier3_entry", "tier3_exit"
-        - "tier2_peak" if new peak reached in tier 2
-        - None if no action needed
+        Returns TierAction if state change occurred, None otherwise.
         """
         now = time.monotonic()
-        action: str | None = None
+        action: TierAction | None = None
 
         # Check for escalation first (immediate)
         if stress_total >= self.critical_threshold and self._current_tier < Tier.CRITICAL:
@@ -100,14 +106,14 @@ class TierManager:
             # Track peak on entry to tier 3 as well
             if stress_total > self._peak_stress:
                 self._peak_stress = stress_total
-            return "tier3_entry"
+            return TierAction.TIER3_ENTRY
 
         if stress_total >= self.elevated_threshold and self._current_tier < Tier.ELEVATED:
             self._current_tier = Tier.ELEVATED
             self._tier2_entry_time = now
             self._tier2_low_since = None
             self._peak_stress = stress_total
-            return "tier2_entry"
+            return TierAction.TIER2_ENTRY
 
         # Track peak during elevated states (after escalation checks)
         if self._current_tier >= Tier.ELEVATED and stress_total > self._peak_stress:
@@ -115,7 +121,7 @@ class TierManager:
             # Only emit peak action for Tier 2 - Tier 3 is already critical.
             # Ring buffer triggers don't include "tier3_peak" by design.
             if self._current_tier == Tier.ELEVATED:
-                action = "tier2_peak"
+                action = TierAction.TIER2_PEAK
 
         # Check for de-escalation with hysteresis
         if self._current_tier == Tier.CRITICAL:
@@ -126,7 +132,7 @@ class TierManager:
                     self._current_tier = Tier.ELEVATED
                     self._tier3_entry_time = None
                     self._tier3_low_since = None
-                    return "tier3_exit"
+                    return TierAction.TIER3_EXIT
             else:
                 self._tier3_low_since = None
 
@@ -139,7 +145,7 @@ class TierManager:
                     self._tier2_entry_time = None
                     self._tier2_low_since = None
                     self._peak_stress = 0
-                    return "tier2_exit"
+                    return TierAction.TIER2_EXIT
             else:
                 self._tier2_low_since = None
 
@@ -190,7 +196,7 @@ class Sentinel:
         self._cached_throttled: bool | None = None
 
         # Callbacks (must be async)
-        self.on_tier_change: Callable[[str, int], Awaitable[None]] | None = None
+        self.on_tier_change: Callable[[TierAction, int], Awaitable[None]] | None = None
         self.on_pause_detected: Callable[[float, float, BufferContents], Awaitable[None]] | None = (
             None
         )
@@ -273,14 +279,14 @@ class Sentinel:
             wakeups_per_sec=self._cached_wakeups,
         )
 
-    async def _handle_tier_action(self, action: str) -> None:
+    async def _handle_tier_action(self, action: TierAction) -> None:
         """Handle tier state changes."""
         log.info("tier_action", action=action, tier=self.tier_manager.current_tier)
 
-        if action in ("tier2_entry", "tier2_peak", "tier3_entry"):
+        if action in (TierAction.TIER2_ENTRY, TierAction.TIER2_PEAK, TierAction.TIER3_ENTRY):
             self.buffer.snapshot_processes(trigger=action)
 
-        if action == "tier2_exit":
+        if action == TierAction.TIER2_EXIT:
             self.buffer.clear_snapshots()
 
         if self.on_tier_change:

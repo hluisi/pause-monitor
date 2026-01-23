@@ -12,6 +12,7 @@ import pytest
 
 from pause_monitor.config import Config
 from pause_monitor.daemon import Daemon, DaemonState
+from pause_monitor.sentinel import TierAction
 
 
 def test_daemon_state_initial():
@@ -506,19 +507,30 @@ async def test_daemon_tier_change_updates_state(tmp_path: Path):
         assert daemon.state.elevated_since is None
 
         # Trigger tier2_entry - should enter elevated
-        await daemon._handle_tier_change("tier2_entry", 2)
+        await daemon._handle_tier_change(TierAction.TIER2_ENTRY, 2)
         assert daemon.state.elevated_since is not None
 
         # Trigger tier2_exit - should exit elevated
-        await daemon._handle_tier_change("tier2_exit", 1)
+        await daemon._handle_tier_change(TierAction.TIER2_EXIT, 1)
         assert daemon.state.elevated_since is None
 
         # Trigger tier3_entry - should enter both elevated and critical
-        await daemon._handle_tier_change("tier3_entry", 3)
+        await daemon._handle_tier_change(TierAction.TIER3_ENTRY, 3)
         assert daemon.state.elevated_since is not None
         assert daemon.state.critical_since is not None
 
         # Trigger tier3_exit - should exit critical but stay elevated
-        await daemon._handle_tier_change("tier3_exit", 2)
+        await daemon._handle_tier_change(TierAction.TIER3_EXIT, 2)
         assert daemon.state.elevated_since is not None
         assert daemon.state.critical_since is None
+
+
+def test_daemon_has_tier_manager(tmp_path: Path):
+    """Daemon should have TierManager for tier transitions."""
+    config = Config()
+    config._data_dir = tmp_path
+    daemon = Daemon(config)
+
+    assert hasattr(daemon, "tier_manager")
+    # current_tier returns int directly, not Tier enum
+    assert daemon.tier_manager.current_tier == 1  # SENTINEL

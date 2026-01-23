@@ -19,7 +19,7 @@ from pause_monitor.forensics import (
 )
 from pause_monitor.notifications import Notifier
 from pause_monitor.ringbuffer import BufferContents, RingBuffer
-from pause_monitor.sentinel import Sentinel
+from pause_monitor.sentinel import Sentinel, TierAction, TierManager
 from pause_monitor.sleepwake import was_recently_asleep
 from pause_monitor.storage import (
     Event,
@@ -114,6 +114,12 @@ class Daemon:
         # Wire up sentinel callbacks
         self.sentinel.on_tier_change = self._handle_tier_change
         self.sentinel.on_pause_detected = self._handle_pause_from_sentinel
+
+        # Tier management (replaces sentinel.tier_manager)
+        self.tier_manager = TierManager(
+            elevated_threshold=config.tiers.elevated_threshold,
+            critical_threshold=config.tiers.critical_threshold,
+        )
 
         # Will be initialized on start
         self._conn: sqlite3.Connection | None = None
@@ -280,29 +286,29 @@ class Daemon:
 
     # === Sentinel Callbacks ===
 
-    async def _handle_tier_change(self, action: str, tier: int) -> None:
+    async def _handle_tier_change(self, action: TierAction, tier: int) -> None:
         """Handle tier state changes from sentinel.
 
         Args:
-            action: The tier action (tier2_entry, tier2_exit, tier3_entry, tier3_exit, tier2_peak)
+            action: The tier action (TIER2_ENTRY, TIER2_EXIT, TIER3_ENTRY, TIER3_EXIT, TIER2_PEAK)
             tier: The current tier (1, 2, or 3)
         """
         log.info("tier_change", action=action, tier=tier)
 
         # Update state based on tier
-        if action == "tier2_entry" or action == "tier3_entry":
+        if action == TierAction.TIER2_ENTRY or action == TierAction.TIER3_ENTRY:
             self.state.enter_elevated()
-            if action == "tier3_entry":
+            if action == TierAction.TIER3_ENTRY:
                 self.state.enter_critical()
-        elif action == "tier2_exit":
+        elif action == TierAction.TIER2_EXIT:
             self.state.exit_elevated()
-        elif action == "tier3_exit":
+        elif action == TierAction.TIER3_EXIT:
             self.state.exit_critical()
 
         # Send notifications for tier changes
-        if action == "tier2_entry":
+        if action == TierAction.TIER2_ENTRY:
             self.notifier.elevated_entered(self.sentinel.tier_manager.peak_stress)
-        elif action == "tier3_entry":
+        elif action == TierAction.TIER3_ENTRY:
             # Critical stress notification
             self.notifier.critical_stress(
                 self.sentinel.tier_manager.peak_stress,
