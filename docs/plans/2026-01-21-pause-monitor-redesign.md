@@ -1,8 +1,26 @@
 # pause-monitor Design Document
 
-**Date:** 2026-01-21  
-**Status:** Draft  
+**Date:** 2026-01-21
+**Status:** Draft (Updated 2026-01-22)
 **Purpose:** Capture the intended design for pause-monitor, focusing on what we're building and why.
+
+---
+
+## Design Evolution
+
+**2026-01-22 Updates:** During implementation planning, several improvements were made to simplify the architecture while maintaining core functionality:
+
+1. **Sentinel → Daemon._main_loop()**: The Sentinel class was replaced by integrating its 100ms loop directly into Daemon. TierManager was extracted as a reusable component. This eliminates a wrapper layer while preserving all tier management functionality.
+
+2. **Eight stress factors (added pageins)**: The original design tracked 7 factors. During implementation, pageins (swap page-ins per second) was added as it provides direct measurement of memory thrashing—the #1 cause of user-visible pauses. The Memory factor measures pressure, but pageins measures actual thrashing.
+
+3. **Time-based event correlation**: Removed explicit `incident_id` linking in favor of time-window queries. Events within ~60 seconds are assumed related. This simplifies implementation without sacrificing investigative capability.
+
+4. **Push-based socket streaming**: The socket server broadcasts directly from the main loop rather than polling the ring buffer. This eliminates timing drift and reduces complexity.
+
+5. **Simple socket client**: The TUI's socket client connects or throws—no auto-reconnect logic. Reconnection decisions belong in the TUI's event loop.
+
+These changes are reflected throughout this document. See the implementation plan for detailed rationale.
 
 ---
 
@@ -28,9 +46,9 @@ Not just detect pauses, but capture enough context to identify the responsible p
 
 On Apple Silicon, GPU and CPU share unified memory. GPU utilization is just as important as CPU utilization. A process monopolizing the GPU can freeze the system just as effectively as a CPU hog.
 
-### The Seven Stress Factors
+### The Eight Stress Factors
 
-System stress is multi-dimensional. We track seven factors:
+System stress is multi-dimensional. We track eight factors:
 
 | Factor | What It Measures | Why It Matters |
 |--------|------------------|----------------|
@@ -41,8 +59,11 @@ System stress is multi-dimensional. We track seven factors:
 | **I/O** | Disk read/write activity | I/O storms can freeze everything |
 | **GPU** | GPU utilization | Critical on Apple Silicon |
 | **Wakeups** | Idle wake-ups per second | Processes preventing efficient sleep |
+| **Pageins** | Swap page-ins per second | Direct measure of memory thrashing - #1 pause indicator |
 
 A combined stress score (0-100) indicates overall system health. Individual factors point to the cause.
+
+**Note:** Pageins was added during implementation planning (2026-01-22) as it provides direct measurement of swap activity, which is the primary cause of user-visible pauses. The Memory factor measures pressure, but pageins measures the actual thrashing.
 
 ### The Ring Buffer
 
@@ -78,8 +99,8 @@ The `powermetrics` utility provides comprehensive system data including GPU, the
 
 **Sample rate:** 100ms (10Hz). The ring buffer receives complete samples continuously.
 
-**Failure handling:** 
-- **Startup:** If powermetrics is unavailable (permission denied, not found), the daemon refuses to start. Fail fast—we cannot accurately detect stress without all 7 factors.
+**Failure handling:**
+- **Startup:** If powermetrics is unavailable (permission denied, not found), the daemon refuses to start. Fail fast—we cannot accurately detect stress without all 8 factors.
 - **Mid-run crash:** Retry with exponential backoff (1s, 2s, 4s, max 30s). Log prominently. Continue sampling what we can from fast-path metrics (load, memory, latency) while retrying.
 
 ### Per-Process Metrics
@@ -159,28 +180,35 @@ A pause is detected when our 100ms tick takes significantly longer (>2x expected
 
 This is where the real investigation happens.
 
-### Event Linking
+### Event Correlation
 
-Incidents can span multiple tier transitions. Events are linked via a shared `incident_id` column.
+Incidents can span multiple tier transitions. Events are correlated using time windows rather than explicit linking.
 
-**Mechanism:** When an event starts, it generates a new `incident_id`. If transitioning from a higher tier (Tier 3 → Tier 2), the new event inherits the `incident_id` from the previous event, linking them as one incident.
+**Mechanism:** Events occurring within a short time window (e.g., 60 seconds) are assumed to be part of the same incident.
+
+```sql
+-- Find related events for an incident
+SELECT * FROM events
+WHERE timestamp BETWEEN :incident_start - 60 AND :incident_end + 60
+ORDER BY timestamp
+```
 
 ```
 Example incident timeline:
 
-Tier 1 → Tier 2    Event A starts (elevated), new incident_id=abc123
+Tier 1 → Tier 2    Event A starts (elevated) at 10:30:00
 Tier 2 → Tier 3    Event A escalates (critical/pause)
 [stuck in Tier 3, peaks updated every 30s]
-Tier 3 → Tier 2    Event B starts (recovery), inherits incident_id=abc123
-Tier 2 → Tier 1    Event B ends
+Tier 3 → Tier 2    Event B starts (recovery) at 10:31:00
+Tier 2 → Tier 1    Event B ends at 10:31:30
 ```
 
-Events A and B share `incident_id=abc123`. When reviewing, you see:
+Querying for events between 10:29:00 and 10:32:30 shows the full incident:
 - The buildup (Event A: elevated period before the pause)
 - The pause/critical period (with peak data)
 - The recovery (Event B: elevated period after)
 
-This tells the full story of what happened.
+**Implementation note:** This simplification (adopted 2026-01-22) avoids the complexity of explicit `incident_id` tracking. If future needs require programmatic linking, a simple `previous_event_id` foreign key can be added without the state machine overhead.
 
 ---
 
@@ -254,7 +282,7 @@ SQLite for persistence:
 powermetrics (streaming)
         │
         ▼
-   Stress Calculation (7 factors)
+   Stress Calculation (8 factors)
         │
         ▼
    Ring Buffer (30 sec in memory)
@@ -289,23 +317,25 @@ This redesign addresses accumulated technical debt and clarifies which systems w
 
 | Component | Purpose |
 |-----------|---------|
-| Sentinel | 100ms tick loop, tier management |
-| TierManager | Tier state machine with hysteresis |
+| TierManager | Tier state machine with hysteresis (extracted from Sentinel) |
 | RingBuffer | 30-second in-memory sample storage |
-| StressBreakdown | 7-factor stress model |
+| StressBreakdown | 8-factor stress model (added pageins) |
 | Forensics capture | spindump, tailspin, logs on pause |
 
 ### What We're Replacing
 
 | Old | New | Reason |
 |-----|-----|--------|
+| Sentinel class | Daemon._main_loop() with TierManager | Simplify architecture - loop belongs in Daemon |
 | TUI reads SQLite | TUI reads via Unix socket | Real-time 10Hz updates |
-| `_slow_loop` (1s timer stub) | powermetrics always streaming | Can't calculate accurate stress without all 7 factors |
+| `_slow_loop` (1s timer stub) | powermetrics always streaming | Can't calculate accurate stress without all 8 factors |
 | SQLite for real-time display | Socket for real-time, SQLite for history only | Avoid disk I/O during monitoring |
 
 ### What We're Removing
 
 | Component | Reason |
+|-----------|--------|
+| Sentinel class | Replaced by Daemon._main_loop() - loop logic moved to Daemon, tier management extracted to TierManager |
 |-----------|--------|
 | `SamplePolicy` class | Orphaned, replaced by Sentinel tiers |
 | `Daemon._run_loop` method | Orphaned, never called |
@@ -326,7 +356,7 @@ This redesign addresses accumulated technical debt and clarifies which systems w
 
 For the TUI to be functional:
 
-1. **Daemon produces complete stress data** — All 7 factors populated from powermetrics
+1. **Daemon produces complete stress data** — All 8 factors populated from powermetrics
 2. **Ring buffer receives samples at 10Hz** — Continuous monitoring working
 3. **Daemon exposes data via Unix socket** — TUI can connect
 4. **TUI displays real-time data at 10Hz** — The "dead fish" is alive
@@ -344,7 +374,7 @@ Not in minimal scope (future work):
 ## Design Principles
 
 1. **Observe without affecting** — Ring buffer avoids disk writes during monitoring
-2. **Complete picture always** — powermetrics runs continuously for all 7 factors
+2. **Complete picture always** — powermetrics runs continuously for all 8 factors
 3. **Tiers control actions, not observation** — We always collect the same data; tiers determine what we do with it
 4. **Simple elevated tracking** — Just bookmarks, not full forensics
 5. **Deep pause investigation** — Full forensics only when it matters

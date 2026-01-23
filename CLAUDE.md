@@ -66,26 +66,39 @@ These rules exist because agents repeatedly made these mistakes. Follow them exa
 | "Review passed" with Important items | Important items = review needs work |
 | Not mentioning Minor findings | Acknowledge each, even if declining |
 
-### No Untracked Stubs
+### Never Write Stubs
 
-**Stubs are technical debt. Untracked stubs are bugs.**
+**Stubs are bugs.** Not technical debt. Not placeholders. Bugs.
 
-1. **Don't create stubs without explicit approval.** Implement the feature, don't write `return (0, 0)` and move on.
+A stub is any code that pretends to do something but doesn't:
+- `return None`, `return []`, `return {}`, `return (0, 0)`
+- `pass` or `...` as a function body
+- `raise NotImplementedError`
+- `# TODO: implement later`
+- Any "placeholder" return value
 
-2. **If you MUST stub** (user approved, dependency unavailable):
-   - Add `TODO(stub):` comment explaining what it should do
-   - Add TodoWrite item immediately
-   - Update `unimplemented_features` memory
-   - Task is NOT complete until stub is resolved
+**The Rule: If you cannot implement it, do not write it.**
 
-3. **Before claiming done**, verify no new `TODO`, `FIXME`, `pass`, `...`, placeholder returns, or "not implemented" messages.
+Don't create the function signature. Don't create the file. Don't create the class. Walk away. The feature does not exist yet, and that's fine.
 
-| Red Flag | Do Instead |
-| ---------- | ------------ |
-| `return None` / `[]` / `{}` / `(0, 0)` | Implement the logic |
-| `pass` or `...` in function body | Implement the function |
-| `raise NotImplementedError` | Implement or ask if stub is acceptable |
-| `# TODO: implement later` | Implement now or get approval to defer |
+Writing a stub is worse than writing nothing because:
+1. It creates false confidence that the feature exists
+2. Callers will wire up to it and get silent failures
+3. You will forget about it
+4. Someone else will assume it works
+5. The bug surfaces weeks later in production
+
+| When you think... | Do this instead |
+| --- | --- |
+| "I'll implement this later" | Don't write anything. Later isn't now. |
+| "I need the structure first" | No. Implement top-to-bottom or don't start. |
+| "This shows the architecture" | Architecture with stubs is a lie. |
+| "The caller needs something to call" | The caller can wait until it works. |
+| "I'll track it" | Tracked bugs are still bugs. |
+
+**There is no "If you MUST stub" exception.** If a dependency is unavailable, stop work and tell the user. If the scope is too large, reduce scope. If you don't know how to implement it, ask.
+
+**Before claiming done:** Search for `TODO`, `FIXME`, `pass`, `...`, `NotImplementedError`, and placeholder returns. If any exist that you created, the task is not complete.
 
 ### Zero Linter Errors
 
