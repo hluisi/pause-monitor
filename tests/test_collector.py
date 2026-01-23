@@ -15,8 +15,10 @@ from pause_monitor.collector import (
 
 SAMPLE_PLIST = {
     "timestamp": datetime.now(),
+    "elapsed_ns": 1_000_000_000,
     "processor": {
         "cpu_power": 5.5,
+        "gpu_power": 2.5,
         "combined_power": 10.0,
         "package_idle_residency": 45.0,
         "clusters": [
@@ -36,17 +38,42 @@ SAMPLE_PLIST = {
             },
         ],
     },
-    "gpu": {"freq_hz": 1_398_000_000, "busy_percent": 25.0, "gpu_power": 2.5},
+    "gpu": {"freq_hz": 1_398_000_000, "idle_ratio": 0.75},  # 25% busy
+    "disk": {"rbytes_per_s": 1024.0, "wbytes_per_s": 512.0},
     "thermal_pressure": "Nominal",
     "is_charging": True,
+    "tasks": [
+        {
+            "name": "process_a",
+            "pid": 100,
+            "cputime_ms_per_s": 500.0,
+            "idle_wakeups_per_s": 50.0,
+            "pageins_per_s": 10.0,
+        },
+        {
+            "name": "process_b",
+            "pid": 200,
+            "cputime_ms_per_s": 300.0,
+            "idle_wakeups_per_s": 100.0,
+            "pageins_per_s": 0.0,
+        },
+        {
+            "name": "process_c",
+            "pid": 300,
+            "cputime_ms_per_s": 100.0,
+            "idle_wakeups_per_s": 25.0,
+            "pageins_per_s": 5.0,
+        },
+    ],
 }
 
 
 def test_parse_powermetrics_gpu():
-    """Parser extracts GPU busy percentage."""
+    """Parser extracts GPU busy percentage from idle_ratio."""
     data = plistlib.dumps(SAMPLE_PLIST)
     result = parse_powermetrics_sample(data)
 
+    # gpu_pct = (1 - idle_ratio) * 100 = (1 - 0.75) * 100 = 25.0
     assert result.gpu_pct == 25.0
 
 
@@ -145,3 +172,146 @@ def test_powermetrics_result_matches_data_dictionary():
     assert not hasattr(result, "cpu_freq")
     assert not hasattr(result, "cpu_temp")
     assert not hasattr(result, "top_processes")  # Renamed to top_cpu_processes
+
+
+def test_parse_invalid_plist_raises():
+    """Invalid plist data raises ValueError, not silent fake data."""
+    with pytest.raises(ValueError, match="Invalid powermetrics plist"):
+        parse_powermetrics_sample(b"not valid plist data")
+
+
+def test_parse_elapsed_ns():
+    """Parser extracts elapsed_ns from plist."""
+    data = plistlib.dumps(SAMPLE_PLIST)
+    result = parse_powermetrics_sample(data)
+
+    assert result.elapsed_ns == 1_000_000_000
+
+
+def test_parse_cpu_power():
+    """Parser extracts cpu_power from processor dict."""
+    data = plistlib.dumps(SAMPLE_PLIST)
+    result = parse_powermetrics_sample(data)
+
+    assert result.cpu_power == 5.5
+
+
+def test_parse_gpu_power():
+    """Parser extracts gpu_power from processor dict (not gpu dict)."""
+    data = plistlib.dumps(SAMPLE_PLIST)
+    result = parse_powermetrics_sample(data)
+
+    assert result.gpu_power == 2.5
+
+
+def test_parse_wakeups_from_idle_wakeups_per_s():
+    """Wakeups are summed from tasks[].idle_wakeups_per_s."""
+    data = plistlib.dumps(SAMPLE_PLIST)
+    result = parse_powermetrics_sample(data)
+
+    # 50.0 + 100.0 + 25.0 = 175.0
+    assert result.wakeups_per_s == 175.0
+
+
+def test_parse_io_kept_separate():
+    """IO read and write are kept separate per Data Dictionary."""
+    data = plistlib.dumps(SAMPLE_PLIST)
+    result = parse_powermetrics_sample(data)
+
+    assert result.io_read_per_s == 1024.0
+    assert result.io_write_per_s == 512.0
+
+
+def test_parse_gpu_from_idle_ratio():
+    """GPU percentage calculated from (1 - idle_ratio) * 100."""
+    plist = SAMPLE_PLIST.copy()
+    plist["gpu"] = {"idle_ratio": 0.6}  # 40% busy
+    data = plistlib.dumps(plist)
+    result = parse_powermetrics_sample(data)
+
+    assert result.gpu_pct == pytest.approx(40.0)
+
+
+def test_parse_gpu_none_when_no_idle_ratio():
+    """GPU percentage is None when idle_ratio is missing."""
+    plist = SAMPLE_PLIST.copy()
+    plist["gpu"] = {}  # No idle_ratio
+    data = plistlib.dumps(plist)
+    result = parse_powermetrics_sample(data)
+
+    assert result.gpu_pct is None
+
+
+def test_parse_pageins_summed_across_tasks():
+    """Pageins are summed from tasks[].pageins_per_s."""
+    data = plistlib.dumps(SAMPLE_PLIST)
+    result = parse_powermetrics_sample(data)
+
+    # 10.0 + 0.0 + 5.0 = 15.0
+    assert result.pageins_per_s == 15.0
+
+
+def test_parse_top_cpu_processes_sorted():
+    """Top CPU processes sorted by cputime_ms_per_s descending."""
+    data = plistlib.dumps(SAMPLE_PLIST)
+    result = parse_powermetrics_sample(data)
+
+    assert len(result.top_cpu_processes) == 3  # Only 3 processes in sample
+    # Sorted by cpu_ms_per_s: process_a (500), process_b (300), process_c (100)
+    assert result.top_cpu_processes[0]["name"] == "process_a"
+    assert result.top_cpu_processes[0]["cpu_ms_per_s"] == 500.0
+    assert result.top_cpu_processes[1]["name"] == "process_b"
+    assert result.top_cpu_processes[2]["name"] == "process_c"
+
+
+def test_parse_top_pagein_processes_sorted():
+    """Top pagein processes sorted by pageins_per_s descending, excluding zeros."""
+    data = plistlib.dumps(SAMPLE_PLIST)
+    result = parse_powermetrics_sample(data)
+
+    # process_b has pageins_per_s=0, so excluded
+    assert len(result.top_pagein_processes) == 2
+    # Sorted: process_a (10.0), process_c (5.0)
+    assert result.top_pagein_processes[0]["name"] == "process_a"
+    assert result.top_pagein_processes[0]["pageins_per_s"] == 10.0
+    assert result.top_pagein_processes[1]["name"] == "process_c"
+
+
+def test_parse_top_processes_limited_to_5():
+    """Top process lists limited to 5 entries."""
+    plist = SAMPLE_PLIST.copy()
+    plist["tasks"] = [
+        {
+            "name": f"proc_{i}",
+            "pid": i,
+            "cputime_ms_per_s": float(100 - i),
+            "idle_wakeups_per_s": 0.0,
+            "pageins_per_s": float(i + 1),
+        }
+        for i in range(10)
+    ]
+    data = plistlib.dumps(plist)
+    result = parse_powermetrics_sample(data)
+
+    assert len(result.top_cpu_processes) == 5
+    assert len(result.top_pagein_processes) == 5
+
+
+def test_parse_throttled_moderate():
+    """Moderate thermal pressure means throttled."""
+    plist = SAMPLE_PLIST.copy()
+    plist["thermal_pressure"] = "Moderate"
+    data = plistlib.dumps(plist)
+    result = parse_powermetrics_sample(data)
+
+    assert result.throttled is True
+
+
+def test_parse_throttled_sleeping():
+    """Sleeping thermal pressure means throttled."""
+    plist = SAMPLE_PLIST.copy()
+    plist["thermal_pressure"] = "Sleeping"
+    data = plistlib.dumps(plist)
+    result = parse_powermetrics_sample(data)
+
+    assert result.throttled is True

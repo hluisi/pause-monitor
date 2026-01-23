@@ -70,56 +70,88 @@ class PowermetricsResult:
 def parse_powermetrics_sample(data: bytes) -> PowermetricsResult:
     """Parse a single powermetrics plist sample.
 
+    Extracts metrics per the Data Dictionary field mappings.
+
     Args:
         data: Raw plist bytes from powermetrics output
 
     Returns:
         PowermetricsResult with extracted metrics
 
-    Note:
-        Actual field extraction to be implemented in Task 1.2.
-        Currently returns stub values for new fields.
+    Raises:
+        ValueError: If plist data is invalid
     """
     try:
         plist = plistlib.loads(data)
-    except plistlib.InvalidFileException:
-        log.warning("invalid_plist_data")
-        return PowermetricsResult(
-            elapsed_ns=0,
-            throttled=False,
-            cpu_power=None,
-            gpu_pct=None,
-            gpu_power=None,
-            io_read_per_s=0.0,
-            io_write_per_s=0.0,
-            wakeups_per_s=0.0,
-            pageins_per_s=0.0,
-            top_cpu_processes=[],
-            top_pagein_processes=[],
-        )
+    except plistlib.InvalidFileException as e:
+        raise ValueError(f"Invalid powermetrics plist data: {e}") from e
 
-    # Thermal throttling
+    # Timing
+    elapsed_ns = plist.get("elapsed_ns", 0)
+
+    # Thermal throttling: anything other than "Nominal" means throttled
     thermal_pressure = plist.get("thermal_pressure", "Nominal")
-    throttled = thermal_pressure in ("Moderate", "Heavy", "Critical", "Sleeping")
+    throttled = thermal_pressure != "Nominal"
 
-    # GPU usage
+    # CPU power from processor dict
+    processor = plist.get("processor", {})
+    cpu_power = processor.get("cpu_power")  # Milliwatts
+
+    # GPU power is in processor dict, not gpu dict
+    gpu_power = processor.get("gpu_power")  # Milliwatts
+
+    # GPU busy % from gpu dict: busy = 1 - idle_ratio
     gpu_data = plist.get("gpu", {})
-    gpu_pct = gpu_data.get("busy_percent")
+    idle_ratio = gpu_data.get("idle_ratio")
+    gpu_pct = (1.0 - idle_ratio) * 100.0 if idle_ratio is not None else None
 
-    # TODO(stub): Task 1.2 will implement full field extraction
-    # For now, return stub values for new fields
+    # Disk I/O — keep read/write separate per Data Dictionary
+    disk_data = plist.get("disk", {})
+    io_read_per_s = disk_data.get("rbytes_per_s", 0.0)
+    io_write_per_s = disk_data.get("wbytes_per_s", 0.0)
+
+    # Tasks: sum wakeups and pageins, collect process info
+    wakeups_per_s = 0.0
+    pageins_per_s = 0.0
+    all_processes: list[dict] = []
+
+    for task in plist.get("tasks", []):
+        task_wakeups = task.get("idle_wakeups_per_s", 0.0)
+        wakeups_per_s += task_wakeups
+
+        task_pageins = task.get("pageins_per_s", 0.0)
+        pageins_per_s += task_pageins
+
+        proc = {
+            "name": task.get("name", "unknown"),
+            "pid": task.get("pid", 0),
+            "cpu_ms_per_s": task.get("cputime_ms_per_s", 0.0),
+            "pageins_per_s": task_pageins,
+        }
+        all_processes.append(proc)
+
+    # Top 5 by CPU usage
+    top_cpu_processes = sorted(all_processes, key=lambda p: p["cpu_ms_per_s"], reverse=True)[:5]
+
+    # Top 5 by pageins (only include processes with pageins > 0)
+    top_pagein_processes = sorted(
+        [p for p in all_processes if p["pageins_per_s"] > 0],
+        key=lambda p: p["pageins_per_s"],
+        reverse=True,
+    )[:5]
+
     return PowermetricsResult(
-        elapsed_ns=0,  # Task 1.2: extract from plist
+        elapsed_ns=elapsed_ns,
         throttled=throttled,
-        cpu_power=None,  # Task 1.2: extract from processor.cpu_power
+        cpu_power=cpu_power,
         gpu_pct=gpu_pct,
-        gpu_power=None,  # Task 1.2: extract from processor.gpu_power
-        io_read_per_s=0.0,  # Task 1.2: extract from disk.rbytes_per_s
-        io_write_per_s=0.0,  # Task 1.2: extract from disk.wbytes_per_s
-        wakeups_per_s=0.0,  # Task 1.2: sum from tasks[].idle_wakeups_per_s
-        pageins_per_s=0.0,  # Task 1.2: sum from tasks[].pageins_per_s
-        top_cpu_processes=[],  # Task 1.2: top 5 by CPU
-        top_pagein_processes=[],  # Task 1.2: top 5 by pageins
+        gpu_power=gpu_power,
+        io_read_per_s=io_read_per_s,
+        io_write_per_s=io_write_per_s,
+        wakeups_per_s=wakeups_per_s,
+        pageins_per_s=pageins_per_s,
+        top_cpu_processes=top_cpu_processes,
+        top_pagein_processes=top_pagein_processes,
     )
 
 
