@@ -666,3 +666,54 @@ async def test_daemon_handles_pause_runs_forensics(tmp_path, monkeypatch):
     contents, duration = forensics_called[0]
     assert len(contents.samples) == 5
     assert duration == 0.3
+
+
+def test_daemon_updates_peak_after_interval(tmp_path):
+    """Daemon should update peak stress after peak_tracking_seconds."""
+    config = Config()
+    config._data_dir = tmp_path
+    config.sentinel.peak_tracking_seconds = 30
+
+    daemon = Daemon(config)
+
+    # Simulate being in tier 2 via TierManager (single source of truth)
+    daemon.tier_manager.update(20)  # Enter tier 2
+    daemon.tier_manager._tier2_entry_time = time.monotonic() - 60  # Simulate 60s ago
+    daemon._tier2_peak_stress = 20
+    daemon._last_peak_check = time.time() - 35  # 35 seconds ago
+
+    # New stress is higher
+    new_stress = StressBreakdown(
+        load=15, memory=10, thermal=5, latency=3, io=2, gpu=5, wakeups=2, pageins=5
+    )
+
+    # Should update peak
+    daemon._maybe_update_peak(new_stress)
+
+    assert daemon._tier2_peak_stress == new_stress.total
+    assert daemon._tier2_peak_breakdown == new_stress
+
+
+def test_daemon_does_not_update_peak_before_interval(tmp_path):
+    """Daemon should not update peak before peak_tracking_seconds."""
+    config = Config()
+    config._data_dir = tmp_path
+    config.sentinel.peak_tracking_seconds = 30
+
+    daemon = Daemon(config)
+
+    # Simulate being in tier 2 via TierManager (single source of truth)
+    daemon.tier_manager.update(50)  # Enter tier 2 with high stress
+    daemon.tier_manager._tier2_entry_time = time.monotonic() - 60  # Simulate 60s ago
+    daemon._tier2_peak_stress = 50
+    daemon._last_peak_check = time.time() - 10  # Only 10 seconds ago
+
+    # New stress is lower
+    new_stress = StressBreakdown(
+        load=5, memory=5, thermal=0, latency=0, io=0, gpu=5, wakeups=0, pageins=0
+    )
+
+    # Should not update peak (not enough time passed)
+    daemon._maybe_update_peak(new_stress)
+
+    assert daemon._tier2_peak_stress == 50  # Unchanged

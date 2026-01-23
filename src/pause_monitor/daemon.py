@@ -128,9 +128,13 @@ class Daemon:
         self._tier2_peak_stress: int = 0
         self._tier2_peak_breakdown: StressBreakdown | None = None
         self._tier2_peak_process: str | None = None
+        self._tier2_peak_pagein_process: str | None = None
 
         # Peak tracking timer
         self._last_peak_check: float = 0.0
+
+        # Latest powermetrics result (for peak tracking process extraction)
+        self._latest_pm_result: PowermetricsResult | None = None
 
         # Will be initialized on start
         self._conn: sqlite3.Connection | None = None
@@ -454,6 +458,38 @@ class Daemon:
             self._tier2_peak_stress = stress.total
             self._tier2_peak_breakdown = stress
             log.info("tier3_exited", stress=stress.total)
+
+    def _maybe_update_peak(self, stress: StressBreakdown) -> None:
+        """Update peak stress if interval has passed and stress is higher.
+
+        This ensures long elevated/critical periods capture the worst moment
+        before the ring buffer rolls over.
+
+        Args:
+            stress: Current stress breakdown
+        """
+        now = time.time()
+        interval = self.config.sentinel.peak_tracking_seconds
+
+        # Only check periodically
+        if now - self._last_peak_check < interval:
+            return
+
+        self._last_peak_check = now
+
+        # Update if current stress is higher
+        if stress.total > self._tier2_peak_stress:
+            self._tier2_peak_stress = stress.total
+            self._tier2_peak_breakdown = stress
+            # Get top CPU process from latest powermetrics data
+            if self._latest_pm_result and self._latest_pm_result.top_cpu_processes:
+                self._tier2_peak_process = self._latest_pm_result.top_cpu_processes[0]["name"]
+            # Also track top pagein process if any (more likely cause of pauses)
+            if self._latest_pm_result and self._latest_pm_result.top_pagein_processes:
+                top_pagein = self._latest_pm_result.top_pagein_processes[0]
+                self._tier2_peak_pagein_process = top_pagein["name"]
+            self.ring_buffer.snapshot_processes(trigger="peak_update")
+            log.info("peak_updated", stress=stress.total)
 
     async def _handle_pause_from_sentinel(
         self,
