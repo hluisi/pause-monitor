@@ -121,14 +121,16 @@ class SocketServer:
             "stress": asdict(stress),
             "metrics": {
                 "elapsed_ns": metrics.elapsed_ns,
+                "throttled": metrics.throttled,
+                "cpu_power": metrics.cpu_power,
+                "gpu_pct": metrics.gpu_pct,
+                "gpu_power": metrics.gpu_power,
                 "io_read_per_s": metrics.io_read_per_s,
                 "io_write_per_s": metrics.io_write_per_s,
                 "wakeups_per_s": metrics.wakeups_per_s,
                 "pageins_per_s": metrics.pageins_per_s,
-                "gpu_pct": metrics.gpu_pct,
-                "cpu_power": metrics.cpu_power,
-                "gpu_power": metrics.gpu_power,
-                "throttled": metrics.throttled,
+                "top_cpu_processes": metrics.top_cpu_processes,
+                "top_pagein_processes": metrics.top_pagein_processes,
             },
             "sample_count": len(self.ring_buffer.samples),
         }
@@ -195,12 +197,16 @@ class SocketServer:
                     # Include raw metrics from Phase 1 RingSample
                     "metrics": {
                         "elapsed_ns": s.metrics.elapsed_ns,
+                        "throttled": s.metrics.throttled,
+                        "cpu_power": s.metrics.cpu_power,
+                        "gpu_pct": s.metrics.gpu_pct,
+                        "gpu_power": s.metrics.gpu_power,
                         "io_read_per_s": s.metrics.io_read_per_s,
                         "io_write_per_s": s.metrics.io_write_per_s,
                         "wakeups_per_s": s.metrics.wakeups_per_s,
                         "pageins_per_s": s.metrics.pageins_per_s,
-                        "gpu_pct": s.metrics.gpu_pct,
-                        "throttled": s.metrics.throttled,
+                        "top_cpu_processes": s.metrics.top_cpu_processes,
+                        "top_pagein_processes": s.metrics.top_pagein_processes,
                     },
                 }
                 for s in samples[-30:]  # Last 3 seconds at 100ms
