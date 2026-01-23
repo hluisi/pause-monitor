@@ -1,6 +1,8 @@
 # Design Specification
 
-**Last updated:** 2026-01-22
+> ✅ **Phase 3 COMPLETE (2026-01-23).** Phase 4 (Socket Server) is next. See `docs/plans/phase-4-socket-server.md` for current work.
+
+**Last updated:** 2026-01-23 (Phase 3 complete, Phase 4 next)
 
 ## Source Documents
 
@@ -86,7 +88,7 @@ A **real-time** system health monitoring tool for macOS that tracks down intermi
 ### Stress Calculator (stress.py)
 - **Purpose:** Multi-factor stress scoring
 - **Responsibilities:** Calculate stress breakdown from metrics, identify culprits
-- **Output:** StressBreakdown dataclass with load, memory, thermal, latency, io scores
+- **Output:** StressBreakdown dataclass with 8 factors: load, memory, thermal, latency, io, gpu, wakeups, pageins (pageins is critical for pause detection)
 
 ### TUI Dashboard (tui/)
 - **Purpose:** Live dashboard showing current stats, recent events, trends
@@ -131,7 +133,8 @@ A **real-time** system health monitoring tool for macOS that tracks down intermi
 | stress_memory | INTEGER | Memory contribution 0-30 |
 | stress_thermal | INTEGER | Thermal contribution 0-20 |
 | stress_latency | INTEGER | Latency contribution 0-30 |
-| stress_io | INTEGER | I/O contribution 0-20 |
+| stress_io | INTEGER | I/O contribution 0-10 |
+| stress_pageins | INTEGER | Pageins contribution 0-30 (critical for pause detection) |
 
 ### process_samples table
 | Field | Type | Purpose |
@@ -157,6 +160,7 @@ A **real-time** system health monitoring tool for macOS that tracks down intermi
 | culprits | TEXT | JSON array of {pid, name, reason} |
 | event_dir | TEXT | Path to forensics directory |
 | notes | TEXT | User-added notes |
+| peak_stress | INTEGER | Peak stress score during event |
 
 ### daemon_state table
 | Field | Type | Purpose |

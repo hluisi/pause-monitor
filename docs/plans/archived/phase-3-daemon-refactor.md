@@ -4,6 +4,35 @@ Extracted from [`2026-01-21-pause-monitor-implementation.md`](2026-01-21-pause-m
 
 **Prerequisites:** Phase 1 (Unified Data Model) and Phase 2 (PowermetricsStream 100ms) — both complete.
 
+## CRITICAL: Read This First (For AI Agents)
+
+> **This is a PERSONAL PROJECT — one developer + AI assistants. NO external users. NO backwards compatibility.**
+
+| Principle | What This Means | Anti-Pattern to AVOID |
+|-----------|-----------------|----------------------|
+| **Delete, don't deprecate** | If code is replaced, DELETE the old code | `@deprecated`, "kept for compatibility" |
+| **No dead code** | Superseded code = DELETE it immediately | "might need later", commented-out code |
+| **No stubs** | Implement it or don't include it | `return (0, 0)`, `pass`, `NotImplementedError` |
+| **No migrations** | Schema changes? Delete the DB file, recreate fresh | `migrate_add_*()`, `ALTER TABLE` |
+| **Breaking changes are FREE** | Change anything. No versioning needed. | `_v2` suffixes, compatibility shims |
+
+**Implementation rule:** If old code conflicts with this plan → DELETE IT. If you see migration code → DELETE IT AND USE SCHEMA_VERSION CHECK INSTEAD.
+
+**Database philosophy:** When schema changes, increment `SCHEMA_VERSION`. At startup, if version doesn't match, delete `data.db` and recreate. No migrations. Ever.
+
+---
+
+> **Sub-skill:** Use superpowers:executing-plans to implement this plan task-by-task.
+
+**Goal:** Enable real-time 10Hz TUI dashboard with complete 8-factor stress monitoring (including pageins), tier-appropriate forensics, and Unix socket streaming.
+
+**Architecture:** Single 100ms loop driven by powermetrics. Ring buffer is the source of truth. Socket streams to TUI. SQLite stores only tier events (elevated bookmarks, pause forensics).
+
+**Tech Stack:** Python 3.14, asyncio, Unix domain sockets, Textual TUI, SQLite (history only)
+
+---
+
+
 **Goal:** Replace the Sentinel class with a single main loop in Daemon that processes powermetrics at 10Hz, calculates stress, manages tiers, and handles pause detection.
 
 ---

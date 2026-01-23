@@ -1,6 +1,8 @@
 # Implementation Guide
 
-**Last updated:** 2026-01-21
+> ✅ **Phase 3 COMPLETE (2026-01-23).** Phase 4 (Socket Server) is next. See `docs/plans/phase-4-socket-server.md` for current work.
+
+**Last updated:** 2026-01-23 (Phase 3 complete, Phase 4 next)
 
 This document describes the actual implementation of pause-monitor, module by module. For the canonical design specification, see `design_spec`. For known gaps, see `unimplemented_features`.
 
@@ -156,6 +158,8 @@ Supporting modules:
 | `_check_for_pause(interval)` | Legacy pause detection via PauseDetector |
 | `_handle_tier_change(action, tier)` | Callback from Sentinel on tier transitions |
 | `_handle_pause_from_sentinel(actual, expected, contents)` | Callback when Sentinel detects pause - runs forensics, creates event |
+| `_calculate_stress(pm_result, latency_ratio)` | Calculate StressBreakdown with all 8 factors from powermetrics data |
+| `_handle_tier_action(action, stress)` | Handle TierAction transitions, write bookmarks on tier2_exit, track peak_stress |
 | `_run_forensics(capture)` | Background task for spindump/tailspin/logs |
 | `_auto_prune()` | Periodic task to clean old data |
 
@@ -248,6 +252,7 @@ await self.sentinel.start()  # Starts fast_loop and slow_loop tasks
 | `io` | 10 | Based on I/O spike above baseline |
 | `gpu` | 20 | Based on GPU utilization % |
 | `wakeups` | 10 | Based on idle wakeups per second |
+| `pageins` | 30 | Based on swap pageins/sec (CRITICAL for pause detection) |
 
 ### Data Flow
 - calculate_stress() called by Daemon._collect_sample() (slow path, full metrics)
@@ -262,7 +267,7 @@ await self.sentinel.start()  # Starts fast_loop and slow_loop tasks
 ### Constants
 | Constant | Value |
 |----------|-------|
-| `SCHEMA_VERSION` | Current schema version for migrations |
+| `SCHEMA_VERSION` | 5 (added stress_pageins column) |
 | `VALID_EVENT_STATUSES` | "unreviewed", "reviewed", "pinned", "dismissed" |
 | `SCHEMA` | SQL for tables: samples, events, process_samples |
 
@@ -270,7 +275,7 @@ await self.sentinel.start()  # Starts fast_loop and slow_loop tasks
 | Class | Purpose |
 |-------|---------|
 | `Sample` | Dataclass for metrics sample (matches design doc field names) |
-| `Event` | Dataclass for pause event with status, culprits, notes |
+| `Event` | Dataclass for pause event with status, culprits, notes, peak_stress |
 
 ### Key Functions
 | Function | Purpose |
@@ -476,11 +481,12 @@ await self.sentinel.start()  # Starts fast_loop and slow_loop tasks
 | `update(stress_total)` | Process stress value, return action if state change |
 
 ### Actions from update():
-- `"tier2_entry"` - entered elevated tier
-- `"tier2_exit"` - left elevated tier (after 5s hysteresis)
-- `"tier3_entry"` - entered critical tier
-- `"tier3_exit"` - left critical tier (after 5s hysteresis)
-- `"tier2_peak"` - new peak stress in elevated tier
+Returns `TierAction` enum (not strings) as of Phase 3:
+- `TierAction.TIER2_ENTRY` - entered elevated tier
+- `TierAction.TIER2_EXIT` - left elevated tier (after 5s hysteresis)
+- `TierAction.TIER3_ENTRY` - entered critical tier
+- `TierAction.TIER3_EXIT` - left critical tier (after 5s hysteresis)
+- `TierAction.TIER2_PEAK` - new peak stress in elevated tier
 
 ### Sentinel Methods
 | Method | Purpose |

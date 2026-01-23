@@ -1,6 +1,8 @@
 # Unimplemented Features and Stubs
 
-**Last audited:** 2026-01-21
+> ✅ **Phase 3 COMPLETE (2026-01-23).** Phase 4 (Socket Server) is next. See `docs/plans/phase-4-socket-server.md` for current work.
+
+**Last audited:** 2026-01-23
 
 ## Recently Implemented
 
@@ -16,14 +18,26 @@
 | **TUI Events Screen** | Full event listing with filtering and status management |
 | **Sentinel Integration** | `daemon.py` integrates Sentinel for pause detection callbacks |
 
+### Phase 3 Complete (2026-01-23)
+
+| Feature | Implementation |
+|---------|----------------|
+| **TierAction Enum** | `sentinel.py:TierAction` - replaces string returns from TierManager.update() |
+| **8-Factor Stress** | `stress.py:StressBreakdown` now includes `pageins` (0-30, critical for pause detection) |
+| **Daemon._calculate_stress()** | Calculates all 8 stress factors from PowermetricsResult |
+| **Daemon._handle_tier_action()** | Handles TierAction transitions, writes bookmarks on tier2_exit |
+| **Daemon._main_loop()** | Single 10Hz loop processing powermetrics stream |
+| **Daemon._handle_pause()** | Pause detection with forensics capture |
+| **Daemon._maybe_update_peak()** | Peak stress tracking during elevated/critical tiers |
+| **Event.peak_stress** | `storage.py:Event` tracks peak stress during event |
+| **SCHEMA_VERSION=5** | Schema updated for stress_pageins column |
+| **Deleted: _slow_loop, _get_io_counters, _get_network_counters** | Stubs removed, functionality now in main loop |
+
 ## Explicit Stubs
 
 | Location | Current Behavior | Expected Behavior |
 |----------|------------------|-------------------|
-| `sentinel.py:241-242` `_slow_loop()` | `# TODO: Collect GPU/wakeups/thermal via powermetrics` - only sleeps | Collect GPU/wakeups/thermal via powermetrics streaming and cache for fast loop |
 | `tui/app.py:525` `action_show_history()` | `self.notify("History view not yet implemented")` | Navigate to history view with charts/graphs showing stress trends |
-| `collector.py:126-129` `_get_io_counters()` | Returns `(0, 0)` with comment "Placeholder" | Parse IOKit or ioreg for actual disk I/O bytes read/written |
-| `collector.py:132-135` `_get_network_counters()` | Returns `(0, 0)` with comment "Placeholder" | Parse netstat for actual network bytes sent/received |
 
 ## Config Defined But Not Used
 
@@ -71,27 +85,23 @@ Features specified in design_spec but not implemented:
 
 3. **Process samples insertion** - Schema exists but data is never captured. Need `insert_process_sample()` function and daemon logic to call it.
 
-4. **Sentinel slow loop implementation** - Currently a stub. Should collect GPU/wakeups/thermal and cache for fast loop stress calculation.
-
 ### Medium Priority
 
-5. **Learning mode** - Make `config.learning_mode` actually do something in daemon (suppress alerts, collect calibration data).
+4. **Learning mode** - Make `config.learning_mode` actually do something in daemon (suppress alerts, collect calibration data).
 
-6. **Suspects patterns** - Use `config.suspects.patterns` to flag known-problematic processes in forensics output.
+5. **Suspects patterns** - Use `config.suspects.patterns` to flag known-problematic processes in forensics output.
 
-7. **I/O and network counters** - Replace placeholder functions with actual IOKit/netstat implementations.
-
-8. **`calibrate` command** - Implement CLI command to analyze learning data and suggest threshold values.
+6. **`calibrate` command** - Implement CLI command to analyze learning data and suggest threshold values.
 
 ### Low Priority
 
-9. **TUI history view** - Events screen is done, history view remains as stub notification.
+7. **TUI history view** - Events screen is done, history view remains as stub notification.
 
-10. **SIGHUP config reload** - Nice to have for live tuning without daemon restart.
+8. **SIGHUP config reload** - Nice to have for live tuning without daemon restart.
 
-11. **`history --at` option** - Query what was happening at a specific point in time.
+9. **`history --at` option** - Query what was happening at a specific point in time.
 
-12. **Daemon state persistence** - Persist `io_baseline` and `last_sample_id` across daemon restarts.
+10. **Daemon state persistence** - Persist `io_baseline` and `last_sample_id` across daemon restarts.
 
 ## Verification Commands
 
