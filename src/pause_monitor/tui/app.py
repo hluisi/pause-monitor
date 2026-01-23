@@ -1,15 +1,21 @@
 """Main TUI application."""
 
+import asyncio
+import logging
 import sqlite3
 from typing import Any
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Vertical, VerticalScroll
+from textual.css.query import NoMatches
 from textual.screen import Screen
 from textual.widgets import DataTable, Footer, Header, Label, Static
 
 from pause_monitor.config import Config
+from pause_monitor.socket_client import SocketClient
+
+log = logging.getLogger(__name__)
 
 
 class StressGauge(Static):
@@ -407,6 +413,9 @@ class PauseMonitorApp(App):
         super().__init__()
         self.config = config or Config.load()
         self._conn: sqlite3.Connection | None = None
+        self._socket_client: SocketClient | None = None
+        self._use_socket: bool = False
+        self._socket_read_task: asyncio.Task | None = None
 
     def on_mount(self) -> None:
         """Initialize on startup."""
@@ -438,16 +447,134 @@ class PauseMonitorApp(App):
             )
             return
 
-        # Start periodic refresh
+        # Start async socket connection attempt
+        asyncio.create_task(self._try_socket_connect())
+
+        # Start periodic refresh (fallback for database-only mode)
         self.set_interval(1.0, self._refresh_data)
-        # Load initial data
+        # Load initial data from database
         self._refresh_data()
 
     def on_unmount(self) -> None:
         """Cleanup on shutdown."""
+        # Cancel socket read task
+        if self._socket_read_task and not self._socket_read_task.done():
+            self._socket_read_task.cancel()
+
+        # Schedule async socket cleanup
+        if self._socket_client:
+            asyncio.create_task(self._socket_client.disconnect())
+
         if self._conn:
             self._conn.close()
             self._conn = None
+
+    async def _try_socket_connect(self) -> None:
+        """Try to connect to daemon via socket for real-time data."""
+        self._socket_client = SocketClient(socket_path=self.config.socket_path)
+
+        try:
+            await self._socket_client.connect()
+            self._use_socket = True
+            self.sub_title = "System Health Monitor (live)"
+            log.info("tui_connected_via_socket")
+            # Start reading messages
+            self._socket_read_task = asyncio.create_task(self._read_socket_loop())
+        except FileNotFoundError:
+            # Daemon not running - fallback to database polling
+            self._set_disconnected()
+            self.notify(
+                "Daemon not running. Start with: sudo pause-monitor daemon",
+                severity="warning",
+            )
+
+    async def _read_socket_loop(self) -> None:
+        """Read messages from socket and update UI."""
+        try:
+            while self._use_socket and self._socket_client:
+                data = await self._socket_client.read_message()
+                self._handle_socket_data(data)
+        except ConnectionError:
+            self._set_disconnected()
+            log.warning("tui_daemon_disconnected")
+        except asyncio.CancelledError:
+            pass  # Normal shutdown
+
+    def _set_disconnected(self) -> None:
+        """Update UI to show disconnected state."""
+        self._use_socket = False
+        self.sub_title = "System Health Monitor (daemon not running)"
+
+    def _handle_socket_data(self, data: dict[str, Any]) -> None:
+        """Handle real-time data from daemon socket."""
+        msg_type = data.get("type", "sample")
+
+        # Extract stress data based on message type
+        if msg_type == "initial_state":
+            stress_data = data.get("current_stress")
+        else:  # sample message
+            stress_data = data.get("stress")
+
+        if not stress_data:
+            return
+
+        # Get total stress (may be explicit or computed)
+        total = stress_data.get("total", 0)
+        if total == 0:
+            # Compute total from components
+            total = sum(
+                stress_data.get(k, 0)
+                for k in ["load", "memory", "thermal", "latency", "io", "gpu", "wakeups", "pageins"]
+            )
+
+        tier = data.get("tier", 1)
+
+        # Update stress gauge
+        try:
+            stress_gauge = self.query_one("#stress-gauge", StressGauge)
+            stress_gauge.update_stress(total)
+        except NoMatches:
+            pass  # Widget not mounted yet
+        except Exception:
+            log.exception("Failed to update stress gauge")
+
+        # Update stress breakdown
+        try:
+            breakdown = self.query_one("#breakdown", Static)
+            breakdown.update(
+                f"Load: {stress_data.get('load', 0):3d}  "
+                f"Memory: {stress_data.get('memory', 0):3d}  "
+                f"GPU: {stress_data.get('gpu', 0):3d}\n"
+                f"Thermal: {stress_data.get('thermal', 0):3d}  "
+                f"Latency: {stress_data.get('latency', 0):3d}  "
+                f"Wakeups: {stress_data.get('wakeups', 0):3d}\n"
+                f"I/O: {stress_data.get('io', 0):3d}  "
+                f"Pageins: {stress_data.get('pageins', 0):3d}  "
+                f"Tier: {tier}"
+            )
+        except NoMatches:
+            pass  # Widget not mounted yet
+        except Exception:
+            log.exception("Failed to update stress breakdown")
+
+        # Update metrics panel if we have metrics data
+        metrics = data.get("metrics")
+        if metrics:
+            try:
+                metrics_panel = self.query_one("#metrics", MetricsPanel)
+                metrics_panel.update_metrics(
+                    {
+                        "cpu_power": metrics.get("cpu_power", 0),
+                        "load_avg": 0,  # Not in socket data currently
+                        "mem_pressure": 0,  # Not in socket data currently
+                        "pageins_per_s": metrics.get("pageins_per_s", 0),
+                        "throttled": metrics.get("throttled", False),
+                    }
+                )
+            except NoMatches:
+                pass  # Widget not mounted yet
+            except Exception:
+                log.exception("Failed to update metrics panel")
 
     def compose(self) -> ComposeResult:
         """Create the TUI layout."""
