@@ -824,9 +824,8 @@ class Daemon:
                     self.ring_buffer.push(pm_result, stress, tier=current_tier)
 
                     # Push to socket for TUI (push-based streaming)
-                    socket_server = getattr(self, "_socket_server", None)
-                    if socket_server and socket_server.has_clients:
-                        await socket_server.broadcast(pm_result, stress, current_tier)
+                    if self._socket_server and self._socket_server.has_clients:
+                        await self._socket_server.broadcast(pm_result, stress, current_tier)
 
                     # Update tier manager and handle transitions
                     action = self.tier_manager.update(stress.total)
