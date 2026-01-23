@@ -10,7 +10,7 @@ from datetime import datetime, timedelta
 
 import structlog
 
-from pause_monitor.collector import PowermetricsResult, get_core_count
+from pause_monitor.collector import PowermetricsResult, PowermetricsStream, get_core_count
 from pause_monitor.config import Config
 from pause_monitor.forensics import (
     ForensicsCapture,
@@ -141,6 +141,7 @@ class Daemon:
         self._caffeinate_proc: asyncio.subprocess.Process | None = None
         self._shutdown_event = asyncio.Event()
         self._auto_prune_task: asyncio.Task | None = None
+        self._powermetrics: PowermetricsStream | None = None
 
     async def _init_database(self) -> None:
         """Initialize database connection.
@@ -716,6 +717,89 @@ class Daemon:
             wakeups=wakeups,
             pageins=pageins,
         )
+
+    async def _main_loop(self) -> None:
+        """Main loop: process powermetrics samples at 10Hz.
+
+        Each sample:
+        1. Measure latency (pause detection)
+        2. Calculate stress from powermetrics data
+        3. Push to ring buffer
+        4. Update tier manager
+        5. Handle tier transitions
+        6. Periodic peak tracking
+
+        If powermetrics crashes, restart it after 1 second.
+        """
+        expected_interval = self.config.sentinel.fast_interval_ms / 1000.0
+        pause_threshold = self.config.sentinel.pause_threshold_ratio
+
+        while not self._shutdown_event.is_set():
+            # (Re)create powermetrics stream if not already set (allows mocking)
+            if self._powermetrics is None:
+                self._powermetrics = PowermetricsStream(
+                    interval_ms=self.config.sentinel.fast_interval_ms
+                )
+
+            try:
+                await self._powermetrics.start()
+                last_sample_time = time.monotonic()
+
+                async for pm_result in self._powermetrics.read_samples():
+                    if self._shutdown_event.is_set():
+                        break
+
+                    # Measure actual interval for latency/pause detection
+                    now = time.monotonic()
+                    actual_interval = now - last_sample_time
+                    last_sample_time = now
+                    latency_ratio = actual_interval / expected_interval
+
+                    # Store latest powermetrics result for peak tracking
+                    self._latest_pm_result = pm_result
+
+                    # Calculate stress from powermetrics data
+                    stress = self._calculate_stress(pm_result, latency_ratio)
+
+                    # Get current tier for the sample
+                    current_tier = self.tier_manager.current_tier
+
+                    # Push to ring buffer (Phase 1: includes raw metrics for forensics)
+                    self.ring_buffer.push(pm_result, stress, tier=current_tier)
+
+                    # Push to socket for TUI (push-based streaming)
+                    socket_server = getattr(self, "_socket_server", None)
+                    if socket_server and socket_server.has_clients:
+                        await socket_server.broadcast(pm_result, stress, current_tier)
+
+                    # Update tier manager and handle transitions
+                    action = self.tier_manager.update(stress.total)
+                    if action:
+                        await self._handle_tier_action(action, stress)
+
+                    # Periodic peak tracking during elevated/critical
+                    if current_tier >= 2:
+                        self._maybe_update_peak(stress)
+
+                    # Check for pause (latency > threshold)
+                    if latency_ratio > pause_threshold:
+                        await self._handle_pause(actual_interval, expected_interval)
+
+                    self.state.sample_count += 1
+
+                # Generator ended normally - in production powermetrics runs forever,
+                # so this only happens in tests with mocked streams.
+                break
+
+            except asyncio.CancelledError:
+                log.info("main_loop_cancelled")
+                break
+            except Exception as e:
+                log.error("powermetrics_crashed", error=str(e))
+                await asyncio.sleep(1.0)  # Wait before restart
+            finally:
+                if self._powermetrics:
+                    await self._powermetrics.stop()
 
 
 async def run_daemon(config: Config | None = None) -> None:

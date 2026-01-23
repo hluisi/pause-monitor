@@ -717,3 +717,74 @@ def test_daemon_does_not_update_peak_before_interval(tmp_path):
     daemon._maybe_update_peak(new_stress)
 
     assert daemon._tier2_peak_stress == 50  # Unchanged
+
+
+@pytest.mark.asyncio
+async def test_daemon_main_loop_processes_powermetrics(tmp_path, monkeypatch):
+    """Daemon main loop should process powermetrics samples."""
+    from unittest.mock import MagicMock
+
+    from pause_monitor.collector import PowermetricsResult
+
+    config = Config()
+    config._data_dir = tmp_path
+
+    daemon = Daemon(config)
+
+    # Track samples pushed to ring buffer (Phase 1: new signature)
+    pushed_samples = []
+    original_push = daemon.ring_buffer.push
+
+    def track_push(metrics, stress, tier):
+        pushed_samples.append((metrics, stress, tier))
+        return original_push(metrics, stress, tier)
+
+    monkeypatch.setattr(daemon.ring_buffer, "push", track_push)
+
+    # Mock powermetrics to yield two samples then stop
+    # Phase 1 updated PowermetricsResult - uses Data Dictionary fields
+    samples = [
+        PowermetricsResult(
+            elapsed_ns=100_000_000,
+            throttled=False,
+            cpu_power=5.0,
+            gpu_pct=30.0,
+            gpu_power=2.0,
+            io_read_per_s=0.0,
+            io_write_per_s=0.0,
+            wakeups_per_s=100.0,
+            pageins_per_s=0.0,
+            top_cpu_processes=[{"name": "test", "pid": 1, "cpu_ms_per_s": 100}],
+            top_pagein_processes=[],
+        ),
+        PowermetricsResult(
+            elapsed_ns=100_000_000,
+            throttled=True,
+            cpu_power=12.0,
+            gpu_pct=60.0,
+            gpu_power=5.0,
+            io_read_per_s=0.0,
+            io_write_per_s=0.0,
+            wakeups_per_s=200.0,
+            pageins_per_s=10.0,  # Some swap activity
+            top_cpu_processes=[{"name": "test", "pid": 1, "cpu_ms_per_s": 200}],
+            top_pagein_processes=[{"name": "swapper", "pid": 2, "pageins_per_s": 10.0}],
+        ),
+    ]
+
+    async def mock_read_samples():
+        for s in samples:
+            yield s
+
+    mock_stream = MagicMock()
+    mock_stream.start = AsyncMock()
+    mock_stream.stop = AsyncMock()
+    mock_stream.read_samples = mock_read_samples
+    daemon._powermetrics = mock_stream
+
+    # Run main loop (will exit after samples exhausted)
+    await daemon._main_loop()
+
+    assert len(pushed_samples) == 2
+    # Second sample had higher stress (throttled, high GPU)
+    assert pushed_samples[1][1].thermal == 10  # throttled = 10 points
