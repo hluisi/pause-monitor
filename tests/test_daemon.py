@@ -609,3 +609,60 @@ def test_daemon_calculate_stress_all_factors(tmp_path):
     assert stress.io > 0  # 50 MB/s should contribute
     assert stress.pageins > 0  # 50 pageins/sec should contribute
     assert stress.total > 0  # Total should be sum of all 8 factors
+
+
+@pytest.mark.asyncio
+async def test_daemon_handles_pause_runs_forensics(tmp_path, monkeypatch):
+    """Daemon should run full forensics on pause detection."""
+    from pause_monitor.collector import PowermetricsResult
+
+    config = Config()
+    config._data_dir = tmp_path
+    # Lower threshold so test pause triggers forensics
+    config.alerts.pause_min_duration = 0.1
+
+    daemon = Daemon(config)
+    await daemon._init_database()
+
+    # Track forensics calls
+    forensics_called = []
+
+    async def mock_run_forensics(contents, *, duration):
+        forensics_called.append((contents, duration))
+
+    monkeypatch.setattr(daemon, "_run_forensics", mock_run_forensics)
+
+    # Mock sleep wake detection to return False (not a sleep wake)
+    monkeypatch.setattr(
+        "pause_monitor.daemon.was_recently_asleep",
+        lambda within_seconds: False,
+    )
+
+    # Add some samples to ring buffer (Phase 1: push requires metrics)
+    for i in range(5):
+        metrics = PowermetricsResult(
+            elapsed_ns=100_000_000,
+            throttled=False,
+            cpu_power=5.0 + i,
+            gpu_pct=10.0,
+            gpu_power=1.0,
+            io_read_per_s=1000.0,
+            io_write_per_s=500.0,
+            wakeups_per_s=50.0,
+            pageins_per_s=0.0,
+            top_cpu_processes=[],
+            top_pagein_processes=[],
+        )
+        stress = StressBreakdown(
+            load=10 + i, memory=5, thermal=0, latency=0, io=0, gpu=0, wakeups=0, pageins=0
+        )
+        daemon.ring_buffer.push(metrics, stress, tier=1)
+
+    # Handle pause (300ms actual when 100ms expected = 3x latency)
+    await daemon._handle_pause(actual_interval=0.3, expected_interval=0.1)
+
+    assert len(forensics_called) == 1
+    # Forensics received frozen buffer contents and duration
+    contents, duration = forensics_called[0]
+    assert len(contents.samples) == 5
+    assert duration == 0.3

@@ -293,8 +293,8 @@ class Daemon:
                     )
                     log.info("auto_prune_completed", samples=deleted[0], events=deleted[1])
 
-    async def _run_forensics(self, capture: ForensicsCapture) -> None:
-        """Run forensics capture and notify on completion."""
+    async def _run_heavy_capture(self, capture: ForensicsCapture) -> None:
+        """Run heavy forensics capture (spindump, tailspin, logs) and notify on completion."""
         try:
             await run_full_capture(capture)
             self.notifier.forensics_completed(capture.event_dir)
@@ -304,6 +304,70 @@ class Daemon:
                 event_dir=str(capture.event_dir),
                 error=str(e),
             )
+
+    async def _run_forensics(self, contents: BufferContents, *, duration: float) -> None:
+        """Run full forensics capture.
+
+        Args:
+            contents: Frozen ring buffer contents
+            duration: Pause duration in seconds
+        """
+        # Create event directory
+        timestamp = datetime.now()
+        event_dir = self.config.events_dir / timestamp.strftime("%Y%m%d_%H%M%S")
+        event_dir.mkdir(parents=True, exist_ok=True)
+
+        # Identify culprits from ring buffer using powermetrics data
+        # identify_culprits returns [{"factor": str, "score": int, "processes": [str]}]
+        culprits = identify_culprits(contents)
+        # Flatten process lists from top factors, dedupe, keep top 5
+        all_procs = [p for c in culprits for p in c.get("processes", [])]
+        culprit_names = list(dict.fromkeys(all_procs))[:5]
+
+        # Create capture context
+        capture = ForensicsCapture(event_dir)
+
+        # Write ring buffer data
+        capture.write_ring_buffer(contents)
+
+        # Find peak sample
+        peak_sample = (
+            max(contents.samples, key=lambda s: s.stress.total) if contents.samples else None
+        )
+        peak_stress = peak_sample.stress.total if peak_sample else 0
+
+        # Write metadata
+        capture.write_metadata(
+            {
+                "timestamp": timestamp.isoformat(),
+                "peak_stress": peak_stress,
+                "culprits": culprit_names,
+                "sample_count": len(contents.samples),
+            }
+        )
+
+        # Run heavy captures (spindump, tailspin, logs) in background
+        asyncio.create_task(
+            run_full_capture(capture, window_seconds=self.config.sentinel.ring_buffer_seconds)
+        )
+
+        # Write event to database
+        event = Event(
+            timestamp=timestamp,
+            duration=duration,
+            stress=peak_sample.stress if peak_sample else StressBreakdown(0, 0, 0, 0, 0, 0, 0, 0),
+            culprits=culprit_names,
+            event_dir=str(event_dir),
+            status="unreviewed",
+            peak_stress=peak_stress,
+        )
+        insert_event(self._conn, event)
+        self.state.event_count += 1
+
+        # Notify user
+        self.notifier.pause_detected(duration=duration, event_dir=event_dir)
+
+        log.info("forensics_started", event_dir=str(event_dir), culprits=culprit_names)
 
     # === Sentinel Callbacks ===
 
@@ -399,6 +463,9 @@ class Daemon:
     ) -> None:
         """Handle pause detection from sentinel.
 
+        NOTE: This method will be removed in Task 3.6-3.7 when the main loop
+        replaces Sentinel. Use _handle_pause for new code paths.
+
         Args:
             actual: Actual elapsed time
             expected: Expected interval
@@ -457,7 +524,7 @@ class Daemon:
         )
 
         # Run forensics capture in background
-        asyncio.create_task(self._run_forensics(capture))
+        asyncio.create_task(self._run_heavy_capture(capture))
 
         # Compute average stress from buffer for the event record
         if contents.samples:
@@ -484,6 +551,42 @@ class Daemon:
 
         # Send notification
         self.notifier.pause_detected(duration, event_dir)
+
+    async def _handle_pause(self, actual_interval: float, expected_interval: float) -> None:
+        """Handle detected pause - run full forensics.
+
+        A pause is when our loop was delayed >threshold (system was frozen).
+
+        Args:
+            actual_interval: How long the loop actually took
+            expected_interval: How long it should have taken
+        """
+        # Check if we just woke from sleep (not a real pause)
+        if was_recently_asleep(within_seconds=actual_interval):
+            log.info("pause_was_sleep_wake", actual=actual_interval)
+            return
+
+        # Check minimum duration threshold
+        if actual_interval < self.config.alerts.pause_min_duration:
+            log.debug(
+                "pause_below_threshold",
+                duration=actual_interval,
+                min_duration=self.config.alerts.pause_min_duration,
+            )
+            return
+
+        log.warning(
+            "pause_detected",
+            actual=actual_interval,
+            expected=expected_interval,
+            ratio=actual_interval / expected_interval,
+        )
+
+        # Freeze ring buffer (immutable snapshot)
+        contents = self.ring_buffer.freeze()
+
+        # Run forensics in background
+        await self._run_forensics(contents, duration=actual_interval)
 
     def _calculate_stress(
         self, pm_result: PowermetricsResult, latency_ratio: float
