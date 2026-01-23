@@ -15,6 +15,7 @@ import pytest
 
 from pause_monitor.config import Config
 from pause_monitor.daemon import Daemon, DaemonState
+from pause_monitor.ringbuffer import RingBuffer
 from pause_monitor.sentinel import TierAction
 from pause_monitor.storage import get_events
 from pause_monitor.stress import StressBreakdown
@@ -480,10 +481,9 @@ async def test_daemon_uses_main_loop(patched_config_paths):
 
 
 @pytest.mark.asyncio
-async def test_daemon_handles_pause_with_buffer_contents(patched_config_paths):
-    """Daemon handles pause with buffer contents from sentinel."""
-    from pause_monitor.ringbuffer import BufferContents
-    from pause_monitor.storage import get_events, init_database
+async def test_daemon_handles_pause_with_forensics(patched_config_paths):
+    """Daemon handles pause by running forensics capture."""
+    from pause_monitor.storage import init_database
 
     config = Config()
     daemon = Daemon(config)
@@ -491,24 +491,23 @@ async def test_daemon_handles_pause_with_buffer_contents(patched_config_paths):
     init_database(config.db_path)
     daemon._conn = sqlite3.connect(config.db_path)
 
-    # Create mock buffer contents
-    contents = BufferContents(samples=[], snapshots=[])
+    # Initialize ring buffer so freeze() works
+    daemon.ring_buffer = RingBuffer(max_samples=100)
 
-    # Mock was_recently_asleep and forensics
+    # Mock was_recently_asleep and _run_forensics
     # Note: actual duration must be >= config.alerts.pause_min_duration (default 2.0)
     with patch("pause_monitor.daemon.was_recently_asleep", return_value=None):
-        with patch("pause_monitor.daemon.run_full_capture", new_callable=AsyncMock):
-            with patch("pause_monitor.daemon.identify_culprits", return_value=[]):
-                await daemon._handle_pause_from_sentinel(
-                    actual=2.5,
-                    expected=0.1,
-                    contents=contents,
-                )
+        with patch.object(daemon, "_run_forensics", new_callable=AsyncMock) as mock_forensics:
+            await daemon._handle_pause(
+                actual_interval=2.5,
+                expected_interval=0.1,
+            )
 
-    # Verify event was stored
-    events = get_events(daemon._conn)
-    assert len(events) == 1
-    assert events[0].duration == 2.5
+            # Verify forensics was called
+            mock_forensics.assert_called_once()
+            # First arg should be the frozen buffer contents
+            call_args = mock_forensics.call_args
+            assert call_args.kwargs.get("duration") == 2.5
 
 
 @pytest.mark.asyncio
@@ -571,11 +570,12 @@ async def test_daemon_handles_tier2_exit_writes_bookmark(patched_config_paths):
     )
     await daemon._handle_tier_action(TierAction.TIER2_EXIT, exit_stress)
 
-    # Verify event was written with peak_stress
+    # Verify event was written with peak_stress and peak_tier
     events = get_events(daemon._conn, limit=1)
     assert len(events) == 1
     assert events[0].peak_stress == 35  # Peak from entry stress total
-    assert events[0].duration >= 59  # Should be ~60s (with some tolerance)
+    assert events[0].peak_tier == 2
+    assert events[0].end_timestamp is not None  # Event was finalized
     # Entry time should be cleared after exit
     assert daemon._tier2_entry_time is None
 
@@ -599,6 +599,8 @@ def test_daemon_calculate_stress_all_factors(patched_config_paths):
         pageins_per_s=50.0,  # Some swap activity
         top_cpu_processes=[{"name": "test", "pid": 123, "cpu_ms_per_s": 500.0}],
         top_pagein_processes=[{"name": "swapper", "pid": 456, "pageins_per_s": 50.0}],
+        top_wakeup_processes=[{"name": "test", "pid": 123, "wakeups_per_s": 300.0}],
+        top_diskio_processes=[{"name": "test", "pid": 123, "diskio_per_s": 50_000_000.0}],
     )
 
     stress = daemon._calculate_stress(pm_result, latency_ratio=1.5)
@@ -655,6 +657,8 @@ async def test_daemon_handles_pause_runs_forensics(patched_config_paths, monkeyp
             pageins_per_s=0.0,
             top_cpu_processes=[],
             top_pagein_processes=[],
+            top_wakeup_processes=[],
+            top_diskio_processes=[],
         )
         stress = StressBreakdown(
             load=10 + i, memory=5, thermal=0, latency=0, io=0, gpu=0, wakeups=0, pageins=0
@@ -726,9 +730,14 @@ async def test_daemon_main_loop_processes_powermetrics(patched_config_paths, mon
     from unittest.mock import MagicMock
 
     from pause_monitor.collector import PowermetricsResult
+    from pause_monitor.storage import init_database
 
     config = Config()
     daemon = Daemon(config)
+
+    # Initialize database to prevent NoneType errors
+    init_database(config.db_path)
+    daemon._conn = sqlite3.connect(config.db_path)
 
     # Track samples pushed to ring buffer (Phase 1: new signature)
     pushed_samples = []
@@ -755,6 +764,8 @@ async def test_daemon_main_loop_processes_powermetrics(patched_config_paths, mon
             pageins_per_s=0.0,
             top_cpu_processes=[{"name": "test", "pid": 1, "cpu_ms_per_s": 100}],
             top_pagein_processes=[],
+            top_wakeup_processes=[],
+            top_diskio_processes=[],
         ),
         PowermetricsResult(
             elapsed_ns=100_000_000,
@@ -768,6 +779,8 @@ async def test_daemon_main_loop_processes_powermetrics(patched_config_paths, mon
             pageins_per_s=10.0,  # Some swap activity
             top_cpu_processes=[{"name": "test", "pid": 1, "cpu_ms_per_s": 200}],
             top_pagein_processes=[{"name": "swapper", "pid": 2, "pageins_per_s": 10.0}],
+            top_wakeup_processes=[{"name": "test", "pid": 1, "wakeups_per_s": 200.0}],
+            top_diskio_processes=[],
         ),
     ]
 

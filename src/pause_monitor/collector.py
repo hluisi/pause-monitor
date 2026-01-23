@@ -52,7 +52,7 @@ class PowermetricsResult:
     gpu_pct: float | None  # (1 - idle_ratio) * 100
     gpu_power: float | None  # Milliwatts from processor.gpu_power
 
-    # Disk I/O (from disk dict) — kept separate per Data Dictionary
+    # Disk I/O (from disk dict) — system-wide aggregates
     io_read_per_s: float  # bytes/sec from disk.rbytes_per_s
     io_write_per_s: float  # bytes/sec from disk.wbytes_per_s
 
@@ -62,9 +62,11 @@ class PowermetricsResult:
     # Page-ins (summed from tasks array) — CRITICAL for pause detection
     pageins_per_s: float  # Sum of tasks[].pageins_per_s
 
-    # Top processes for culprit identification (two lists, 5 each)
-    top_cpu_processes: list[dict]  # [{name, pid, cpu_ms_per_s}] — top 5 by CPU
-    top_pagein_processes: list[dict]  # [{name, pid, pageins_per_s}] — top 5 by pageins
+    # Top 5 processes for culprit identification
+    top_cpu_processes: list[dict]  # [{name, pid, cpu_ms_per_s}]
+    top_pagein_processes: list[dict]  # [{name, pid, pageins_per_s}]
+    top_wakeup_processes: list[dict]  # [{name, pid, wakeups_per_s}]
+    top_diskio_processes: list[dict]  # [{name, pid, diskio_per_s}] read+write combined
 
 
 def parse_powermetrics_sample(data: bytes) -> PowermetricsResult:
@@ -122,11 +124,18 @@ def parse_powermetrics_sample(data: bytes) -> PowermetricsResult:
         task_pageins = task.get("pageins_per_s", 0.0)
         pageins_per_s += task_pageins
 
+        # Per-process disk I/O (read + write combined)
+        task_diskio = task.get("diskio_bytesread_per_s", 0.0) + task.get(
+            "diskio_byteswritten_per_s", 0.0
+        )
+
         proc = {
             "name": task.get("name", "unknown"),
             "pid": task.get("pid", 0),
             "cpu_ms_per_s": task.get("cputime_ms_per_s", 0.0),
             "pageins_per_s": task_pageins,
+            "wakeups_per_s": task_wakeups,
+            "diskio_per_s": task_diskio,
         }
         all_processes.append(proc)
 
@@ -137,6 +146,20 @@ def parse_powermetrics_sample(data: bytes) -> PowermetricsResult:
     top_pagein_processes = sorted(
         [p for p in all_processes if p["pageins_per_s"] > 0],
         key=lambda p: p["pageins_per_s"],
+        reverse=True,
+    )[:5]
+
+    # Top 5 by wakeups (only include processes with wakeups > 0)
+    top_wakeup_processes = sorted(
+        [p for p in all_processes if p["wakeups_per_s"] > 0],
+        key=lambda p: p["wakeups_per_s"],
+        reverse=True,
+    )[:5]
+
+    # Top 5 by disk I/O (only include processes with diskio > 0)
+    top_diskio_processes = sorted(
+        [p for p in all_processes if p["diskio_per_s"] > 0],
+        key=lambda p: p["diskio_per_s"],
         reverse=True,
     )[:5]
 
@@ -152,6 +175,8 @@ def parse_powermetrics_sample(data: bytes) -> PowermetricsResult:
         pageins_per_s=pageins_per_s,
         top_cpu_processes=top_cpu_processes,
         top_pagein_processes=top_pagein_processes,
+        top_wakeup_processes=top_wakeup_processes,
+        top_diskio_processes=top_diskio_processes,
     )
 
 
@@ -246,6 +271,18 @@ class PowermetricsStream:
         self._process = None
         self._status = StreamStatus.STOPPED
         log.info("powermetrics_stopped")
+
+    def terminate(self) -> None:
+        """Synchronously kill the subprocess (for signal handlers).
+
+        Uses SIGKILL because powermetrics may not respond to SIGTERM quickly.
+        """
+        if self._process is None:
+            return
+        try:
+            self._process.kill()  # SIGKILL - cannot be caught or ignored
+        except ProcessLookupError:
+            pass  # Already dead  # Already dead
 
     async def read_samples(self) -> AsyncIterator[PowermetricsResult]:
         """Yield parsed samples as they become available.

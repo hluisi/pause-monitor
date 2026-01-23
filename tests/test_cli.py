@@ -9,8 +9,29 @@ from click.testing import CliRunner
 
 from pause_monitor.cli import main
 from pause_monitor.config import AlertsConfig, Config, RetentionConfig, SamplingConfig
-from pause_monitor.storage import Event, Sample, init_database, insert_event
+from pause_monitor.storage import Sample, create_event, finalize_event, init_database
 from pause_monitor.stress import StressBreakdown
+
+
+def create_test_event(
+    conn,
+    start_time: datetime,
+    duration_seconds: float = 2.5,
+    peak_stress: int = 15,
+    peak_tier: int = 2,
+) -> int:
+    """Create a test event using the new API."""
+    from datetime import timedelta
+
+    event_id = create_event(conn, start_time)
+    finalize_event(
+        conn,
+        event_id,
+        end_timestamp=start_time + timedelta(seconds=duration_seconds),
+        peak_stress=peak_stress,
+        peak_tier=peak_tier,
+    )
+    return event_id
 
 
 def make_test_sample(**kwargs) -> Sample:
@@ -79,20 +100,17 @@ class TestEventsCommand:
         db_path = tmp_path / "data.db"
         init_database(db_path)
 
-        # Insert test events
+        # Insert test event
         import sqlite3
 
         conn = sqlite3.connect(db_path)
-        stress = StressBreakdown(load=10, memory=5, thermal=0, latency=0, io=0, gpu=0, wakeups=0)
-        event = Event(
-            timestamp=datetime(2026, 1, 20, 14, 30, 0),
-            duration=2.5,
-            stress=stress,
-            culprits=["codemeter", "WindowServer"],
-            event_dir=None,
-            notes=None,
+        create_test_event(
+            conn,
+            start_time=datetime(2026, 1, 20, 14, 30, 0),
+            duration_seconds=2.5,
+            peak_stress=15,
+            peak_tier=2,
         )
-        insert_event(conn, event)
         conn.close()
 
         with patch("pause_monitor.config.Config.load") as mock_load:
@@ -107,7 +125,6 @@ class TestEventsCommand:
         assert "Duration" in result.output
         assert "Stress" in result.output
         assert "2.5s" in result.output
-        assert "codemeter" in result.output
 
     def test_events_show_specific_event(self, runner: CliRunner, tmp_path: Path) -> None:
         """events <id> shows a specific event."""
@@ -118,16 +135,16 @@ class TestEventsCommand:
         import sqlite3
 
         conn = sqlite3.connect(db_path)
-        stress = StressBreakdown(load=20, memory=10, thermal=5, latency=15, io=0, gpu=0, wakeups=0)
-        event = Event(
-            timestamp=datetime(2026, 1, 20, 14, 30, 0),
-            duration=3.5,
-            stress=stress,
-            culprits=["kernel_task"],
-            event_dir="/path/to/forensics",
-            notes="Test pause event",
+        event_id = create_test_event(
+            conn,
+            start_time=datetime(2026, 1, 20, 14, 30, 0),
+            duration_seconds=3.5,
+            peak_stress=50,
+            peak_tier=2,
         )
-        event_id = insert_event(conn, event)
+        # Add notes via update
+        conn.execute("UPDATE events SET notes = ? WHERE id = ?", ("Test pause event", event_id))
+        conn.commit()
         conn.close()
 
         with patch("pause_monitor.config.Config.load") as mock_load:
@@ -139,13 +156,7 @@ class TestEventsCommand:
         assert result.exit_code == 0
         assert f"Event #{event_id}" in result.output
         assert "Duration: 3.5s" in result.output
-        assert "Stress: 50/100" in result.output
-        assert "Load: 20" in result.output
-        assert "Memory: 10" in result.output
-        assert "Thermal: 5" in result.output
-        assert "Latency: 15" in result.output
-        assert "kernel_task" in result.output
-        assert "/path/to/forensics" in result.output
+        assert "Peak Stress: 50/100" in result.output
         assert "Test pause event" in result.output
 
     def test_events_nonexistent_id(self, runner: CliRunner, tmp_path: Path) -> None:
@@ -171,17 +182,14 @@ class TestEventsCommand:
         import sqlite3
 
         conn = sqlite3.connect(db_path)
-        stress = StressBreakdown(load=10, memory=5, thermal=0, latency=0, io=0, gpu=0, wakeups=0)
         for i in range(5):
-            event = Event(
-                timestamp=datetime(2026, 1, 20, 14, 30 + i, 0),
-                duration=1.0 + i,
-                stress=stress,
-                culprits=[],
-                event_dir=None,
-                notes=None,
+            create_test_event(
+                conn,
+                start_time=datetime(2026, 1, 20, 14, 30 + i, 0),
+                duration_seconds=1.0 + i,
+                peak_stress=15,
+                peak_tier=2,
             )
-            insert_event(conn, event)
         conn.close()
 
         with patch("pause_monitor.config.Config.load") as mock_load:
@@ -437,14 +445,12 @@ class TestPruneCommand:
         with patch("pause_monitor.config.Config.load") as mock_load:
             mock_config = MagicMock()
             mock_config.db_path = db_path
-            mock_config.retention.samples_days = 30
             mock_config.retention.events_days = 90
             mock_load.return_value = mock_config
             result = runner.invoke(main, ["prune", "--dry-run"])
 
         assert result.exit_code == 0
-        assert "Would prune samples older than 30 days" in result.output
-        assert "Would prune events older than 90 days" in result.output
+        assert "Would prune reviewed/dismissed events older than 90 days" in result.output
 
     def test_prune_dry_run_with_override(self, runner: CliRunner, tmp_path: Path) -> None:
         """prune --dry-run with overrides shows custom values."""
@@ -454,51 +460,45 @@ class TestPruneCommand:
         with patch("pause_monitor.config.Config.load") as mock_load:
             mock_config = MagicMock()
             mock_config.db_path = db_path
-            mock_config.retention.samples_days = 30
             mock_config.retention.events_days = 90
             mock_load.return_value = mock_config
-            result = runner.invoke(
-                main, ["prune", "--dry-run", "--samples-days", "7", "--events-days", "14"]
-            )
+            result = runner.invoke(main, ["prune", "--dry-run", "--events-days", "14"])
 
         assert result.exit_code == 0
-        assert "Would prune samples older than 7 days" in result.output
-        assert "Would prune events older than 14 days" in result.output
+        assert "Would prune reviewed/dismissed events older than 14 days" in result.output
 
-    def test_prune_deletes_old_data(self, runner: CliRunner, tmp_path: Path) -> None:
-        """prune deletes old samples and events."""
+    def test_prune_deletes_old_events(self, runner: CliRunner, tmp_path: Path) -> None:
+        """prune deletes old reviewed events."""
         import sqlite3
         import time
 
-        from pause_monitor.storage import insert_sample
+        from pause_monitor.storage import update_event_status
 
         db_path = tmp_path / "data.db"
         init_database(db_path)
 
-        # Insert old sample (40 days ago)
+        # Insert old event (100 days ago), marked as reviewed
         conn = sqlite3.connect(db_path)
-        stress = StressBreakdown(
-            load=10, memory=5, thermal=0, latency=0, io=0, gpu=0, wakeups=0, pageins=0
+        old_time = datetime.fromtimestamp(time.time() - 100 * 86400)
+        event_id = create_test_event(
+            conn,
+            start_time=old_time,
+            duration_seconds=2.5,
+            peak_stress=15,
+            peak_tier=2,
         )
-        old_sample = make_test_sample(
-            timestamp=datetime.fromtimestamp(time.time() - 40 * 86400),
-            interval=5.0,
-            load_avg=1.5,
-            stress=stress,
-        )
-        insert_sample(conn, old_sample)
+        update_event_status(conn, event_id, "reviewed")
         conn.close()
 
         with patch("pause_monitor.config.Config.load") as mock_load:
             mock_config = MagicMock()
             mock_config.db_path = db_path
-            mock_config.retention.samples_days = 30
             mock_config.retention.events_days = 90
             mock_load.return_value = mock_config
             result = runner.invoke(main, ["prune", "--force"])
 
         assert result.exit_code == 0
-        assert "Deleted 1 samples, 0 events" in result.output
+        assert "Deleted 1 events" in result.output
 
     def test_prune_with_nothing_to_delete(self, runner: CliRunner, tmp_path: Path) -> None:
         """prune with no old data shows zeros."""
@@ -508,49 +508,46 @@ class TestPruneCommand:
         with patch("pause_monitor.config.Config.load") as mock_load:
             mock_config = MagicMock()
             mock_config.db_path = db_path
-            mock_config.retention.samples_days = 30
             mock_config.retention.events_days = 90
             mock_load.return_value = mock_config
             result = runner.invoke(main, ["prune", "--force"])
 
         assert result.exit_code == 0
-        assert "Deleted 0 samples, 0 events" in result.output
+        assert "Deleted 0 events" in result.output
 
-    def test_prune_samples_days_override(self, runner: CliRunner, tmp_path: Path) -> None:
-        """prune --samples-days overrides config value."""
+    def test_prune_events_days_override(self, runner: CliRunner, tmp_path: Path) -> None:
+        """prune --events-days overrides config value."""
         import sqlite3
         import time
 
-        from pause_monitor.storage import insert_sample
+        from pause_monitor.storage import update_event_status
 
         db_path = tmp_path / "data.db"
         init_database(db_path)
 
-        # Insert sample 10 days ago (would be kept with default 30 days)
+        # Insert event 10 days ago, marked as reviewed
         conn = sqlite3.connect(db_path)
-        stress = StressBreakdown(
-            load=10, memory=5, thermal=0, latency=0, io=0, gpu=0, wakeups=0, pageins=0
+        old_time = datetime.fromtimestamp(time.time() - 10 * 86400)
+        event_id = create_test_event(
+            conn,
+            start_time=old_time,
+            duration_seconds=2.5,
+            peak_stress=15,
+            peak_tier=2,
         )
-        sample = make_test_sample(
-            timestamp=datetime.fromtimestamp(time.time() - 10 * 86400),
-            interval=5.0,
-            load_avg=1.5,
-            stress=stress,
-        )
-        insert_sample(conn, sample)
+        update_event_status(conn, event_id, "reviewed")
         conn.close()
 
         with patch("pause_monitor.config.Config.load") as mock_load:
             mock_config = MagicMock()
             mock_config.db_path = db_path
-            mock_config.retention.samples_days = 30
             mock_config.retention.events_days = 90
             mock_load.return_value = mock_config
-            # Override to 7 days, so 10-day-old sample will be deleted
-            result = runner.invoke(main, ["prune", "--samples-days", "7", "--force"])
+            # Override to 7 days, so 10-day-old event will be deleted
+            result = runner.invoke(main, ["prune", "--events-days", "7", "--force"])
 
         assert result.exit_code == 0
-        assert "Deleted 1 samples" in result.output
+        assert "Deleted 1 events" in result.output
 
     def test_prune_requires_confirmation(self, runner: CliRunner, tmp_path: Path) -> None:
         """prune without --force aborts without confirmation."""
@@ -560,7 +557,6 @@ class TestPruneCommand:
         with patch("pause_monitor.config.Config.load") as mock_load:
             mock_config = MagicMock()
             mock_config.db_path = db_path
-            mock_config.retention.samples_days = 30
             mock_config.retention.events_days = 90
             mock_load.return_value = mock_config
             # Don't confirm (default is 'n')
@@ -577,14 +573,13 @@ class TestPruneCommand:
         with patch("pause_monitor.config.Config.load") as mock_load:
             mock_config = MagicMock()
             mock_config.db_path = db_path
-            mock_config.retention.samples_days = 30
             mock_config.retention.events_days = 90
             mock_load.return_value = mock_config
             result = runner.invoke(main, ["prune"], input="y\n")
 
         assert result.exit_code == 0
-        assert "Delete samples > 30 days and events > 90 days?" in result.output
-        assert "Deleted 0 samples, 0 events" in result.output
+        assert "Delete reviewed/dismissed events older than 90 days?" in result.output
+        assert "Deleted 0 events" in result.output
 
 
 def _make_path_prop(path: Path):
@@ -1077,16 +1072,13 @@ class TestEventsStatusManagement:
         import sqlite3
 
         conn = sqlite3.connect(db_path)
-        stress = StressBreakdown(load=10, memory=5, thermal=0, latency=0, io=0, gpu=0, wakeups=0)
-        event = Event(
-            timestamp=datetime(2026, 1, 20, 14, 30, 0),
-            duration=2.5,
-            stress=stress,
-            culprits=["codemeter"],
-            event_dir=None,
-            notes=None,
+        create_test_event(
+            conn,
+            start_time=datetime(2026, 1, 20, 14, 30, 0),
+            duration_seconds=2.5,
+            peak_stress=15,
+            peak_tier=2,
         )
-        insert_event(conn, event)
         conn.close()
 
         with patch("pause_monitor.config.Config.load") as mock_load:
@@ -1109,27 +1101,22 @@ class TestEventsStatusManagement:
         from pause_monitor.storage import update_event_status
 
         conn = sqlite3.connect(db_path)
-        stress = StressBreakdown(load=10, memory=5, thermal=0, latency=0, io=0, gpu=0, wakeups=0)
 
         # Create two events
-        event1 = Event(
-            timestamp=datetime(2026, 1, 20, 14, 30, 0),
-            duration=2.5,
-            stress=stress,
-            culprits=[],
-            event_dir=None,
-            notes=None,
+        create_test_event(
+            conn,
+            start_time=datetime(2026, 1, 20, 14, 30, 0),
+            duration_seconds=2.5,
+            peak_stress=15,
+            peak_tier=2,
         )
-        event2 = Event(
-            timestamp=datetime(2026, 1, 20, 15, 30, 0),
-            duration=3.0,
-            stress=stress,
-            culprits=[],
-            event_dir=None,
-            notes=None,
+        event2_id = create_test_event(
+            conn,
+            start_time=datetime(2026, 1, 20, 15, 30, 0),
+            duration_seconds=3.0,
+            peak_stress=15,
+            peak_tier=2,
         )
-        insert_event(conn, event1)
-        event2_id = insert_event(conn, event2)
 
         # Mark one as reviewed
         update_event_status(conn, event2_id, "reviewed")
@@ -1155,16 +1142,13 @@ class TestEventsStatusManagement:
         import sqlite3
 
         conn = sqlite3.connect(db_path)
-        stress = StressBreakdown(load=10, memory=5, thermal=0, latency=0, io=0, gpu=0, wakeups=0)
-        event = Event(
-            timestamp=datetime(2026, 1, 20, 14, 30, 0),
-            duration=2.5,
-            stress=stress,
-            culprits=[],
-            event_dir=None,
-            notes=None,
+        event_id = create_test_event(
+            conn,
+            start_time=datetime(2026, 1, 20, 14, 30, 0),
+            duration_seconds=2.5,
+            peak_stress=15,
+            peak_tier=2,
         )
-        event_id = insert_event(conn, event)
         conn.close()
 
         with patch("pause_monitor.config.Config.load") as mock_load:
@@ -1185,16 +1169,13 @@ class TestEventsStatusManagement:
         import sqlite3
 
         conn = sqlite3.connect(db_path)
-        stress = StressBreakdown(load=10, memory=5, thermal=0, latency=0, io=0, gpu=0, wakeups=0)
-        event = Event(
-            timestamp=datetime(2026, 1, 20, 14, 30, 0),
-            duration=2.5,
-            stress=stress,
-            culprits=[],
-            event_dir=None,
-            notes=None,
+        event_id = create_test_event(
+            conn,
+            start_time=datetime(2026, 1, 20, 14, 30, 0),
+            duration_seconds=2.5,
+            peak_stress=15,
+            peak_tier=2,
         )
-        event_id = insert_event(conn, event)
         conn.close()
 
         with patch("pause_monitor.config.Config.load") as mock_load:
@@ -1217,16 +1198,13 @@ class TestEventsStatusManagement:
         import sqlite3
 
         conn = sqlite3.connect(db_path)
-        stress = StressBreakdown(load=10, memory=5, thermal=0, latency=0, io=0, gpu=0, wakeups=0)
-        event = Event(
-            timestamp=datetime(2026, 1, 20, 14, 30, 0),
-            duration=2.5,
-            stress=stress,
-            culprits=[],
-            event_dir=None,
-            notes=None,
+        event_id = create_test_event(
+            conn,
+            start_time=datetime(2026, 1, 20, 14, 30, 0),
+            duration_seconds=2.5,
+            peak_stress=15,
+            peak_tier=2,
         )
-        event_id = insert_event(conn, event)
         conn.close()
 
         with patch("pause_monitor.config.Config.load") as mock_load:
@@ -1247,16 +1225,13 @@ class TestEventsStatusManagement:
         import sqlite3
 
         conn = sqlite3.connect(db_path)
-        stress = StressBreakdown(load=10, memory=5, thermal=0, latency=0, io=0, gpu=0, wakeups=0)
-        event = Event(
-            timestamp=datetime(2026, 1, 20, 14, 30, 0),
-            duration=2.5,
-            stress=stress,
-            culprits=[],
-            event_dir=None,
-            notes=None,
+        event_id = create_test_event(
+            conn,
+            start_time=datetime(2026, 1, 20, 14, 30, 0),
+            duration_seconds=2.5,
+            peak_stress=15,
+            peak_tier=2,
         )
-        event_id = insert_event(conn, event)
         conn.close()
 
         with patch("pause_monitor.config.Config.load") as mock_load:
@@ -1277,16 +1252,13 @@ class TestEventsStatusManagement:
         import sqlite3
 
         conn = sqlite3.connect(db_path)
-        stress = StressBreakdown(load=10, memory=5, thermal=0, latency=0, io=0, gpu=0, wakeups=0)
-        event = Event(
-            timestamp=datetime(2026, 1, 20, 14, 30, 0),
-            duration=2.5,
-            stress=stress,
-            culprits=[],
-            event_dir=None,
-            notes=None,
+        event_id = create_test_event(
+            conn,
+            start_time=datetime(2026, 1, 20, 14, 30, 0),
+            duration_seconds=2.5,
+            peak_stress=15,
+            peak_tier=2,
         )
-        event_id = insert_event(conn, event)
         conn.close()
 
         with patch("pause_monitor.config.Config.load") as mock_load:
@@ -1309,16 +1281,13 @@ class TestEventsStatusManagement:
         import sqlite3
 
         conn = sqlite3.connect(db_path)
-        stress = StressBreakdown(load=10, memory=5, thermal=0, latency=0, io=0, gpu=0, wakeups=0)
-        event = Event(
-            timestamp=datetime(2026, 1, 20, 14, 30, 0),
-            duration=2.5,
-            stress=stress,
-            culprits=[],
-            event_dir=None,
-            notes=None,
+        event_id = create_test_event(
+            conn,
+            start_time=datetime(2026, 1, 20, 14, 30, 0),
+            duration_seconds=2.5,
+            peak_stress=15,
+            peak_tier=2,
         )
-        event_id = insert_event(conn, event)
         conn.close()
 
         with patch("pause_monitor.config.Config.load") as mock_load:
@@ -1353,16 +1322,13 @@ class TestEventsStatusManagement:
         import sqlite3
 
         conn = sqlite3.connect(db_path)
-        stress = StressBreakdown(load=10, memory=5, thermal=0, latency=0, io=0, gpu=0, wakeups=0)
-        event = Event(
-            timestamp=datetime(2026, 1, 20, 14, 30, 0),
-            duration=2.5,
-            stress=stress,
-            culprits=[],
-            event_dir=None,
-            notes=None,
+        event_id = create_test_event(
+            conn,
+            start_time=datetime(2026, 1, 20, 14, 30, 0),
+            duration_seconds=2.5,
+            peak_stress=15,
+            peak_tier=2,
         )
-        event_id = insert_event(conn, event)
         conn.close()
 
         with patch("pause_monitor.config.Config.load") as mock_load:
@@ -1385,16 +1351,13 @@ class TestEventsStatusManagement:
         import sqlite3
 
         conn = sqlite3.connect(db_path)
-        stress = StressBreakdown(load=10, memory=5, thermal=0, latency=0, io=0, gpu=0, wakeups=0)
-        event = Event(
-            timestamp=datetime(2026, 1, 20, 14, 30, 0),
-            duration=2.5,
-            stress=stress,
-            culprits=[],
-            event_dir=None,
-            notes=None,
+        create_test_event(
+            conn,
+            start_time=datetime(2026, 1, 20, 14, 30, 0),
+            duration_seconds=2.5,
+            peak_stress=15,
+            peak_tier=2,
         )
-        insert_event(conn, event)
         conn.close()
 
         with patch("pause_monitor.config.Config.load") as mock_load:

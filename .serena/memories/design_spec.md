@@ -1,8 +1,8 @@
 # Design Specification
 
-> ✅ **Phase 3 COMPLETE (2026-01-23).** Phase 4 (Socket Server) is next. See `docs/plans/phase-4-socket-server.md` for current work.
+> ✅ **Phase 5 COMPLETE (2026-01-22).** Redesign eliminated Sentinel class; daemon uses powermetrics directly with TierManager.
 
-**Last updated:** 2026-01-23 (Phase 3 complete, Phase 4 next)
+**Last updated:** 2026-01-22 (Phase 5 complete - redesign done)
 
 ## Source Documents
 
@@ -29,36 +29,45 @@ A **real-time** system health monitoring tool for macOS that tracks down intermi
 │  ┌──────────────┐    ┌──────────────┐    ┌──────────────┐       │
 │  │   Sampler    │───▶│   Storage    │◀───│     CLI      │       │
 │  │   (daemon)   │    │   (SQLite)   │    │   Queries    │       │
-│  └──────────────┘    └──────────────┘    └──────────────┘       │
+│  └──────┬───────┘    └──────────────┘    └──────────────┘       │
 │         │                   ▲                                    │
-│         │                   │                                    │
+│         │ socket            │ events only                        │
 │         ▼                   │                                    │
 │  ┌──────────────┐    ┌──────────────┐                           │
-│  │   Forensics  │    │     TUI      │                           │
-│  │  (on pause)  │    │  Dashboard   │                           │
+│  │ SocketServer │───▶│     TUI      │                           │
+│  │  (real-time) │    │  Dashboard   │                           │
 │  └──────────────┘    └──────────────┘                           │
+│         │                                                        │
+│         ▼                                                        │
+│  ┌──────────────┐                                               │
+│  │   Forensics  │                                               │
+│  │  (on pause)  │                                               │
+│  └──────────────┘                                               │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
 ## Components
 
 ### Sampler (daemon.py)
-- **Purpose:** Background daemon orchestrating sampling, detection, and forensics with Sentinel integration
-- **Responsibilities:** Stream powermetrics, run Sentinel for fast pause detection, manage ring buffer, trigger forensics
-- **Interfaces:** Reads config, writes to SQLite, triggers forensics, integrates with Sentinel
+- **Purpose:** Background daemon orchestrating sampling, detection, and forensics
+- **Responsibilities:** Stream powermetrics at 100ms, calculate stress, manage ring buffer, trigger forensics
+- **Interfaces:** Reads config, writes to SQLite, triggers forensics, broadcasts via SocketServer
 - **Key features:** 
-  - Sentinel runs 100ms fast loop for pause detection
+  - Single 10Hz loop driven by powermetrics stream
+  - TierManager for SENTINEL→ELEVATED→CRITICAL transitions
   - Ring buffer captures 30s of context before pauses
-  - Tier-based monitoring (SENTINEL→ELEVATED→CRITICAL)
+  - SocketServer broadcasts samples to TUI in real-time
   - Automatic culprit identification from ring buffer
 
-### Sentinel (sentinel.py)
-- **Purpose:** Fast-loop pause detection with tiered monitoring
-- **Responsibilities:** Run 100ms loop for pause detection, manage tier transitions, push samples to ring buffer
+### Tier Manager (sentinel.py)
+- **Purpose:** Tier state machine for stress level transitions
+- **Responsibilities:** Manage SENTINEL/ELEVATED/CRITICAL tier transitions with hysteresis
 - **Components:**
-  - `TierManager` - State machine for SENTINEL/ELEVATED/CRITICAL transitions
-  - `Sentinel` - Main class with fast/slow loops and callbacks
-- **Configuration:** `[sentinel]` and `[tiers]` config sections
+  - `TierManager` - State machine with `update(stress_total)` returning `TierAction` on transitions
+  - `Tier` enum - SENTINEL (1), ELEVATED (2), CRITICAL (3)
+  - `TierAction` enum - TIER2_ENTRY, TIER2_EXIT, TIER2_PEAK, TIER3_ENTRY, TIER3_EXIT
+- **Configuration:** `[tiers]` config section (elevated_threshold, critical_threshold)
+- **Note:** The `Sentinel` class was deleted in Phase 5 redesign; daemon calls TierManager directly
 
 ### Ring Buffer (ringbuffer.py)
 - **Purpose:** In-memory circular buffer for capturing pre-pause context
@@ -67,6 +76,16 @@ A **real-time** system health monitoring tool for macOS that tracks down intermi
   - Thread-safe circular buffer
   - `freeze()` creates immutable snapshot for analysis
   - Process snapshots capture top 10 by CPU and memory
+
+### Socket Server (socket_server.py)
+- **Purpose:** Unix socket server for broadcasting real-time samples to TUI
+- **Responsibilities:** Accept client connections, broadcast sample messages, manage client lifecycle
+- **Protocol:** JSON messages over Unix domain socket at `~/.local/share/pause-monitor/daemon.sock`
+
+### Socket Client (socket_client.py)
+- **Purpose:** Unix socket client for TUI to receive real-time samples
+- **Responsibilities:** Connect to daemon socket, receive and parse JSON messages
+- **Usage:** TUI creates SocketClient, iterates async over messages to update widgets
 
 ### Storage (storage.py)
 - **Purpose:** SQLite database with WAL mode for concurrent access
@@ -94,7 +113,7 @@ A **real-time** system health monitoring tool for macOS that tracks down intermi
 - **Purpose:** Live dashboard showing current stats, recent events, trends
 - **Framework:** Textual
 - **Views:** Dashboard (default), Processes, Events, History
-- **Refresh:** 1 second polling via aiosqlite read-only connection
+- **Data source:** Real-time samples via SocketClient; events from SQLite
 
 ### CLI (cli.py)
 - **Purpose:** Command-line interface
@@ -170,6 +189,90 @@ A **real-time** system health monitoring tool for macOS that tracks down intermi
 | updated_at | REAL | Unix timestamp |
 
 Keys: `schema_version`, `io_baseline`, `last_sample_id`
+
+### powermetrics Sample (Runtime)
+
+The parsed output from `powermetrics -f plist` that flows through the daemon. This is the canonical runtime data contract.
+
+```
+Top-level dict
+├── is_delta: bool (always true for streaming)
+├── elapsed_ns: integer (actual sample interval in nanoseconds)
+├── timestamp: date (ISO 8601)
+├── thermal_pressure: string ("Nominal"|"Moderate"|"Heavy"|"Critical"|"Sleeping")
+├── tasks: array (per-process data)
+│   └── [each task dict]
+│       ├── pid: integer
+│       ├── name: string
+│       ├── cputime_ms_per_s: real (CPU usage: 1000 = 1 core fully used)
+│       ├── intr_wakeups_per_s: real (interrupt-driven wakeups)
+│       ├── idle_wakeups_per_s: real (idle wakeups — most relevant for energy)
+│       ├── pageins_per_s: real (pages read from disk — KEY pause indicator)
+│       ├── diskio_bytesread_per_s: real (per-process disk read)
+│       ├── diskio_byteswritten_per_s: real (per-process disk write)
+│       └── timer_wakeups: array
+│           └── [{interval_ns, wakeups_per_s}, ...]
+├── disk: dict (system-wide I/O)
+│   ├── rbytes_per_s: real (read bytes/sec)
+│   ├── wbytes_per_s: real (write bytes/sec)
+│   ├── rops_per_s: real (read ops/sec)
+│   └── wops_per_s: real (write ops/sec)
+├── processor: dict
+│   ├── clusters: array (per-cluster frequency/utilization)
+│   ├── cpu_power: real (milliwatts)
+│   ├── gpu_power: real (milliwatts)
+│   └── combined_power: real (total SoC power in milliwatts)
+└── gpu: dict
+    ├── freq_hz: real
+    ├── idle_ratio: real (1.0 = fully idle, 0.0 = fully busy)
+    └── gpu_energy: integer (microjoules per interval)
+```
+
+### PowermetricsResult (Python dataclass)
+
+The parsed/aggregated data structure used internally:
+
+```python
+@dataclass
+class PowermetricsResult:
+    # Timing
+    elapsed_ns: int                     # Actual sample interval
+
+    # Thermal
+    throttled: bool                     # True if thermal_pressure != "Nominal"
+
+    # Power
+    cpu_power: float | None             # Milliwatts
+    gpu_power: float | None             # Milliwatts
+
+    # GPU
+    gpu_pct: float | None               # (1 - idle_ratio) * 100
+
+    # System-wide aggregates (for stress calculation)
+    io_read_per_s: float                # bytes/sec from disk dict
+    io_write_per_s: float               # bytes/sec from disk dict
+    wakeups_per_s: float                # Sum of tasks[].idle_wakeups_per_s
+    pageins_per_s: float                # Sum of tasks[].pageins_per_s
+
+    # Top 5 per-process (for culprit identification)
+    top_cpu_processes: list[dict]       # [{name, pid, cpu_ms_per_s}]
+    top_pagein_processes: list[dict]    # [{name, pid, pageins_per_s}]
+    top_wakeup_processes: list[dict]    # [{name, pid, wakeups_per_s}]
+    top_diskio_processes: list[dict]    # [{name, pid, diskio_per_s}] read+write
+```
+
+**Culprit identification mapping:**
+
+| Stress Factor | Aggregate Source | Top 5 Process Source |
+|---------------|------------------|----------------------|
+| load | psutil load_avg | top_cpu_processes |
+| memory | psutil mem_pressure | by_memory (snapshots) |
+| thermal | throttled | — (system-wide) |
+| latency | elapsed_ns | — (system-wide) |
+| io | io_read + io_write | top_diskio_processes |
+| gpu | gpu_pct | — (no per-process) |
+| wakeups | wakeups_per_s | top_wakeup_processes |
+| pageins | pageins_per_s | top_pagein_processes |
 
 ## Configuration
 
@@ -267,6 +370,8 @@ Location: `~/.config/pause-monitor/config.toml`
 | terminal-notifier over osascript | Better UX when available, osascript fallback always works |
 | Privileged mode required | Per-process I/O is essential for identifying culprits; not optional |
 | User-specific sudoers rules | Constrain output paths to prevent cross-user attacks |
+| Unix socket for TUI streaming | Real-time data without SQLite polling overhead |
+| TierManager extracted from Sentinel | Reusable state machine; Sentinel class deleted in Phase 5 |
 
 ## Privileged Operations
 
@@ -288,6 +393,7 @@ Required for full functionality (via sudoers):
 | Events | `~/.local/share/pause-monitor/events/` |
 | Daemon log | `~/.local/share/pause-monitor/daemon.log` |
 | PID file | `~/.local/share/pause-monitor/daemon.pid` |
+| Socket | `~/.local/share/pause-monitor/daemon.sock` |
 | launchd plist | `~/Library/LaunchAgents/com.local.pause-monitor.plist` |
 | sudoers | `/etc/sudoers.d/pause-monitor-<username>` |
 

@@ -17,7 +17,7 @@ from pause_monitor.ringbuffer import (
     RingSample,
 )
 from pause_monitor.sentinel import Tier, TierManager
-from pause_monitor.storage import Event, get_events, init_database, insert_event
+from pause_monitor.storage import create_event, finalize_event, get_events, init_database
 from pause_monitor.stress import StressBreakdown
 
 
@@ -35,6 +35,8 @@ def make_test_metrics(**kwargs) -> PowermetricsResult:
         "pageins_per_s": 0.0,
         "top_cpu_processes": [],
         "top_pagein_processes": [],
+        "top_wakeup_processes": [],
+        "top_diskio_processes": [],
     }
     defaults.update(kwargs)
     return PowermetricsResult(**defaults)
@@ -224,23 +226,28 @@ class TestEventStatusIntegration:
     @pytest.fixture
     def db_with_events(self, tmp_path) -> Path:
         """Create database with test events."""
+        from datetime import timedelta
+
+        from pause_monitor.storage import update_event_status
+
         db_path = tmp_path / "test.db"
         init_database(db_path)
 
         conn = sqlite3.connect(db_path)
-        stress = StressBreakdown(load=50, memory=20, thermal=0, latency=0, io=0, gpu=10, wakeups=5)
 
         # Insert events with different statuses
-        for status in ["unreviewed", "reviewed", "pinned", "dismissed"]:
-            event = Event(
-                timestamp=datetime.now(),
-                duration=2.5,
-                stress=stress,
-                culprits=["test_process"],
-                event_dir=None,
-                status=status,
+        for i, status in enumerate(["unreviewed", "reviewed", "pinned", "dismissed"]):
+            start_time = datetime.now() - timedelta(hours=i)
+            event_id = create_event(conn, start_time)
+            finalize_event(
+                conn,
+                event_id,
+                end_timestamp=start_time + timedelta(seconds=2.5),
+                peak_stress=85,
+                peak_tier=2,
             )
-            insert_event(conn, event)
+            if status != "unreviewed":
+                update_event_status(conn, event_id, status)
 
         conn.close()
         return db_path
@@ -261,14 +268,14 @@ class TestEventStatusIntegration:
 
         conn.close()
 
-    def test_events_include_gpu_and_wakeups(self, db_with_events):
-        """Events correctly store and retrieve GPU and wakeups stress."""
+    def test_events_have_peak_stress(self, db_with_events):
+        """Events correctly store and retrieve peak stress."""
         conn = sqlite3.connect(db_with_events)
         events = get_events(conn, limit=1)
         conn.close()
 
-        assert events[0].stress.gpu == 10
-        assert events[0].stress.wakeups == 5
+        assert events[0].peak_stress == 85
+        assert events[0].peak_tier == 2
 
 
 class TestDaemonTierIntegration:
@@ -329,9 +336,12 @@ class TestDaemonTierIntegration:
         daemon.notifier.critical_stress.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_daemon_records_pause_event(self, mock_config, tmp_path):
-        """Daemon records pause events with ring buffer data."""
+    async def test_daemon_runs_forensics_on_pause(self, mock_config, tmp_path):
+        """Daemon runs forensics capture on pause detection."""
+        from unittest.mock import AsyncMock, patch
+
         from pause_monitor.daemon import Daemon
+        from pause_monitor.ringbuffer import RingBuffer
 
         # Ensure events directory exists
         (tmp_path / "events").mkdir(parents=True, exist_ok=True)
@@ -342,37 +352,26 @@ class TestDaemonTierIntegration:
         daemon.notifier = MagicMock()
         daemon.notifier.pause_detected = MagicMock()
 
-        # Create buffer contents
+        # Initialize ring buffer
+        daemon.ring_buffer = RingBuffer(max_samples=100)
+
+        # Add some samples to the ring buffer
         metrics = make_test_metrics()
         stress = StressBreakdown(load=40, memory=30, thermal=0, latency=0, io=0, gpu=15, wakeups=0)
-        samples = [
-            RingSample(timestamp=datetime.now(), metrics=metrics, stress=stress, tier=3)
-            for _ in range(5)
-        ]
-        snapshots = [
-            ProcessSnapshot(
-                timestamp=datetime.now(),
-                trigger="pause",
-                by_cpu=[ProcessInfo(pid=1, name="culprit", cpu_pct=300, memory_mb=2000)],
-                by_memory=[ProcessInfo(pid=1, name="culprit", cpu_pct=300, memory_mb=2000)],
+        for _ in range(5):
+            daemon.ring_buffer.push(metrics, stress, tier=3)
+
+        # Mock _run_forensics to avoid actual file I/O
+        with patch.object(daemon, "_run_forensics", new_callable=AsyncMock) as mock_forensics:
+            # Handle pause (must be >= pause_min_duration, default 2.0)
+            await daemon._handle_pause(
+                actual_interval=5.0,
+                expected_interval=0.1,
             )
-        ]
-        contents = BufferContents(samples=samples, snapshots=snapshots)
 
-        # Handle pause
-        await daemon._handle_pause_from_sentinel(
-            actual=5.0,
-            expected=0.1,
-            contents=contents,
-        )
-
-        # Verify event was recorded
-        events = get_events(daemon._conn)
-        assert len(events) == 1
-        assert events[0].duration == 5.0
-        assert events[0].stress.load == 40
-        assert events[0].stress.gpu == 15
-        # Should have identified culprits from high load/memory
-        assert len(events[0].culprits) > 0
+            # Verify forensics was called with correct duration
+            mock_forensics.assert_called_once()
+            call_kwargs = mock_forensics.call_args.kwargs
+            assert call_kwargs["duration"] == 5.0
 
         daemon._conn.close()

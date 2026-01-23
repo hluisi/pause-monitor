@@ -66,9 +66,10 @@ async def test_tui_connects_via_socket_when_daemon_running(short_tmp_path: Path)
             }
             writer.write((json.dumps(msg) + "\n").encode())
             await writer.drain()
-            # Keep connection alive briefly
-            await asyncio.sleep(0.5)
+            # Wait for client to disconnect (EOF)
+            await reader.read()
             writer.close()
+            await writer.wait_closed()
 
         server = await asyncio.start_unix_server(handle_client, path=str(socket_path))
 
@@ -81,10 +82,12 @@ async def test_tui_connects_via_socket_when_daemon_running(short_tmp_path: Path)
             assert app._use_socket is True
             assert "(live)" in app.sub_title
         finally:
-            server.close()
-            await server.wait_closed()
+            # Disconnect client first - signals handler to exit
             if app._socket_client:
                 await app._socket_client.disconnect()
+            # Then close server after handler has cleaned up
+            server.close()
+            await server.wait_closed()
 
 
 @pytest.mark.asyncio
@@ -106,7 +109,7 @@ async def test_tui_shows_waiting_state_when_no_daemon(short_tmp_path: Path):
         await app._try_socket_connect()
 
         assert app._use_socket is False
-        assert "not running" in app.sub_title.lower()
+        assert "disconnected" in app.sub_title.lower()
 
 
 def test_tui_set_disconnected_updates_subtitle():
@@ -122,7 +125,7 @@ def test_tui_set_disconnected_updates_subtitle():
     app._set_disconnected()
 
     assert app._use_socket is False
-    assert "not running" in app.sub_title.lower()
+    assert "disconnected" in app.sub_title.lower()
 
 
 def test_tui_handle_socket_data_updates_stress():
@@ -135,6 +138,8 @@ def test_tui_handle_socket_data_updates_stress():
     # Create mock widgets
     mock_gauge = MagicMock()
     mock_breakdown = MagicMock()
+    mock_metrics = MagicMock()
+    mock_processes = MagicMock()
 
     # Patch query_one to return our mocks
     def mock_query_one(selector, widget_type=None):
@@ -142,6 +147,10 @@ def test_tui_handle_socket_data_updates_stress():
             return mock_gauge
         elif selector == "#breakdown":
             return mock_breakdown
+        elif selector == "#metrics":
+            return mock_metrics
+        elif selector == "#processes":
+            return mock_processes
         raise ValueError(f"Unknown selector: {selector}")
 
     app.query_one = mock_query_one
@@ -165,6 +174,12 @@ def test_tui_handle_socket_data_updates_stress():
             "cpu_power": 25.5,
             "pageins_per_s": 100.0,
             "throttled": False,
+            "top_cpu_processes": [
+                {"name": "test_proc", "pid": 123, "cpu_ms_per_s": 500.0},
+            ],
+            "top_pagein_processes": [
+                {"name": "swap_proc", "pid": 456, "pageins_per_s": 50.0},
+            ],
         },
     }
 
@@ -172,6 +187,12 @@ def test_tui_handle_socket_data_updates_stress():
 
     # Verify stress gauge was updated
     mock_gauge.update_stress.assert_called_once_with(53)
+
+    # Verify processes panel was updated
+    mock_processes.update_processes.assert_called_once_with(
+        cpu_processes=[{"name": "test_proc", "pid": 123, "cpu_ms_per_s": 500.0}],
+        pagein_processes=[{"name": "swap_proc", "pid": 456, "pageins_per_s": 50.0}],
+    )
 
 
 def test_tui_handle_initial_state():
@@ -184,12 +205,18 @@ def test_tui_handle_initial_state():
     # Create mock widgets
     mock_gauge = MagicMock()
     mock_breakdown = MagicMock()
+    mock_metrics = MagicMock()
+    mock_processes = MagicMock()
 
     def mock_query_one(selector, widget_type=None):
         if selector == "#stress-gauge":
             return mock_gauge
         elif selector == "#breakdown":
             return mock_breakdown
+        elif selector == "#metrics":
+            return mock_metrics
+        elif selector == "#processes":
+            return mock_processes
         raise ValueError(f"Unknown selector: {selector}")
 
     app.query_one = mock_query_one

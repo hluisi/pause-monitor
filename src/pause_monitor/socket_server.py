@@ -56,6 +56,9 @@ class SocketServer:
 
     async def start(self) -> None:
         """Start the socket server."""
+        import os
+        import stat
+
         # Remove stale socket file
         if self.socket_path.exists():
             self.socket_path.unlink()
@@ -67,6 +70,10 @@ class SocketServer:
             self._handle_client,
             path=str(self.socket_path),
         )
+
+        # Make socket accessible to non-root users (daemon runs as root, TUI as user)
+        os.chmod(self.socket_path, stat.S_IRWXU | stat.S_IRWXG | stat.S_IRWXO)
+
         self._running = True
         log.info("socket_server_started path=%s", self.socket_path)
 
@@ -99,6 +106,9 @@ class SocketServer:
         metrics: PowermetricsResult,
         stress: StressBreakdown,
         tier: int,
+        *,
+        load_avg: float = 0.0,
+        mem_pressure: int = 0,
     ) -> None:
         """Push current sample to all connected clients.
 
@@ -109,6 +119,8 @@ class SocketServer:
             metrics: Raw powermetrics data (Phase 1 format)
             stress: Computed stress breakdown
             tier: Current tier (1, 2, or 3)
+            load_avg: System load average (1 minute)
+            mem_pressure: Memory pressure percentage (0-100, higher = more free)
         """
         if not self._clients:
             return
@@ -131,6 +143,8 @@ class SocketServer:
                 "pageins_per_s": metrics.pageins_per_s,
                 "top_cpu_processes": metrics.top_cpu_processes,
                 "top_pagein_processes": metrics.top_pagein_processes,
+                "load_avg": load_avg,
+                "mem_pressure": mem_pressure,
             },
             "sample_count": len(self.ring_buffer.samples),
         }

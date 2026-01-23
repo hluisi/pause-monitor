@@ -1,13 +1,47 @@
 """Tests for SQLite storage layer."""
 
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
 
-from pause_monitor.storage import SCHEMA_VERSION, Sample, get_schema_version, init_database
+from pause_monitor.storage import (
+    SCHEMA_VERSION,
+    Sample,
+    create_event,
+    finalize_event,
+    get_schema_version,
+    init_database,
+)
 from pause_monitor.stress import StressBreakdown
+
+
+def create_test_event(
+    conn: sqlite3.Connection,
+    start_time: datetime | None = None,
+    duration_seconds: float = 2.5,
+    peak_stress: int = 15,
+    peak_tier: int = 2,
+    status: str = "unreviewed",
+) -> int:
+    """Create a test event using the new API."""
+    from pause_monitor.storage import update_event_status
+
+    if start_time is None:
+        start_time = datetime.now()
+
+    event_id = create_event(conn, start_time)
+    finalize_event(
+        conn,
+        event_id,
+        end_timestamp=start_time + timedelta(seconds=duration_seconds),
+        peak_stress=peak_stress,
+        peak_tier=peak_tier,
+    )
+    if status != "unreviewed":
+        update_event_status(conn, event_id, status)
+    return event_id
 
 
 def make_test_sample(**kwargs) -> Sample:
@@ -168,59 +202,59 @@ def test_get_recent_samples(initialized_db: Path, sample_stress):
 
 
 def test_event_dataclass():
-    """Event has correct fields."""
+    """Event has correct fields for the new schema."""
     from pause_monitor.storage import Event
 
-    stress = StressBreakdown(load=10, memory=5, thermal=0, latency=0, io=0, gpu=0, wakeups=0)
+    now = datetime.now()
     event = Event(
-        timestamp=datetime.now(),
-        duration=3.5,
-        stress=stress,
-        culprits=["codemeter", "WindowServer"],
-        event_dir="/path/to/events/12345",
+        start_timestamp=now,
+        end_timestamp=now + timedelta(seconds=3.5),
+        peak_stress=15,
+        peak_tier=2,
+        status="unreviewed",
         notes="Test pause",
     )
-    assert event.duration == 3.5
-    assert "codemeter" in event.culprits
+    # Calculate duration from timestamps
+    duration = (event.end_timestamp - event.start_timestamp).total_seconds()
+    assert duration == 3.5
+    assert event.peak_stress == 15
+    assert event.peak_tier == 2
 
 
-def test_insert_event(initialized_db: Path, sample_stress):
-    """insert_event stores event in database."""
-    from pause_monitor.storage import Event, insert_event
-
-    event = Event(
-        timestamp=datetime.now(),
-        duration=2.5,
-        stress=sample_stress,
-        culprits=["test_process"],
-        event_dir=None,
-        notes=None,
-    )
+def test_create_and_finalize_event(initialized_db: Path):
+    """create_event and finalize_event store event in database."""
+    from pause_monitor.storage import get_event_by_id
 
     conn = sqlite3.connect(initialized_db)
-    event_id = insert_event(conn, event)
-    conn.close()
-
+    start_time = datetime.now()
+    event_id = create_event(conn, start_time)
     assert event_id > 0
 
+    # Finalize the event
+    end_time = start_time + timedelta(seconds=2.5)
+    finalize_event(conn, event_id, end_timestamp=end_time, peak_stress=25, peak_tier=2)
 
-def test_get_events_by_timerange(initialized_db: Path, sample_stress):
+    # Verify it was stored correctly
+    event = get_event_by_id(conn, event_id)
+    conn.close()
+
+    assert event is not None
+    assert event.start_timestamp == start_time
+    assert event.end_timestamp == end_time
+    assert event.peak_stress == 25
+    assert event.peak_tier == 2
+
+
+def test_get_events_by_timerange(initialized_db: Path):
     """get_events returns events within time range."""
-    from pause_monitor.storage import Event, get_events, insert_event
+    from pause_monitor.storage import get_events
 
     conn = sqlite3.connect(initialized_db)
 
     base_time = 1000000.0
     for i in range(5):
-        event = Event(
-            timestamp=datetime.fromtimestamp(base_time + i * 3600),
-            duration=1.0 + i,
-            stress=sample_stress,
-            culprits=[],
-            event_dir=None,
-            notes=None,
-        )
-        insert_event(conn, event)
+        start_time = datetime.fromtimestamp(base_time + i * 3600)
+        create_test_event(conn, start_time=start_time, peak_stress=10 + i)
 
     events = get_events(
         conn,
@@ -232,28 +266,21 @@ def test_get_events_by_timerange(initialized_db: Path, sample_stress):
     assert len(events) == 3
 
 
-def test_get_event_by_id_found(initialized_db: Path, sample_stress):
+def test_get_event_by_id_found(initialized_db: Path):
     """get_event_by_id returns event when found."""
-    from pause_monitor.storage import Event, get_event_by_id, insert_event
-
-    event = Event(
-        timestamp=datetime.now(),
-        duration=2.5,
-        stress=sample_stress,
-        culprits=["test_process"],
-        event_dir="/path/to/event",
-        notes="Test note",
-    )
+    from pause_monitor.storage import get_event_by_id
 
     conn = sqlite3.connect(initialized_db)
-    event_id = insert_event(conn, event)
+    start_time = datetime.now()
+    event_id = create_test_event(conn, start_time=start_time, peak_stress=30, peak_tier=2)
+
     retrieved = get_event_by_id(conn, event_id)
     conn.close()
 
     assert retrieved is not None
     assert retrieved.id == event_id
-    assert retrieved.duration == 2.5
-    assert retrieved.culprits == ["test_process"]
+    assert retrieved.peak_stress == 30
+    assert retrieved.peak_tier == 2
 
 
 def test_get_event_by_id_not_found(initialized_db: Path):
@@ -267,205 +294,151 @@ def test_get_event_by_id_not_found(initialized_db: Path):
     assert result is None
 
 
-def test_prune_old_data_deletes_old_samples(initialized_db: Path, sample_stress):
-    """prune_old_data deletes samples older than cutoff."""
+def test_prune_old_data_deletes_old_events(initialized_db: Path):
+    """prune_old_data deletes old events with prunable status."""
     import time
 
-    from pause_monitor.storage import insert_sample, prune_old_data
-
-    conn = sqlite3.connect(initialized_db)
-
-    # Insert old sample (40 days ago)
-    old_sample = make_test_sample(
-        timestamp=datetime.fromtimestamp(time.time() - 40 * 86400),
-        interval=5.0,
-        load_avg=1.5,
-        stress=sample_stress,
-    )
-    insert_sample(conn, old_sample)
-
-    # Insert recent sample (1 day ago)
-    recent_sample = make_test_sample(
-        timestamp=datetime.fromtimestamp(time.time() - 1 * 86400),
-        interval=5.0,
-        load_avg=2.0,
-        stress=sample_stress,
-    )
-    insert_sample(conn, recent_sample)
-
-    # Prune samples older than 30 days
-    samples_deleted, events_deleted = prune_old_data(conn, samples_days=30, events_days=90)
-
-    # Verify old sample was deleted, recent kept
-    count = conn.execute("SELECT COUNT(*) FROM samples").fetchone()[0]
-    conn.close()
-
-    assert samples_deleted == 1
-    assert events_deleted == 0
-    assert count == 1
-
-
-def test_prune_old_data_deletes_old_events(initialized_db: Path, sample_stress):
-    """prune_old_data deletes old events with prunable status (reviewed/dismissed)."""
-    import time
-
-    from pause_monitor.storage import Event, insert_event, prune_old_data
+    from pause_monitor.storage import prune_old_data
 
     conn = sqlite3.connect(initialized_db)
 
     # Insert old event (100 days ago) with 'reviewed' status (prunable)
-    old_event = Event(
-        timestamp=datetime.fromtimestamp(time.time() - 100 * 86400),
-        duration=2.5,
-        stress=sample_stress,
-        culprits=["test_process"],
-        event_dir=None,
-        status="reviewed",  # Must be reviewed/dismissed to be prunable
-        notes=None,
-    )
-    insert_event(conn, old_event)
+    old_time = datetime.fromtimestamp(time.time() - 100 * 86400)
+    create_test_event(conn, start_time=old_time, status="reviewed")
 
     # Insert recent event (30 days ago) - also reviewed but within retention
-    recent_event = Event(
-        timestamp=datetime.fromtimestamp(time.time() - 30 * 86400),
-        duration=1.5,
-        stress=sample_stress,
-        culprits=["another_process"],
-        event_dir=None,
-        status="reviewed",
-        notes=None,
-    )
-    insert_event(conn, recent_event)
+    recent_time = datetime.fromtimestamp(time.time() - 30 * 86400)
+    create_test_event(conn, start_time=recent_time, status="reviewed")
 
     # Prune events older than 90 days
-    samples_deleted, events_deleted = prune_old_data(conn, samples_days=30, events_days=90)
+    events_deleted = prune_old_data(conn, events_days=90)
 
     # Verify old event was deleted, recent kept
     count = conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
     conn.close()
 
-    assert samples_deleted == 0
     assert events_deleted == 1
     assert count == 1
 
 
-def test_prune_old_data_deletes_process_samples(initialized_db: Path, sample_stress):
-    """prune_old_data deletes process_samples linked to old samples."""
+def test_prune_only_deletes_prunable_events(initialized_db: Path):
+    """prune_old_data only deletes reviewed/dismissed events, not unreviewed/pinned."""
     import time
 
-    from pause_monitor.storage import insert_sample, prune_old_data
+    from pause_monitor.storage import prune_old_data
 
     conn = sqlite3.connect(initialized_db)
 
-    # Insert old sample (40 days ago)
-    old_sample = make_test_sample(
-        timestamp=datetime.fromtimestamp(time.time() - 40 * 86400),
-        interval=5.0,
-        load_avg=1.5,
-        stress=sample_stress,
-    )
-    sample_id = insert_sample(conn, old_sample)
+    # Insert old events of each status
+    old_time = datetime.fromtimestamp(time.time() - 100 * 86400)
+    create_test_event(conn, start_time=old_time, status="unreviewed")  # Should NOT be pruned
+    create_test_event(conn, start_time=old_time, status="pinned")  # Should NOT be pruned
+    create_test_event(conn, start_time=old_time, status="reviewed")  # Should be pruned
+    create_test_event(conn, start_time=old_time, status="dismissed")  # Should be pruned
 
-    # Insert process sample linked to the old sample
-    conn.execute(
-        """
-        INSERT INTO process_samples (sample_id, pid, name, cpu_pct, mem_pct)
-        VALUES (?, ?, ?, ?, ?)
-        """,
-        (sample_id, 123, "test_process", 50.0, 10.0),
-    )
-    conn.commit()
+    # Prune events older than 90 days
+    events_deleted = prune_old_data(conn, events_days=90)
 
-    # Verify process sample exists
-    proc_count_before = conn.execute("SELECT COUNT(*) FROM process_samples").fetchone()[0]
-    assert proc_count_before == 1
+    # Only reviewed and dismissed should be pruned
+    count = conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+    conn.close()
+
+    assert events_deleted == 2
+    assert count == 2  # unreviewed and pinned remain
+
+
+def test_prune_deletes_event_samples_with_events(initialized_db: Path):
+    """prune_old_data deletes event_samples linked to pruned events."""
+    import time
+
+    from pause_monitor.storage import EventSample, insert_event_sample, prune_old_data
+    from pause_monitor.stress import StressBreakdown
+
+    conn = sqlite3.connect(initialized_db)
+
+    # Insert old event (100 days ago) with reviewed status (prunable)
+    old_time = datetime.fromtimestamp(time.time() - 100 * 86400)
+    event_id = create_test_event(conn, start_time=old_time, status="reviewed")
+
+    # Insert an event sample linked to the event
+    stress = StressBreakdown(load=10, memory=5, thermal=0, latency=0, io=0, gpu=0, wakeups=0)
+    sample = EventSample(
+        event_id=event_id,
+        timestamp=old_time,
+        tier=2,
+        elapsed_ns=100_000_000,
+        throttled=False,
+        cpu_power=5.0,
+        gpu_pct=10.0,
+        gpu_power=1.0,
+        io_read_per_s=1000.0,
+        io_write_per_s=500.0,
+        wakeups_per_s=50.0,
+        pageins_per_s=0.0,
+        stress=stress,
+        top_cpu_procs=[],
+        top_pagein_procs=[],
+        top_wakeup_procs=[],
+        top_diskio_procs=[],
+    )
+    insert_event_sample(conn, sample)
+
+    # Verify event sample exists
+    sample_count_before = conn.execute("SELECT COUNT(*) FROM event_samples").fetchone()[0]
+    assert sample_count_before == 1
 
     # Prune
-    prune_old_data(conn, samples_days=30, events_days=90)
+    events_deleted = prune_old_data(conn, events_days=90)
 
-    # Verify process sample was deleted
-    proc_count_after = conn.execute("SELECT COUNT(*) FROM process_samples").fetchone()[0]
-    sample_count = conn.execute("SELECT COUNT(*) FROM samples").fetchone()[0]
+    # Verify event sample was deleted along with event
+    sample_count_after = conn.execute("SELECT COUNT(*) FROM event_samples").fetchone()[0]
+    event_count = conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
     conn.close()
 
-    assert proc_count_after == 0
-    assert sample_count == 0
+    assert events_deleted == 1
+    assert sample_count_after == 0
+    assert event_count == 0
 
 
-def test_prune_old_data_with_nothing_to_delete(initialized_db: Path, sample_stress):
-    """prune_old_data returns zeros when nothing to delete."""
+def test_prune_with_nothing_to_delete(initialized_db: Path):
+    """prune_old_data returns zero when nothing to delete."""
     import time
 
-    from pause_monitor.storage import Event, insert_event, insert_sample, prune_old_data
+    from pause_monitor.storage import prune_old_data
 
     conn = sqlite3.connect(initialized_db)
 
-    # Insert recent sample (1 day ago)
-    recent_sample = make_test_sample(
-        timestamp=datetime.fromtimestamp(time.time() - 1 * 86400),
-        interval=5.0,
-        load_avg=2.0,
-        stress=sample_stress,
-    )
-    insert_sample(conn, recent_sample)
+    # Insert recent event (10 days ago) - within retention
+    recent_time = datetime.fromtimestamp(time.time() - 10 * 86400)
+    create_test_event(conn, start_time=recent_time, status="reviewed")
 
-    # Insert recent event (10 days ago)
-    recent_event = Event(
-        timestamp=datetime.fromtimestamp(time.time() - 10 * 86400),
-        duration=1.5,
-        stress=sample_stress,
-        culprits=[],
-        event_dir=None,
-        notes=None,
-    )
-    insert_event(conn, recent_event)
-
-    # Prune with default retention
-    samples_deleted, events_deleted = prune_old_data(conn, samples_days=30, events_days=90)
+    # Prune with 90 day retention
+    events_deleted = prune_old_data(conn, events_days=90)
     conn.close()
 
-    assert samples_deleted == 0
     assert events_deleted == 0
 
 
-def test_prune_old_data_rejects_zero_samples_days(initialized_db: Path):
-    """prune_old_data raises ValueError when samples_days < 1."""
-    import pytest
-
-    from pause_monitor.storage import prune_old_data
-
-    conn = sqlite3.connect(initialized_db)
-
-    with pytest.raises(ValueError, match="Retention days must be >= 1"):
-        prune_old_data(conn, samples_days=0, events_days=90)
-
-    conn.close()
-
-
-def test_prune_old_data_rejects_zero_events_days(initialized_db: Path):
+def test_prune_rejects_zero_days(initialized_db: Path):
     """prune_old_data raises ValueError when events_days < 1."""
-    import pytest
-
     from pause_monitor.storage import prune_old_data
 
     conn = sqlite3.connect(initialized_db)
 
     with pytest.raises(ValueError, match="Retention days must be >= 1"):
-        prune_old_data(conn, samples_days=30, events_days=0)
+        prune_old_data(conn, events_days=0)
 
     conn.close()
 
 
-def test_prune_old_data_rejects_negative_days(initialized_db: Path):
+def test_prune_rejects_negative_days(initialized_db: Path):
     """prune_old_data raises ValueError for negative retention days."""
-    import pytest
-
     from pause_monitor.storage import prune_old_data
 
     conn = sqlite3.connect(initialized_db)
 
     with pytest.raises(ValueError, match="Retention days must be >= 1"):
-        prune_old_data(conn, samples_days=-5, events_days=90)
+        prune_old_data(conn, events_days=-5)
 
     conn.close()
 
@@ -477,13 +450,11 @@ def test_event_dataclass_has_status_field():
     """Event dataclass has status field with default value."""
     from pause_monitor.storage import Event
 
-    stress = StressBreakdown(load=10, memory=5, thermal=0, latency=0, io=0, gpu=0, wakeups=0)
     event = Event(
-        timestamp=datetime.now(),
-        duration=3.5,
-        stress=stress,
-        culprits=["test_process"],
-        event_dir="/path/to/events/12345",
+        start_timestamp=datetime.now(),
+        end_timestamp=datetime.now() + timedelta(seconds=3.5),
+        peak_stress=15,
+        peak_tier=2,
     )
     # Default should be "unreviewed"
     assert event.status == "unreviewed"
@@ -494,13 +465,11 @@ def test_event_dataclass_accepts_status():
     """Event dataclass accepts explicit status value."""
     from pause_monitor.storage import Event
 
-    stress = StressBreakdown(load=10, memory=5, thermal=0, latency=0, io=0, gpu=0, wakeups=0)
     event = Event(
-        timestamp=datetime.now(),
-        duration=3.5,
-        stress=stress,
-        culprits=["test_process"],
-        event_dir="/path/to/events/12345",
+        start_timestamp=datetime.now(),
+        end_timestamp=datetime.now() + timedelta(seconds=3.5),
+        peak_stress=15,
+        peak_tier=2,
         status="pinned",
         notes="Important event",
     )
@@ -508,21 +477,12 @@ def test_event_dataclass_accepts_status():
     assert event.notes == "Important event"
 
 
-def test_insert_event_with_status(initialized_db: Path, sample_stress):
-    """Events can be inserted with status."""
-    from pause_monitor.storage import Event, get_event_by_id, insert_event
-
-    event = Event(
-        timestamp=datetime.now(),
-        duration=2.5,
-        stress=sample_stress,
-        culprits=["test_process"],
-        event_dir=None,
-        status="unreviewed",
-    )
+def test_create_event_with_status(initialized_db: Path):
+    """Events are created with default unreviewed status."""
+    from pause_monitor.storage import get_event_by_id
 
     conn = sqlite3.connect(initialized_db)
-    event_id = insert_event(conn, event)
+    event_id = create_test_event(conn, status="unreviewed")
     retrieved = get_event_by_id(conn, event_id)
     conn.close()
 
@@ -530,22 +490,15 @@ def test_insert_event_with_status(initialized_db: Path, sample_stress):
     assert retrieved.status == "unreviewed"
 
 
-def test_insert_event_with_pinned_status(initialized_db: Path, sample_stress):
-    """Events can be inserted with pinned status."""
-    from pause_monitor.storage import Event, get_event_by_id, insert_event
-
-    event = Event(
-        timestamp=datetime.now(),
-        duration=2.5,
-        stress=sample_stress,
-        culprits=["test_process"],
-        event_dir=None,
-        status="pinned",
-        notes="Keep this one",
-    )
+def test_create_event_with_pinned_status(initialized_db: Path):
+    """Events can have pinned status set via update."""
+    from pause_monitor.storage import get_event_by_id, update_event_status
 
     conn = sqlite3.connect(initialized_db)
-    event_id = insert_event(conn, event)
+    event_id = create_test_event(conn)
+
+    # Update to pinned with notes
+    update_event_status(conn, event_id, "pinned", "Keep this one")
     retrieved = get_event_by_id(conn, event_id)
     conn.close()
 
@@ -554,21 +507,12 @@ def test_insert_event_with_pinned_status(initialized_db: Path, sample_stress):
     assert retrieved.notes == "Keep this one"
 
 
-def test_update_event_status(initialized_db: Path, sample_stress):
+def test_update_event_status(initialized_db: Path):
     """Event status can be updated."""
-    from pause_monitor.storage import Event, get_event_by_id, insert_event, update_event_status
-
-    event = Event(
-        timestamp=datetime.now(),
-        duration=2.5,
-        stress=sample_stress,
-        culprits=["test_process"],
-        event_dir=None,
-        status="unreviewed",
-    )
+    from pause_monitor.storage import get_event_by_id, update_event_status
 
     conn = sqlite3.connect(initialized_db)
-    event_id = insert_event(conn, event)
+    event_id = create_test_event(conn)
 
     # Update status only
     update_event_status(conn, event_id, "reviewed")
@@ -579,21 +523,12 @@ def test_update_event_status(initialized_db: Path, sample_stress):
     assert retrieved.status == "reviewed"
 
 
-def test_update_event_status_with_notes(initialized_db: Path, sample_stress):
+def test_update_event_status_with_notes(initialized_db: Path):
     """Event status can be updated with notes."""
-    from pause_monitor.storage import Event, get_event_by_id, insert_event, update_event_status
-
-    event = Event(
-        timestamp=datetime.now(),
-        duration=2.5,
-        stress=sample_stress,
-        culprits=["test_process"],
-        event_dir=None,
-        status="unreviewed",
-    )
+    from pause_monitor.storage import get_event_by_id, update_event_status
 
     conn = sqlite3.connect(initialized_db)
-    event_id = insert_event(conn, event)
+    event_id = create_test_event(conn)
 
     # Update status with notes
     update_event_status(conn, event_id, "pinned", "Chrome memory leak")
@@ -605,22 +540,15 @@ def test_update_event_status_with_notes(initialized_db: Path, sample_stress):
     assert retrieved.notes == "Chrome memory leak"
 
 
-def test_update_event_status_preserves_notes(initialized_db: Path, sample_stress):
+def test_update_event_status_preserves_notes(initialized_db: Path):
     """Updating status without notes preserves existing notes."""
-    from pause_monitor.storage import Event, get_event_by_id, insert_event, update_event_status
-
-    event = Event(
-        timestamp=datetime.now(),
-        duration=2.5,
-        stress=sample_stress,
-        culprits=["test_process"],
-        event_dir=None,
-        status="unreviewed",
-        notes="Original note",
-    )
+    from pause_monitor.storage import get_event_by_id, update_event_status
 
     conn = sqlite3.connect(initialized_db)
-    event_id = insert_event(conn, event)
+    event_id = create_test_event(conn)
+
+    # First set notes
+    update_event_status(conn, event_id, "unreviewed", "Original note")
 
     # Update status only (notes=None should preserve existing notes)
     update_event_status(conn, event_id, "reviewed")
@@ -632,21 +560,12 @@ def test_update_event_status_preserves_notes(initialized_db: Path, sample_stress
     assert retrieved.notes == "Original note"
 
 
-def test_update_event_status_invalid_status(initialized_db: Path, sample_stress):
+def test_update_event_status_invalid_status(initialized_db: Path):
     """update_event_status rejects invalid status values."""
-    from pause_monitor.storage import Event, insert_event, update_event_status
-
-    event = Event(
-        timestamp=datetime.now(),
-        duration=2.5,
-        stress=sample_stress,
-        culprits=["test_process"],
-        event_dir=None,
-        status="unreviewed",
-    )
+    from pause_monitor.storage import update_event_status
 
     conn = sqlite3.connect(initialized_db)
-    event_id = insert_event(conn, event)
+    event_id = create_test_event(conn)
 
     # Invalid status should raise ValueError
     with pytest.raises(ValueError) as exc_info:
@@ -657,22 +576,13 @@ def test_update_event_status_invalid_status(initialized_db: Path, sample_stress)
     conn.close()
 
 
-def test_get_events_returns_status(initialized_db: Path, sample_stress):
+def test_get_events_returns_status(initialized_db: Path):
     """get_events includes status field in results."""
-    from pause_monitor.storage import Event, get_events, insert_event
+    from pause_monitor.storage import get_events, update_event_status
 
     conn = sqlite3.connect(initialized_db)
-
-    event = Event(
-        timestamp=datetime.now(),
-        duration=2.5,
-        stress=sample_stress,
-        culprits=["test_process"],
-        event_dir=None,
-        status="pinned",
-        notes="Test note",
-    )
-    insert_event(conn, event)
+    event_id = create_test_event(conn)
+    update_event_status(conn, event_id, "pinned", "Test note")
 
     events = get_events(conn, limit=10)
     conn.close()
@@ -682,280 +592,7 @@ def test_get_events_returns_status(initialized_db: Path, sample_stress):
     assert events[0].notes == "Test note"
 
 
-def test_migrate_add_event_status(tmp_path: Path):
-    """migrate_add_event_status adds status and notes columns to existing database."""
-    from pause_monitor.storage import migrate_add_event_status
-
-    # Create a database with old schema (no status or notes columns)
-    db_path = tmp_path / "old.db"
-    conn = sqlite3.connect(db_path)
-    conn.execute("""
-        CREATE TABLE events (
-            id              INTEGER PRIMARY KEY,
-            timestamp       REAL NOT NULL,
-            duration        REAL NOT NULL,
-            stress_total    INTEGER,
-            stress_load     INTEGER,
-            stress_memory   INTEGER,
-            stress_thermal  INTEGER,
-            stress_latency  INTEGER,
-            stress_io       INTEGER,
-            culprits        TEXT,
-            event_dir       TEXT
-        )
-    """)
-
-    # Insert a legacy event
-    conn.execute(
-        "INSERT INTO events (timestamp, duration, stress_total) VALUES (?, ?, ?)",
-        (1000000.0, 2.5, 50),
-    )
-    conn.commit()
-
-    # Run migration
-    migrate_add_event_status(conn)
-
-    # Verify both columns exist
-    cursor = conn.execute("PRAGMA table_info(events)")
-    columns = {row[1] for row in cursor.fetchall()}
-    assert "status" in columns
-    assert "notes" in columns
-
-    # Verify existing event has 'reviewed' status (not 'unreviewed')
-    row = conn.execute("SELECT status, notes FROM events WHERE id = 1").fetchone()
-    assert row[0] == "reviewed"
-    assert row[1] is None  # Notes should be NULL
-
-    conn.close()
-
-
-def test_migrate_add_event_status_idempotent(initialized_db: Path, sample_stress):
-    """migrate_add_event_status is safe to run multiple times."""
-    from pause_monitor.storage import Event, get_event_by_id, insert_event, migrate_add_event_status
-
-    conn = sqlite3.connect(initialized_db)
-
-    # Insert event with status
-    event = Event(
-        timestamp=datetime.now(),
-        duration=2.5,
-        stress=sample_stress,
-        culprits=["test_process"],
-        event_dir=None,
-        status="pinned",
-    )
-    event_id = insert_event(conn, event)
-
-    # Run migration (should be no-op since column exists)
-    migrate_add_event_status(conn)
-
-    # Status should be preserved
-    retrieved = get_event_by_id(conn, event_id)
-    conn.close()
-
-    assert retrieved.status == "pinned"
-
-
 # --- Status-Aware Pruning Tests ---
-
-
-def test_prune_respects_unreviewed_status(initialized_db: Path, sample_stress):
-    """Unreviewed events are never pruned, regardless of age."""
-    import time
-
-    from pause_monitor.storage import Event, get_event_by_id, insert_event, prune_old_data
-
-    conn = sqlite3.connect(initialized_db)
-
-    # Insert old unreviewed event (60 days ago)
-    old_time = datetime.fromtimestamp(time.time() - 60 * 86400)
-    event = Event(
-        timestamp=old_time,
-        duration=2.5,
-        stress=sample_stress,
-        culprits=["test_process"],
-        event_dir=None,
-        status="unreviewed",
-    )
-    event_id = insert_event(conn, event)
-
-    # Prune with 30 day retention
-    samples_deleted, events_deleted = prune_old_data(conn, samples_days=30, events_days=30)
-
-    # Unreviewed event should NOT be pruned
-    assert events_deleted == 0
-    retrieved = get_event_by_id(conn, event_id)
-    conn.close()
-
-    assert retrieved is not None
-    assert retrieved.status == "unreviewed"
-
-
-def test_prune_respects_pinned_status(initialized_db: Path, sample_stress):
-    """Pinned events are never pruned, regardless of age."""
-    import time
-
-    from pause_monitor.storage import Event, get_event_by_id, insert_event, prune_old_data
-
-    conn = sqlite3.connect(initialized_db)
-
-    # Insert old pinned event (60 days ago)
-    old_time = datetime.fromtimestamp(time.time() - 60 * 86400)
-    event = Event(
-        timestamp=old_time,
-        duration=2.5,
-        stress=sample_stress,
-        culprits=["important_process"],
-        event_dir=None,
-        status="pinned",
-        notes="Keep this forever",
-    )
-    event_id = insert_event(conn, event)
-
-    # Prune with 30 day retention
-    samples_deleted, events_deleted = prune_old_data(conn, samples_days=30, events_days=30)
-
-    # Pinned event should NOT be pruned
-    assert events_deleted == 0
-    retrieved = get_event_by_id(conn, event_id)
-    conn.close()
-
-    assert retrieved is not None
-    assert retrieved.status == "pinned"
-
-
-def test_prune_removes_dismissed_events(initialized_db: Path, sample_stress):
-    """Dismissed events are pruned after retention period."""
-    import time
-
-    from pause_monitor.storage import Event, get_event_by_id, insert_event, prune_old_data
-
-    conn = sqlite3.connect(initialized_db)
-
-    # Insert old dismissed event (60 days ago)
-    old_time = datetime.fromtimestamp(time.time() - 60 * 86400)
-    event = Event(
-        timestamp=old_time,
-        duration=2.5,
-        stress=sample_stress,
-        culprits=["dismissed_process"],
-        event_dir=None,
-        status="dismissed",
-    )
-    event_id = insert_event(conn, event)
-
-    # Prune with 30 day retention
-    samples_deleted, events_deleted = prune_old_data(conn, samples_days=30, events_days=30)
-
-    # Dismissed event SHOULD be pruned
-    assert events_deleted == 1
-    retrieved = get_event_by_id(conn, event_id)
-    conn.close()
-
-    assert retrieved is None
-
-
-def test_prune_removes_reviewed_events(initialized_db: Path, sample_stress):
-    """Reviewed events are pruned after retention period."""
-    import time
-
-    from pause_monitor.storage import Event, get_event_by_id, insert_event, prune_old_data
-
-    conn = sqlite3.connect(initialized_db)
-
-    # Insert old reviewed event (60 days ago)
-    old_time = datetime.fromtimestamp(time.time() - 60 * 86400)
-    event = Event(
-        timestamp=old_time,
-        duration=2.5,
-        stress=sample_stress,
-        culprits=["reviewed_process"],
-        event_dir=None,
-        status="reviewed",
-    )
-    event_id = insert_event(conn, event)
-
-    # Prune with 30 day retention
-    samples_deleted, events_deleted = prune_old_data(conn, samples_days=30, events_days=30)
-
-    # Reviewed event SHOULD be pruned
-    assert events_deleted == 1
-    retrieved = get_event_by_id(conn, event_id)
-    conn.close()
-
-    assert retrieved is None
-
-
-def test_prune_mixed_status_events(initialized_db: Path, sample_stress):
-    """Pruning only removes reviewed/dismissed events, keeps unreviewed/pinned."""
-    import time
-
-    from pause_monitor.storage import Event, get_event_by_id, insert_event, prune_old_data
-
-    conn = sqlite3.connect(initialized_db)
-
-    old_time = datetime.fromtimestamp(time.time() - 60 * 86400)
-
-    # Insert one event of each status (all old)
-    events = {}
-    for status in ["unreviewed", "reviewed", "pinned", "dismissed"]:
-        event = Event(
-            timestamp=old_time,
-            duration=2.5,
-            stress=sample_stress,
-            culprits=[f"{status}_process"],
-            event_dir=None,
-            status=status,
-        )
-        events[status] = insert_event(conn, event)
-
-    # Prune with 30 day retention
-    samples_deleted, events_deleted = prune_old_data(conn, samples_days=30, events_days=30)
-
-    # Only reviewed and dismissed should be pruned (2 events)
-    assert events_deleted == 2
-
-    # Unreviewed and pinned should still exist
-    assert get_event_by_id(conn, events["unreviewed"]) is not None
-    assert get_event_by_id(conn, events["pinned"]) is not None
-
-    # Reviewed and dismissed should be gone
-    assert get_event_by_id(conn, events["reviewed"]) is None
-    assert get_event_by_id(conn, events["dismissed"]) is None
-
-    conn.close()
-
-
-def test_prune_recent_dismissed_not_pruned(initialized_db: Path, sample_stress):
-    """Recent dismissed events are NOT pruned even though they are prunable status."""
-    import time
-
-    from pause_monitor.storage import Event, get_event_by_id, insert_event, prune_old_data
-
-    conn = sqlite3.connect(initialized_db)
-
-    # Insert recent dismissed event (10 days ago - within 30 day retention)
-    recent_time = datetime.fromtimestamp(time.time() - 10 * 86400)
-    event = Event(
-        timestamp=recent_time,
-        duration=2.5,
-        stress=sample_stress,
-        culprits=["dismissed_process"],
-        event_dir=None,
-        status="dismissed",
-    )
-    event_id = insert_event(conn, event)
-
-    # Prune with 30 day retention
-    samples_deleted, events_deleted = prune_old_data(conn, samples_days=30, events_days=30)
-
-    # Recent dismissed event should NOT be pruned (within retention)
-    assert events_deleted == 0
-    retrieved = get_event_by_id(conn, event_id)
-    conn.close()
-
-    assert retrieved is not None
-    assert retrieved.status == "dismissed"
 
 
 def test_insert_sample_with_gpu_and_wakeups(initialized_db: Path):
@@ -982,128 +619,40 @@ def test_insert_sample_with_gpu_and_wakeups(initialized_db: Path):
     assert samples[0].stress.total == 10 + 5 + 0 + 0 + 0 + 15 + 12 + 0
 
 
-def test_insert_event_with_gpu_and_wakeups(initialized_db: Path):
-    """Events store and retrieve GPU and wakeups stress correctly."""
-    from pause_monitor.storage import Event, get_event_by_id, insert_event
-
-    stress = StressBreakdown(load=20, memory=10, thermal=5, latency=0, io=0, gpu=25, wakeups=8)
-    event = Event(
-        timestamp=datetime.now(),
-        duration=3.5,
-        stress=stress,
-        culprits=["gpu_process"],
-        event_dir=None,
-    )
+def test_event_stores_peak_stress(initialized_db: Path):
+    """Events store and retrieve peak_stress correctly."""
+    from pause_monitor.storage import get_event_by_id
 
     conn = sqlite3.connect(initialized_db)
-    event_id = insert_event(conn, event)
+    event_id = create_test_event(conn, peak_stress=68, peak_tier=3)
     retrieved = get_event_by_id(conn, event_id)
     conn.close()
 
     assert retrieved is not None
-    assert retrieved.stress.gpu == 25
-    assert retrieved.stress.wakeups == 8
+    assert retrieved.peak_stress == 68
+    assert retrieved.peak_tier == 3
 
 
-def test_migrate_add_stress_columns(tmp_path: Path):
-    """Migration adds stress_gpu and stress_wakeups columns to existing tables."""
-    from pause_monitor.storage import migrate_add_stress_columns
-
-    db_path = tmp_path / "legacy.db"
-
-    # Create a v1 schema without stress_gpu/stress_wakeups columns
-    conn = sqlite3.connect(db_path)
-    conn.execute("""
-        CREATE TABLE samples (
-            id INTEGER PRIMARY KEY,
-            timestamp REAL,
-            interval REAL,
-            stress_total INTEGER,
-            stress_load INTEGER,
-            stress_memory INTEGER,
-            stress_thermal INTEGER,
-            stress_latency INTEGER,
-            stress_io INTEGER
-        )
-    """)
-    conn.execute("""
-        CREATE TABLE events (
-            id INTEGER PRIMARY KEY,
-            timestamp REAL,
-            duration REAL,
-            stress_total INTEGER,
-            stress_load INTEGER,
-            stress_memory INTEGER,
-            stress_thermal INTEGER,
-            stress_latency INTEGER,
-            stress_io INTEGER,
-            culprits TEXT
-        )
-    """)
-    conn.commit()
-
-    # Run migration
-    migrate_add_stress_columns(conn)
-
-    # Verify columns were added
-    cursor = conn.execute("PRAGMA table_info(samples)")
-    sample_columns = {row[1] for row in cursor.fetchall()}
-    assert "stress_gpu" in sample_columns
-    assert "stress_wakeups" in sample_columns
-
-    cursor = conn.execute("PRAGMA table_info(events)")
-    event_columns = {row[1] for row in cursor.fetchall()}
-    assert "stress_gpu" in event_columns
-    assert "stress_wakeups" in event_columns
-
-    conn.close()
-
-
-def test_migrate_add_stress_columns_idempotent(tmp_path: Path):
-    """Running migration multiple times is safe."""
-    from pause_monitor.storage import migrate_add_stress_columns
-
-    db_path = tmp_path / "test.db"
-    init_database(db_path)
-
-    conn = sqlite3.connect(db_path)
-    # Run migration twice - should not raise
-    migrate_add_stress_columns(conn)
-    migrate_add_stress_columns(conn)
-    conn.close()
-
-
-def test_event_has_peak_stress(tmp_path):
-    """Event should support peak_stress field."""
-    from pause_monitor.storage import Event, get_events, insert_event
+def test_get_events_returns_peak_stress(tmp_path):
+    """get_events includes peak_stress and peak_tier in results."""
+    from pause_monitor.storage import get_event_by_id, get_events
 
     db_path = tmp_path / "test.db"
     init_database(db_path)
     conn = sqlite3.connect(db_path)
 
-    event = Event(
-        timestamp=datetime.now(),
-        duration=60.0,
-        stress=StressBreakdown(
-            load=10, memory=5, thermal=0, latency=2, io=0, gpu=5, wakeups=1, pageins=0
-        ),
-        culprits=["test_app"],
-        event_dir=None,
-        peak_stress=35,
-    )
-
-    event_id = insert_event(conn, event)
+    event_id = create_test_event(conn, peak_stress=35, peak_tier=2)
     assert event_id > 0
 
     events = get_events(conn, limit=1)
     assert len(events) == 1
     assert events[0].peak_stress == 35
+    assert events[0].peak_tier == 2
 
     # Also verify get_event_by_id reads peak_stress
-    from pause_monitor.storage import get_event_by_id
-
     event_by_id = get_event_by_id(conn, event_id)
     assert event_by_id is not None
     assert event_by_id.peak_stress == 35
+    assert event_by_id.peak_tier == 2
 
     conn.close()

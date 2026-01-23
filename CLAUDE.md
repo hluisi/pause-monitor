@@ -46,26 +46,6 @@ uv run pause-monitor install   # Set up launchd service
 
 These rules exist because agents repeatedly made these mistakes. Follow them exactly.
 
-### Code Review Findings Are Not Optional
-
-> "No critical issues" ≠ "review passed."
-
-| Level | Meaning | Action Required |
-| ------- | --------- | ----------------- |
-| **Critical** | Blockers — won't work or dangerous | Must fix before merge |
-| **Important** | Real problems that will bite later | Must fix OR get user approval to defer |
-| **Minor** | Improvements for maintainability | Fix if quick, OR add to TodoWrite, OR explicitly decline with rationale |
-
-1. **Process ALL severity levels.** Don't stop at "no critical issues."
-2. **Important findings require resolution** — fix now, or ask user to defer.
-3. **Never silently ignore findings.** Every item needs visible response: fixed, deferred with tracking, or declined with rationale.
-
-| Red Flag | Do Instead |
-| -------- | ---------- |
-| "No critical issues" → move on | Read full review for Important/Minor |
-| "Review passed" with Important items | Important items = review needs work |
-| Not mentioning Minor findings | Acknowledge each, even if declining |
-
 ### Never Write Stubs
 
 **Stubs are bugs.** Not technical debt. Not placeholders. Bugs.
@@ -109,14 +89,15 @@ Before claiming any task complete, run:
 uv run ruff check . && uv run ruff format .
 ```
 
-| Excuse | Reality |
-| ------ | ------- |
-| "I only touched X, those errors were there before" | You touched the codebase. Clean up what you see. |
-| "It's just a warning" | Warnings become errors. Fix them now. |
-| "The tests pass" | Tests passing ≠ code complete. Lint must pass too. |
-| "I'll fix it in the next PR" | No. Fix it now or don't claim done. |
+**If you have ANY new linter errors, the task is not complete.**
 
-**If you introduce ANY new linter errors, the task is not complete.**
+### No "Not My Problem" Dismissals
+
+**If you see it, you own it.**
+
+The codebase does not have compartments. When you encounter a warning, deprecation, or issue during your work — regardless of whether "your changes" caused it — you are responsible for addressing it.
+
+**You are not a contractor scoping work. You are a maintainer.** Maintainers don't walk past problems because they weren't in the ticket.
 
 ## Project Knowledge
 

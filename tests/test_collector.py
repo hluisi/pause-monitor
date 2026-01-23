@@ -162,6 +162,8 @@ def test_powermetrics_result_matches_data_dictionary():
         pageins_per_s=0.0,  # Critical for pause detection
         top_cpu_processes=[{"name": "test", "pid": 123, "cpu_ms_per_s": 100.0}],
         top_pagein_processes=[],  # No swap activity in this test
+        top_wakeup_processes=[],
+        top_diskio_processes=[],
     )
     assert result.elapsed_ns == 100_000_000
     assert result.wakeups_per_s == 150.0

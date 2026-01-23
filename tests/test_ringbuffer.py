@@ -22,6 +22,8 @@ def make_test_metrics(**kwargs) -> PowermetricsResult:
         "pageins_per_s": 0.0,
         "top_cpu_processes": [],
         "top_pagein_processes": [],
+        "top_wakeup_processes": [],
+        "top_diskio_processes": [],
     }
     defaults.update(kwargs)
     return PowermetricsResult(**defaults)

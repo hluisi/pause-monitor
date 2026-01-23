@@ -13,21 +13,34 @@ from pause_monitor.stress import StressBreakdown
 
 log = structlog.get_logger()
 
-SCHEMA_VERSION = 5  # Added stress_pageins column
+SCHEMA_VERSION = 6  # Redesigned events + event_samples for tier-based saving
 
 # Valid event status values
 VALID_EVENT_STATUSES = frozenset({"unreviewed", "reviewed", "pinned", "dismissed"})
 
 SCHEMA = """
--- Periodic samples (one row per sample interval)
-CREATE TABLE IF NOT EXISTS samples (
+-- Escalation events (one row per tier 1 → elevated → tier 1 episode)
+CREATE TABLE IF NOT EXISTS events (
     id              INTEGER PRIMARY KEY,
+    start_timestamp REAL NOT NULL,
+    end_timestamp   REAL,              -- NULL if ongoing
+    peak_stress     INTEGER,
+    peak_tier       INTEGER,           -- Highest tier reached (2 or 3)
+    status          TEXT DEFAULT 'unreviewed',
+    notes           TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_events_start ON events(start_timestamp);
+
+-- Event samples (captured during escalation events)
+-- Tier 2: peaks only, Tier 3: every sample at 10Hz
+CREATE TABLE IF NOT EXISTS event_samples (
+    id              INTEGER PRIMARY KEY,
+    event_id        INTEGER NOT NULL REFERENCES events(id),
     timestamp       REAL NOT NULL,
-    interval        REAL NOT NULL,
-    -- System metrics (not from powermetrics)
-    load_avg        REAL,
-    mem_pressure    INTEGER,
-    -- From PowermetricsResult
+    tier            INTEGER NOT NULL,  -- 2=peak save, 3=continuous save
+    -- Metrics from PowermetricsResult
+    elapsed_ns      INTEGER,
     throttled       INTEGER,
     cpu_power       REAL,
     gpu_pct         REAL,
@@ -45,12 +58,50 @@ CREATE TABLE IF NOT EXISTS samples (
     stress_io       INTEGER,
     stress_gpu      INTEGER,
     stress_wakeups  INTEGER,
+    stress_pageins  INTEGER,
+    -- Top 5 processes (JSON arrays)
+    top_cpu_procs       TEXT,
+    top_pagein_procs    TEXT,
+    top_wakeup_procs    TEXT,
+    top_diskio_procs    TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_event_samples_event ON event_samples(event_id);
+CREATE INDEX IF NOT EXISTS idx_event_samples_timestamp ON event_samples(timestamp);
+
+-- Daemon state (persisted across restarts)
+CREATE TABLE IF NOT EXISTS daemon_state (
+    key             TEXT PRIMARY KEY,
+    value           TEXT NOT NULL,
+    updated_at      REAL NOT NULL
+);
+
+-- Legacy tables kept for backward compatibility (not used by tier-based saving)
+CREATE TABLE IF NOT EXISTS samples (
+    id              INTEGER PRIMARY KEY,
+    timestamp       REAL NOT NULL,
+    interval        REAL NOT NULL,
+    load_avg        REAL,
+    mem_pressure    INTEGER,
+    throttled       INTEGER,
+    cpu_power       REAL,
+    gpu_pct         REAL,
+    gpu_power       REAL,
+    io_read_per_s   REAL,
+    io_write_per_s  REAL,
+    wakeups_per_s   REAL,
+    pageins_per_s   REAL,
+    stress_total    INTEGER,
+    stress_load     INTEGER,
+    stress_memory   INTEGER,
+    stress_thermal  INTEGER,
+    stress_latency  INTEGER,
+    stress_io       INTEGER,
+    stress_gpu      INTEGER,
+    stress_wakeups  INTEGER,
     stress_pageins  INTEGER
 );
 
-CREATE INDEX IF NOT EXISTS idx_samples_timestamp ON samples(timestamp);
-
--- Per-process snapshots (linked to samples)
 CREATE TABLE IF NOT EXISTS process_samples (
     id              INTEGER PRIMARY KEY,
     sample_id       INTEGER NOT NULL REFERENCES samples(id),
@@ -62,38 +113,6 @@ CREATE TABLE IF NOT EXISTS process_samples (
     io_write        INTEGER,
     energy_impact   REAL,
     is_suspect      INTEGER DEFAULT 0
-);
-
-CREATE INDEX IF NOT EXISTS idx_process_samples_sample_id ON process_samples(sample_id);
-
--- Pause events
-CREATE TABLE IF NOT EXISTS events (
-    id              INTEGER PRIMARY KEY,
-    timestamp       REAL NOT NULL,
-    duration        REAL NOT NULL,
-    stress_total    INTEGER,
-    stress_load     INTEGER,
-    stress_memory   INTEGER,
-    stress_thermal  INTEGER,
-    stress_latency  INTEGER,
-    stress_io       INTEGER,
-    stress_gpu      INTEGER,
-    stress_wakeups  INTEGER,
-    stress_pageins  INTEGER,
-    culprits        TEXT,
-    event_dir       TEXT,
-    status          TEXT DEFAULT 'unreviewed',
-    notes           TEXT,
-    peak_stress     INTEGER
-);
-
-CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events(timestamp);
-
--- Daemon state (persisted across restarts)
-CREATE TABLE IF NOT EXISTS daemon_state (
-    key             TEXT PRIMARY KEY,
-    value           TEXT NOT NULL,
-    updated_at      REAL NOT NULL
 );
 """
 
@@ -136,54 +155,6 @@ def get_schema_version(conn: sqlite3.Connection) -> int:
         return int(row[0]) if row else 0
     except sqlite3.OperationalError:
         return 0
-
-
-def migrate_add_event_status(conn: sqlite3.Connection) -> None:
-    """Add status and notes columns to events table if missing.
-
-    Migration sets existing events to 'reviewed' (not 'unreviewed')
-    since they are legacy events that existed before status tracking.
-    """
-    cursor = conn.execute("PRAGMA table_info(events)")
-    columns = {row[1] for row in cursor.fetchall()}
-
-    if "status" not in columns:
-        conn.execute("ALTER TABLE events ADD COLUMN status TEXT DEFAULT 'reviewed'")
-        log.info("migration_applied", migration="add_event_status")
-    if "notes" not in columns:
-        conn.execute("ALTER TABLE events ADD COLUMN notes TEXT")
-        log.info("migration_applied", migration="add_event_notes")
-    conn.commit()
-
-
-def migrate_add_stress_columns(conn: sqlite3.Connection) -> None:
-    """Add stress_gpu and stress_wakeups columns to samples and events tables.
-
-    Migration sets existing rows to 0 (neutral stress contribution).
-    """
-    # Migrate samples table
-    cursor = conn.execute("PRAGMA table_info(samples)")
-    columns = {row[1] for row in cursor.fetchall()}
-
-    if "stress_gpu" not in columns:
-        conn.execute("ALTER TABLE samples ADD COLUMN stress_gpu INTEGER DEFAULT 0")
-        log.info("migration_applied", migration="add_samples_stress_gpu")
-    if "stress_wakeups" not in columns:
-        conn.execute("ALTER TABLE samples ADD COLUMN stress_wakeups INTEGER DEFAULT 0")
-        log.info("migration_applied", migration="add_samples_stress_wakeups")
-
-    # Migrate events table
-    cursor = conn.execute("PRAGMA table_info(events)")
-    columns = {row[1] for row in cursor.fetchall()}
-
-    if "stress_gpu" not in columns:
-        conn.execute("ALTER TABLE events ADD COLUMN stress_gpu INTEGER DEFAULT 0")
-        log.info("migration_applied", migration="add_events_stress_gpu")
-    if "stress_wakeups" not in columns:
-        conn.execute("ALTER TABLE events ADD COLUMN stress_wakeups INTEGER DEFAULT 0")
-        log.info("migration_applied", migration="add_events_stress_wakeups")
-
-    conn.commit()
 
 
 @dataclass
@@ -296,46 +267,115 @@ def get_recent_samples(conn: sqlite3.Connection, limit: int = 100) -> list[Sampl
 
 @dataclass
 class Event:
-    """Pause event record."""
+    """Escalation event (tier 1 → elevated → tier 1 episode)."""
 
-    timestamp: datetime
-    duration: float
-    stress: StressBreakdown
-    culprits: list[str]
-    event_dir: str | None
-    status: str = "unreviewed"  # unreviewed, reviewed, pinned, dismissed
+    start_timestamp: datetime
+    end_timestamp: datetime | None = None  # NULL if ongoing
+    peak_stress: int | None = None
+    peak_tier: int | None = None  # Highest tier reached (2 or 3)
+    status: str = "unreviewed"
     notes: str | None = None
     id: int | None = None
-    peak_stress: int | None = None  # Peak stress during this event
 
 
-def insert_event(conn: sqlite3.Connection, event: Event) -> int:
-    """Insert an event and return its ID."""
+@dataclass
+class EventSample:
+    """Sample captured during an escalation event."""
+
+    event_id: int
+    timestamp: datetime
+    tier: int  # 2=peak save, 3=continuous save
+
+    # Metrics from PowermetricsResult
+    elapsed_ns: int
+    throttled: bool
+    cpu_power: float | None
+    gpu_pct: float | None
+    gpu_power: float | None
+    io_read_per_s: float
+    io_write_per_s: float
+    wakeups_per_s: float
+    pageins_per_s: float
+
+    # Stress breakdown
+    stress: StressBreakdown
+
+    # Top 5 processes (already parsed from JSON)
+    top_cpu_procs: list[dict]
+    top_pagein_procs: list[dict]
+    top_wakeup_procs: list[dict]
+    top_diskio_procs: list[dict]
+
+    id: int | None = None
+
+
+def create_event(conn: sqlite3.Connection, start_timestamp: datetime) -> int:
+    """Create a new event and return its ID."""
+    cursor = conn.execute(
+        "INSERT INTO events (start_timestamp) VALUES (?)",
+        (start_timestamp.timestamp(),),
+    )
+    conn.commit()
+    return cursor.lastrowid
+
+
+def finalize_event(
+    conn: sqlite3.Connection,
+    event_id: int,
+    end_timestamp: datetime,
+    peak_stress: int,
+    peak_tier: int,
+) -> None:
+    """Finalize an event when returning to tier 1."""
+    conn.execute(
+        """
+        UPDATE events SET end_timestamp = ?, peak_stress = ?, peak_tier = ?
+        WHERE id = ?
+        """,
+        (end_timestamp.timestamp(), peak_stress, peak_tier, event_id),
+    )
+    conn.commit()
+
+
+def insert_event_sample(conn: sqlite3.Connection, sample: EventSample) -> int:
+    """Insert an event sample and return its ID."""
     cursor = conn.execute(
         """
-        INSERT INTO events (
-            timestamp, duration, stress_total, stress_load, stress_memory,
-            stress_thermal, stress_latency, stress_io, stress_gpu, stress_wakeups,
-            stress_pageins, culprits, event_dir, status, notes, peak_stress
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO event_samples (
+            event_id, timestamp, tier,
+            elapsed_ns, throttled, cpu_power, gpu_pct, gpu_power,
+            io_read_per_s, io_write_per_s, wakeups_per_s, pageins_per_s,
+            stress_total, stress_load, stress_memory, stress_thermal,
+            stress_latency, stress_io, stress_gpu, stress_wakeups, stress_pageins,
+            top_cpu_procs, top_pagein_procs, top_wakeup_procs, top_diskio_procs
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
-            event.timestamp.timestamp(),
-            event.duration,
-            event.stress.total,
-            event.stress.load,
-            event.stress.memory,
-            event.stress.thermal,
-            event.stress.latency,
-            event.stress.io,
-            event.stress.gpu,
-            event.stress.wakeups,
-            event.stress.pageins,
-            json.dumps(event.culprits),
-            event.event_dir,
-            event.status,
-            event.notes,
-            event.peak_stress,
+            sample.event_id,
+            sample.timestamp.timestamp(),
+            sample.tier,
+            sample.elapsed_ns,
+            int(sample.throttled),
+            sample.cpu_power,
+            sample.gpu_pct,
+            sample.gpu_power,
+            sample.io_read_per_s,
+            sample.io_write_per_s,
+            sample.wakeups_per_s,
+            sample.pageins_per_s,
+            sample.stress.total,
+            sample.stress.load,
+            sample.stress.memory,
+            sample.stress.thermal,
+            sample.stress.latency,
+            sample.stress.io,
+            sample.stress.gpu,
+            sample.stress.wakeups,
+            sample.stress.pageins,
+            json.dumps(sample.top_cpu_procs),
+            json.dumps(sample.top_pagein_procs),
+            json.dumps(sample.top_wakeup_procs),
+            json.dumps(sample.top_diskio_procs),
         ),
     )
     conn.commit()
@@ -351,19 +391,17 @@ def get_events(
 ) -> list[Event]:
     """Get events, optionally filtered by time range and/or status."""
     query = """
-        SELECT id, timestamp, duration, stress_total, stress_load, stress_memory,
-               stress_thermal, stress_latency, stress_io, stress_gpu, stress_wakeups,
-               stress_pageins, culprits, event_dir, status, notes, peak_stress
+        SELECT id, start_timestamp, end_timestamp, peak_stress, peak_tier, status, notes
         FROM events
     """
     params: list = []
     conditions = []
 
     if start:
-        conditions.append("timestamp >= ?")
+        conditions.append("start_timestamp >= ?")
         params.append(start.timestamp())
     if end:
-        conditions.append("timestamp <= ?")
+        conditions.append("start_timestamp <= ?")
         params.append(end.timestamp())
     if status:
         conditions.append("status = ?")
@@ -372,7 +410,7 @@ def get_events(
     if conditions:
         query += " WHERE " + " AND ".join(conditions)
 
-    query += " ORDER BY timestamp DESC LIMIT ?"
+    query += " ORDER BY start_timestamp DESC LIMIT ?"
     params.append(limit)
 
     rows = conn.execute(query, params).fetchall()
@@ -380,23 +418,12 @@ def get_events(
     return [
         Event(
             id=row[0],
-            timestamp=datetime.fromtimestamp(row[1]),
-            duration=row[2],
-            stress=StressBreakdown(
-                load=row[4] or 0,
-                memory=row[5] or 0,
-                thermal=row[6] or 0,
-                latency=row[7] or 0,
-                io=row[8] or 0,
-                gpu=row[9] or 0,
-                wakeups=row[10] or 0,
-                pageins=row[11] or 0,
-            ),
-            culprits=json.loads(row[12]) if row[12] else [],
-            event_dir=row[13],
-            status=row[14] or "unreviewed",
-            notes=row[15],
-            peak_stress=row[16],
+            start_timestamp=datetime.fromtimestamp(row[1]),
+            end_timestamp=datetime.fromtimestamp(row[2]) if row[2] else None,
+            peak_stress=row[3],
+            peak_tier=row[4],
+            status=row[5] or "unreviewed",
+            notes=row[6],
         )
         for row in rows
     ]
@@ -406,9 +433,7 @@ def get_event_by_id(conn: sqlite3.Connection, event_id: int) -> Event | None:
     """Get a single event by ID."""
     row = conn.execute(
         """
-        SELECT id, timestamp, duration, stress_total, stress_load, stress_memory,
-               stress_thermal, stress_latency, stress_io, stress_gpu, stress_wakeups,
-               stress_pageins, culprits, event_dir, status, notes, peak_stress
+        SELECT id, start_timestamp, end_timestamp, peak_stress, peak_tier, status, notes
         FROM events WHERE id = ?
         """,
         (event_id,),
@@ -419,24 +444,62 @@ def get_event_by_id(conn: sqlite3.Connection, event_id: int) -> Event | None:
 
     return Event(
         id=row[0],
-        timestamp=datetime.fromtimestamp(row[1]),
-        duration=row[2],
-        stress=StressBreakdown(
-            load=row[4] or 0,
-            memory=row[5] or 0,
-            thermal=row[6] or 0,
-            latency=row[7] or 0,
-            io=row[8] or 0,
-            gpu=row[9] or 0,
-            wakeups=row[10] or 0,
-            pageins=row[11] or 0,
-        ),
-        culprits=json.loads(row[12]) if row[12] else [],
-        event_dir=row[13],
-        status=row[14] or "unreviewed",
-        notes=row[15],
-        peak_stress=row[16],
+        start_timestamp=datetime.fromtimestamp(row[1]),
+        end_timestamp=datetime.fromtimestamp(row[2]) if row[2] else None,
+        peak_stress=row[3],
+        peak_tier=row[4],
+        status=row[5] or "unreviewed",
+        notes=row[6],
     )
+
+
+def get_event_samples(conn: sqlite3.Connection, event_id: int) -> list[EventSample]:
+    """Get all samples for an event."""
+    rows = conn.execute(
+        """
+        SELECT id, event_id, timestamp, tier,
+               elapsed_ns, throttled, cpu_power, gpu_pct, gpu_power,
+               io_read_per_s, io_write_per_s, wakeups_per_s, pageins_per_s,
+               stress_total, stress_load, stress_memory, stress_thermal,
+               stress_latency, stress_io, stress_gpu, stress_wakeups, stress_pageins,
+               top_cpu_procs, top_pagein_procs, top_wakeup_procs, top_diskio_procs
+        FROM event_samples WHERE event_id = ? ORDER BY timestamp
+        """,
+        (event_id,),
+    ).fetchall()
+
+    return [
+        EventSample(
+            id=row[0],
+            event_id=row[1],
+            timestamp=datetime.fromtimestamp(row[2]),
+            tier=row[3],
+            elapsed_ns=row[4] or 0,
+            throttled=bool(row[5]),
+            cpu_power=row[6],
+            gpu_pct=row[7],
+            gpu_power=row[8],
+            io_read_per_s=row[9] or 0.0,
+            io_write_per_s=row[10] or 0.0,
+            wakeups_per_s=row[11] or 0.0,
+            pageins_per_s=row[12] or 0.0,
+            stress=StressBreakdown(
+                load=row[14] or 0,
+                memory=row[15] or 0,
+                thermal=row[16] or 0,
+                latency=row[17] or 0,
+                io=row[18] or 0,
+                gpu=row[19] or 0,
+                wakeups=row[20] or 0,
+                pageins=row[21] or 0,
+            ),
+            top_cpu_procs=json.loads(row[22]) if row[22] else [],
+            top_pagein_procs=json.loads(row[23]) if row[23] else [],
+            top_wakeup_procs=json.loads(row[24]) if row[24] else [],
+            top_diskio_procs=json.loads(row[25]) if row[25] else [],
+        )
+        for row in rows
+    ]
 
 
 def update_event_status(
@@ -475,64 +538,52 @@ def update_event_status(
 
 def prune_old_data(
     conn: sqlite3.Connection,
-    samples_days: int = 30,
     events_days: int = 90,
-) -> tuple[int, int]:
-    """Delete old samples and events, respecting event lifecycle status.
+) -> int:
+    """Delete old events and their samples, respecting event lifecycle status.
 
     Only prunes events with status 'reviewed' or 'dismissed'.
     Never prunes 'unreviewed' or 'pinned' events regardless of age.
 
     Args:
         conn: Database connection
-        samples_days: Delete samples older than this
         events_days: Delete events older than this (only reviewed/dismissed)
 
     Returns:
-        Tuple of (samples_deleted, events_deleted)
+        Number of events deleted
 
     Raises:
         ValueError: If retention days < 1
     """
-    if samples_days < 1 or events_days < 1:
+    if events_days < 1:
         raise ValueError("Retention days must be >= 1")
 
-    cutoff_samples = time.time() - (samples_days * 86400)
     cutoff_events = time.time() - (events_days * 86400)
 
-    # Delete old process samples first (foreign key)
-    conn.execute(
+    # Get event IDs to delete
+    event_ids = conn.execute(
         """
-        DELETE FROM process_samples
-        WHERE sample_id IN (SELECT id FROM samples WHERE timestamp < ?)
-        """,
-        (cutoff_samples,),
-    )
-
-    # Delete old samples
-    cursor = conn.execute(
-        "DELETE FROM samples WHERE timestamp < ?",
-        (cutoff_samples,),
-    )
-    samples_deleted = cursor.rowcount
-
-    # Delete old events - only if status is 'reviewed' or 'dismissed'
-    # Never prune 'unreviewed' (needs attention) or 'pinned' (kept forever)
-    cursor = conn.execute(
-        """
-        DELETE FROM events
-        WHERE timestamp < ? AND status IN ('reviewed', 'dismissed')
+        SELECT id FROM events
+        WHERE start_timestamp < ? AND status IN ('reviewed', 'dismissed')
         """,
         (cutoff_events,),
-    )
+    ).fetchall()
+
+    if not event_ids:
+        return 0
+
+    ids = [row[0] for row in event_ids]
+    placeholders = ",".join("?" * len(ids))
+
+    # Delete event samples first (foreign key)
+    conn.execute(f"DELETE FROM event_samples WHERE event_id IN ({placeholders})", ids)
+
+    # Delete events
+    cursor = conn.execute(f"DELETE FROM events WHERE id IN ({placeholders})", ids)
     events_deleted = cursor.rowcount
 
     conn.commit()
 
-    log.info(
-        "prune_complete",
-        samples_deleted=samples_deleted,
-        events_deleted=events_deleted,
-    )
+    log.info("prune_complete", events_deleted=events_deleted)
 
-    return samples_deleted, events_deleted
+    return events_deleted

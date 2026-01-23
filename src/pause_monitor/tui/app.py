@@ -7,7 +7,7 @@ from typing import Any
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Container, Vertical, VerticalScroll
+from textual.containers import Container, Horizontal, Vertical, VerticalScroll
 from textual.css.query import NoMatches
 from textual.screen import Screen
 from textual.widgets import DataTable, Footer, Header, Label, Static
@@ -35,15 +35,26 @@ class StressGauge(Static):
     StressGauge.critical {
         border: solid red;
     }
+
+    StressGauge.disconnected {
+        border: solid $error;
+    }
     """
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self._stress = 0
+        self._connected = False
+
+    def on_mount(self) -> None:
+        """Show initial disconnected state."""
+        self.set_disconnected()
 
     def update_stress(self, stress: int) -> None:
         """Update the displayed stress value."""
         self._stress = stress
+        self._connected = True
+        self.remove_class("disconnected")
         self.update(f"Stress: {stress:3d}/100 {'█' * (stress // 5)}{'░' * (20 - stress // 5)}")
 
         # Update styling based on level
@@ -53,15 +64,27 @@ class StressGauge(Static):
         elif stress >= 30:
             self.add_class("elevated")
 
+    def set_disconnected(self) -> None:
+        """Show disconnected state."""
+        self._connected = False
+        self.remove_class("elevated", "critical")
+        self.add_class("disconnected")
+        self.update("Stress: ---/100  (not connected)")
+
 
 class MetricsPanel(Static):
     """Panel showing current system metrics."""
 
     DEFAULT_CSS = """
     MetricsPanel {
-        height: 8;
+        height: auto;
+        min-height: 6;
         border: solid $primary;
         padding: 1;
+    }
+
+    MetricsPanel.disconnected {
+        border: solid $error;
     }
     """
 
@@ -69,9 +92,14 @@ class MetricsPanel(Static):
         super().__init__(**kwargs)
         self._metrics: dict[str, Any] = {}
 
+    def on_mount(self) -> None:
+        """Show initial disconnected state."""
+        self.set_disconnected()
+
     def update_metrics(self, metrics: dict[str, Any]) -> None:
         """Update displayed metrics."""
         self._metrics = metrics
+        self.remove_class("disconnected")
         lines = [
             f"Power: {metrics.get('cpu_power', 0):.1f} W",
             f"Load: {metrics.get('load_avg', 0):.2f}",
@@ -81,13 +109,130 @@ class MetricsPanel(Static):
         ]
         self.update("\n".join(lines))
 
+    def set_disconnected(self) -> None:
+        """Show disconnected state."""
+        self.add_class("disconnected")
+        self.update("(not connected)\n\nStart daemon with:\nsudo pause-monitor daemon")
+
+
+class ProcessesPanel(Static):
+    """Panel showing top CPU and pagein consuming processes."""
+
+    DEFAULT_CSS = """
+    ProcessesPanel {
+        height: 100%;
+        border: solid $primary;
+        padding: 0;
+    }
+
+    ProcessesPanel.disconnected {
+        border: solid $error;
+    }
+
+    ProcessesPanel Horizontal {
+        height: 100%;
+    }
+
+    ProcessesPanel DataTable {
+        width: 1fr;
+        height: 100%;
+    }
+    """
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self._cpu_table: DataTable | None = None
+        self._pagein_table: DataTable | None = None
+        # Cache processes to prevent flickering (name -> (last_seen, value))
+        self._cpu_cache: dict[str, tuple[float, float]] = {}
+        self._pagein_cache: dict[str, tuple[float, float]] = {}
+        self._cache_ttl = 3.0  # Seconds to keep processes visible
+
+    def compose(self) -> ComposeResult:
+        """Create side-by-side process tables."""
+        with Horizontal():
+            yield DataTable(id="cpu-processes")
+            yield DataTable(id="pagein-processes")
+
+    def on_mount(self) -> None:
+        """Set up tables with columns."""
+        self._cpu_table = self.query_one("#cpu-processes", DataTable)
+        self._pagein_table = self.query_one("#pagein-processes", DataTable)
+
+        # Configure CPU table
+        self._cpu_table.add_columns("Top CPU", "ms/s")
+        self._cpu_table.show_header = True
+        self._cpu_table.cursor_type = "none"
+
+        # Configure Pagein table
+        self._pagein_table.add_columns("Top Pageins", "/s")
+        self._pagein_table.show_header = True
+        self._pagein_table.cursor_type = "none"
+
+        self.set_disconnected()
+
+    def update_processes(
+        self,
+        cpu_processes: list[dict],
+        pagein_processes: list[dict],
+    ) -> None:
+        """Update displayed processes with caching to prevent flickering."""
+        import time
+
+        self.remove_class("disconnected")
+        now = time.monotonic()
+
+        # Update CPU cache with new data
+        for proc in cpu_processes:
+            name = proc.get("name", "?")
+            cpu_ms = proc.get("cpu_ms_per_s", 0)
+            self._cpu_cache[name] = (now, cpu_ms)
+
+        # Update pagein cache with new data
+        for proc in pagein_processes:
+            name = proc.get("name", "?")
+            pageins = proc.get("pageins_per_s", 0)
+            self._pagein_cache[name] = (now, pageins)
+
+        # Expire old entries
+        self._cpu_cache = {k: v for k, v in self._cpu_cache.items() if now - v[0] < self._cache_ttl}
+        self._pagein_cache = {
+            k: v for k, v in self._pagein_cache.items() if now - v[0] < self._cache_ttl
+        }
+
+        # Display top 5 from cache, sorted by value
+        if self._cpu_table:
+            self._cpu_table.clear()
+            sorted_cpu = sorted(self._cpu_cache.items(), key=lambda x: x[1][1], reverse=True)[:5]
+            for name, (_, cpu_ms) in sorted_cpu:
+                self._cpu_table.add_row(name[:20], f"{cpu_ms:.0f}")
+
+        if self._pagein_table:
+            self._pagein_table.clear()
+            sorted_pageins = sorted(
+                self._pagein_cache.items(), key=lambda x: x[1][1], reverse=True
+            )[:5]
+            for name, (_, pageins) in sorted_pageins:
+                self._pagein_table.add_row(name[:20], f"{pageins:.1f}")
+
+    def set_disconnected(self) -> None:
+        """Show disconnected state."""
+        self.add_class("disconnected")
+        if self._cpu_table:
+            self._cpu_table.clear()
+            self._cpu_table.add_row("(not connected)", "---")
+        if self._pagein_table:
+            self._pagein_table.clear()
+            self._pagein_table.add_row("(not connected)", "---")
+
 
 class EventsTable(DataTable):
     """Table showing recent pause events."""
 
     DEFAULT_CSS = """
     EventsTable {
-        height: 10;
+        height: 100%;
+        border: solid $primary;
     }
     """
 
@@ -97,7 +242,6 @@ class EventsTable(DataTable):
         self.add_column("Time", width=20)
         self.add_column("Duration", width=10)
         self.add_column("Stress", width=8)
-        self.add_column("Culprits", width=30)
 
 
 # Status icons for event display
@@ -287,7 +431,6 @@ class EventsScreen(Screen):
         table.add_column("Time", width=20)
         table.add_column("Duration", width=10)
         table.add_column("Stress", width=8)
-        table.add_column("Culprits", width=40)
         self._refresh_events()
 
     def _refresh_events(self) -> None:
@@ -301,17 +444,21 @@ class EventsScreen(Screen):
 
         for event in self._events:
             status_icon = STATUS_ICONS.get(event.status, "?")
-            culprits_str = ", ".join(event.culprits[:3]) if event.culprits else "-"
-            if event.culprits and len(event.culprits) > 3:
-                culprits_str += f" (+{len(event.culprits) - 3})"
+            # Calculate duration from timestamps
+            if event.end_timestamp:
+                duration = (event.end_timestamp - event.start_timestamp).total_seconds()
+                duration_str = f"{duration:.1f}s"
+            else:
+                duration_str = "ongoing"
+            # Use peak_stress instead of stress.total
+            stress_str = str(event.peak_stress) if event.peak_stress else "-"
 
             table.add_row(
                 str(event.id),
                 status_icon,
-                event.timestamp.strftime("%Y-%m-%d %H:%M:%S"),
-                f"{event.duration:.1f}s",
-                str(event.stress.total),
-                culprits_str,
+                event.start_timestamp.strftime("%Y-%m-%d %H:%M:%S"),
+                duration_str,
+                stress_str,
                 key=str(event.id),
             )
 
@@ -385,20 +532,31 @@ class PauseMonitorApp(App):
         grid-gutter: 1;
     }
 
+    /* Row 1: stress gauge spans full width */
     #stress-gauge {
         column-span: 2;
     }
 
+    /* Row 2: metrics (left) + breakdown (right) */
     #metrics {
-        row-span: 1;
+        height: auto;
+        min-height: 6;
     }
 
     #breakdown {
-        row-span: 1;
+        border: solid $primary;
+        padding: 1;
+        height: auto;
+        min-height: 6;
+    }
+
+    /* Row 3: processes (left) + events (right) */
+    #processes {
+        height: 1fr;
     }
 
     #events {
-        column-span: 2;
+        height: 1fr;
     }
     """
 
@@ -450,10 +608,10 @@ class PauseMonitorApp(App):
         # Start async socket connection attempt
         asyncio.create_task(self._try_socket_connect())
 
-        # Start periodic refresh (fallback for database-only mode)
-        self.set_interval(1.0, self._refresh_data)
-        # Load initial data from database
-        self._refresh_data()
+        # Load events from database (events only, not samples)
+        self._refresh_events()
+        # Refresh events periodically (new events may be added by daemon)
+        self.set_interval(5.0, self._refresh_events)
 
     def on_unmount(self) -> None:
         """Cleanup on shutdown."""
@@ -477,15 +635,26 @@ class PauseMonitorApp(App):
             await self._socket_client.connect()
             self._use_socket = True
             self.sub_title = "System Health Monitor (live)"
-            log.info("tui_connected_via_socket")
+            log.info("tui_socket_connected path=%s", self.config.socket_path)
             # Start reading messages
             self._socket_read_task = asyncio.create_task(self._read_socket_loop())
         except FileNotFoundError:
-            # Daemon not running - fallback to database polling
-            self._set_disconnected()
+            self._set_disconnected("socket not found - daemon not running")
             self.notify(
                 "Daemon not running. Start with: sudo pause-monitor daemon",
                 severity="warning",
+            )
+        except PermissionError as e:
+            self._set_disconnected(f"permission denied: {e}")
+            self.notify(
+                f"Socket permission denied: {e}",
+                severity="error",
+            )
+        except Exception as e:
+            self._set_disconnected(f"{type(e).__name__}: {e}")
+            self.notify(
+                f"Socket connection failed: {e}",
+                severity="error",
             )
 
     async def _read_socket_loop(self) -> None:
@@ -494,16 +663,45 @@ class PauseMonitorApp(App):
             while self._use_socket and self._socket_client:
                 data = await self._socket_client.read_message()
                 self._handle_socket_data(data)
-        except ConnectionError:
-            self._set_disconnected()
-            log.warning("tui_daemon_disconnected")
+        except ConnectionError as e:
+            self._set_disconnected(f"connection lost: {e}")
+            self.notify("Lost connection to daemon", severity="warning")
         except asyncio.CancelledError:
             pass  # Normal shutdown
+        except Exception as e:
+            self._set_disconnected(f"{type(e).__name__}: {e}")
+            self.notify(f"Socket error: {e}", severity="error")  # Normal shutdown
 
-    def _set_disconnected(self) -> None:
+    def _set_disconnected(self, error: str | None = None) -> None:
         """Update UI to show disconnected state."""
         self._use_socket = False
-        self.sub_title = "System Health Monitor (daemon not running)"
+        self.sub_title = "System Health Monitor (disconnected)"
+
+        if error:
+            log.warning("tui_socket_disconnected error=%s", error)
+        else:
+            log.warning("tui_socket_disconnected")
+
+        # Update widgets to show disconnected state (may not exist if app not mounted)
+        try:
+            self.query_one("#stress-gauge", StressGauge).set_disconnected()
+        except Exception:
+            pass
+
+        try:
+            self.query_one("#metrics", MetricsPanel).set_disconnected()
+        except Exception:
+            pass
+
+        try:
+            self.query_one("#breakdown", Static).update("(not connected)")
+        except Exception:
+            pass
+
+        try:
+            self.query_one("#processes", ProcessesPanel).set_disconnected()
+        except Exception:
+            pass
 
     def _handle_socket_data(self, data: dict[str, Any]) -> None:
         """Handle real-time data from daemon socket."""
@@ -557,7 +755,7 @@ class PauseMonitorApp(App):
         except Exception:
             log.exception("Failed to update stress breakdown")
 
-        # Update metrics panel if we have metrics data
+        # Update metrics panel and processes panel if we have metrics data
         metrics = data.get("metrics")
         if metrics:
             try:
@@ -565,8 +763,8 @@ class PauseMonitorApp(App):
                 metrics_panel.update_metrics(
                     {
                         "cpu_power": metrics.get("cpu_power", 0),
-                        "load_avg": 0,  # Not in socket data currently
-                        "mem_pressure": 0,  # Not in socket data currently
+                        "load_avg": metrics.get("load_avg", 0),
+                        "mem_pressure": metrics.get("mem_pressure", 0),
                         "pageins_per_s": metrics.get("pageins_per_s", 0),
                         "throttled": metrics.get("throttled", False),
                     }
@@ -576,6 +774,18 @@ class PauseMonitorApp(App):
             except Exception:
                 log.exception("Failed to update metrics panel")
 
+            # Update processes panel
+            try:
+                processes_panel = self.query_one("#processes", ProcessesPanel)
+                processes_panel.update_processes(
+                    cpu_processes=metrics.get("top_cpu_processes", []),
+                    pagein_processes=metrics.get("top_pagein_processes", []),
+                )
+            except NoMatches:
+                pass  # Widget not mounted yet
+            except Exception:
+                log.exception("Failed to update processes panel")
+
     def compose(self) -> ComposeResult:
         """Create the TUI layout."""
         yield Header()
@@ -583,66 +793,45 @@ class PauseMonitorApp(App):
         yield StressGauge(id="stress-gauge")
         yield MetricsPanel(id="metrics")
         yield Static("Stress Breakdown", id="breakdown")
+        yield ProcessesPanel(id="processes")
         yield EventsTable(id="events")
 
         yield Footer()
 
-    def _refresh_data(self) -> None:
-        """Refresh displayed data from database."""
+    def _refresh_events(self) -> None:
+        """Refresh events table from database."""
         if not self._conn:
             return
 
-        from pause_monitor.storage import get_events, get_recent_samples
-
-        samples = get_recent_samples(self._conn, limit=1)
-        if samples:
-            sample = samples[0]
-            # Update stress gauge
-            stress_gauge = self.query_one("#stress-gauge", StressGauge)
-            stress_gauge.update_stress(sample.stress.total)
-
-            # Update metrics panel
-            metrics_panel = self.query_one("#metrics", MetricsPanel)
-            metrics_panel.update_metrics(
-                {
-                    "cpu_power": sample.cpu_power or 0,
-                    "load_avg": sample.load_avg or 0,
-                    "mem_pressure": sample.mem_pressure or 0,
-                    "pageins_per_s": sample.pageins_per_s or 0,
-                    "throttled": sample.throttled or False,
-                }
-            )
-
-            # Update stress breakdown (8 factors including pageins)
-            breakdown = self.query_one("#breakdown", Static)
-            breakdown.update(
-                f"Load: {sample.stress.load:3d}  Memory: {sample.stress.memory:3d}  "
-                f"GPU: {sample.stress.gpu:3d}\n"
-                f"Thermal: {sample.stress.thermal:3d}  Latency: {sample.stress.latency:3d}  "
-                f"Wakeups: {sample.stress.wakeups:3d}\n"
-                f"I/O: {sample.stress.io:3d}  Pageins: {sample.stress.pageins:3d}"
-            )
+        from pause_monitor.storage import get_events
 
         # Update events table
         events = get_events(self._conn, limit=10)
-        events_table = self.query_one("#events", EventsTable)
-        events_table.clear()
-        for event in events:
-            status_icon = STATUS_ICONS.get(event.status, "?")
-            culprits_str = ", ".join(event.culprits[:3]) if event.culprits else "-"
-            if len(event.culprits) > 3:
-                culprits_str += f" (+{len(event.culprits) - 3})"
-            events_table.add_row(
-                status_icon,
-                event.timestamp.strftime("%Y-%m-%d %H:%M:%S"),
-                f"{event.duration:.1f}s",
-                str(event.stress.total),
-                culprits_str,
-            )
+        try:
+            events_table = self.query_one("#events", EventsTable)
+            events_table.clear()
+            for event in events:
+                status_icon = STATUS_ICONS.get(event.status, "?")
+                # Calculate duration from timestamps
+                if event.end_timestamp:
+                    duration = (event.end_timestamp - event.start_timestamp).total_seconds()
+                    duration_str = f"{duration:.1f}s"
+                else:
+                    duration_str = "ongoing"
+                # Use peak_stress instead of stress.total
+                stress_str = str(event.peak_stress) if event.peak_stress else "-"
+                events_table.add_row(
+                    status_icon,
+                    event.start_timestamp.strftime("%Y-%m-%d %H:%M:%S"),
+                    duration_str,
+                    stress_str,
+                )
+        except NoMatches:
+            pass
 
     def action_refresh(self) -> None:
-        """Manual refresh."""
-        self._refresh_data()
+        """Manual refresh of events."""
+        self._refresh_events()
 
     def action_show_events(self) -> None:
         """Show events view."""

@@ -137,17 +137,23 @@ def events(ctx, limit: int, status: str | None) -> None:
 
         click.echo(
             f"{'':3}{'ID':>5}  {'Time':20}  {'Duration':>10}  "
-            f"{'Stress':>7}  {'Status':12}  Culprits"
+            f"{'Stress':>7}  {'Tier':>5}  {'Status':12}"
         )
-        click.echo("-" * 85)
+        click.echo("-" * 75)
 
         for event in event_list:
             icon = status_icons.get(event.status, "?")
-            culprits_str = ", ".join(event.culprits[:2]) if event.culprits else "-"
+            # Calculate duration from timestamps
+            if event.end_timestamp:
+                duration = (event.end_timestamp - event.start_timestamp).total_seconds()
+                duration_str = f"{duration:.1f}s"
+            else:
+                duration_str = "ongoing"
+            stress_str = f"{event.peak_stress or 0}/100"
+            tier_str = str(event.peak_tier or "-")
             click.echo(
-                f"{icon:3}{event.id:>5}  {event.timestamp.strftime('%Y-%m-%d %H:%M:%S'):20}  "
-                f"{event.duration:>8.1f}s  {event.stress.total:>6}/100  "
-                f"{event.status:12}  {culprits_str}"
+                f"{icon:3}{event.id:>5}  {event.start_timestamp.strftime('%Y-%m-%d %H:%M:%S'):20}  "
+                f"{duration_str:>10}  {stress_str:>7}  {tier_str:>5}  {event.status:12}"
             )
     finally:
         conn.close()
@@ -158,7 +164,7 @@ def events(ctx, limit: int, status: str | None) -> None:
 @click.pass_context
 def events_show(ctx, event_id: int) -> None:
     """Show details of a specific event."""
-    from pause_monitor.storage import get_connection, get_event_by_id
+    from pause_monitor.storage import get_connection, get_event_by_id, get_event_samples
 
     config = ctx.obj["config"]
 
@@ -173,25 +179,60 @@ def events_show(ctx, event_id: int) -> None:
             click.echo(f"Error: Event {event_id} not found", err=True)
             raise SystemExit(1)
 
+        # Calculate duration
+        if event.end_timestamp:
+            duration = (event.end_timestamp - event.start_timestamp).total_seconds()
+            duration_str = f"{duration:.1f}s"
+        else:
+            duration_str = "ongoing"
+
         click.echo(f"Event #{event.id}")
-        click.echo(f"Time: {event.timestamp}")
-        click.echo(f"Duration: {event.duration:.1f}s")
+        click.echo(f"Start: {event.start_timestamp}")
+        if event.end_timestamp:
+            click.echo(f"End: {event.end_timestamp}")
+        click.echo(f"Duration: {duration_str}")
         click.echo(f"Status: {event.status}")
-        click.echo(f"Stress: {event.stress.total}/100")
-        click.echo(f"  Load: {event.stress.load}")
-        click.echo(f"  Memory: {event.stress.memory}")
-        click.echo(f"  Thermal: {event.stress.thermal}")
-        click.echo(f"  Latency: {event.stress.latency}")
-        click.echo(f"  I/O: {event.stress.io}")
-
-        if event.culprits:
-            click.echo(f"Culprits: {', '.join(event.culprits)}")
-
-        if event.event_dir:
-            click.echo(f"Forensics: {event.event_dir}")
+        click.echo(f"Peak Stress: {event.peak_stress or 0}/100")
+        click.echo(f"Peak Tier: {event.peak_tier or '-'}")
 
         if event.notes:
             click.echo(f"Notes: {event.notes}")
+
+        # Show samples captured during this event
+        samples = get_event_samples(conn, event_id)
+        if samples:
+            click.echo(f"\nSamples captured: {len(samples)}")
+
+            # Find the peak sample (highest stress)
+            peak_sample = max(samples, key=lambda s: s.stress.total if s.stress else 0)
+            if peak_sample.stress:
+                click.echo("\nPeak sample stress breakdown:")
+                click.echo(f"  Load: {peak_sample.stress.load}")
+                click.echo(f"  Memory: {peak_sample.stress.memory}")
+                click.echo(f"  Thermal: {peak_sample.stress.thermal}")
+                click.echo(f"  Latency: {peak_sample.stress.latency}")
+                click.echo(f"  I/O: {peak_sample.stress.io}")
+                click.echo(f"  GPU: {peak_sample.stress.gpu}")
+                click.echo(f"  Wakeups: {peak_sample.stress.wakeups}")
+                click.echo(f"  Page-ins: {peak_sample.stress.pageins}")
+
+            # Show top CPU processes from peak sample
+            if peak_sample.top_cpu_procs:
+                click.echo("\nTop CPU processes (at peak):")
+                for proc in peak_sample.top_cpu_procs[:5]:
+                    click.echo(
+                        f"  {proc.get('name', 'unknown')} (PID {proc.get('pid', 0)}): "
+                        f"{proc.get('cpu_ms_per_s', 0):.0f} ms/s"
+                    )
+
+            # Show top pagein processes if any
+            if peak_sample.top_pagein_procs:
+                click.echo("\nTop page-in processes (at peak):")
+                for proc in peak_sample.top_pagein_procs[:5]:
+                    click.echo(
+                        f"  {proc.get('name', 'unknown')} (PID {proc.get('pid', 0)}): "
+                        f"{proc.get('pageins_per_s', 0):.1f}/s"
+                    )
     finally:
         conn.close()
 
@@ -320,12 +361,15 @@ def history(hours: int, fmt: str) -> None:
 
 
 @main.command()
-@click.option("--samples-days", default=None, type=int, help="Override sample retention days")
 @click.option("--events-days", default=None, type=int, help="Override event retention days")
 @click.option("--dry-run", is_flag=True, help="Show what would be deleted")
 @click.option("--force", "-f", is_flag=True, help="Skip confirmation prompt")
-def prune(samples_days: int | None, events_days: int | None, dry_run: bool, force: bool) -> None:
-    """Delete old data per retention policy."""
+def prune(events_days: int | None, dry_run: bool, force: bool) -> None:
+    """Delete old reviewed/dismissed events per retention policy.
+
+    Only prunes events marked as 'reviewed' or 'dismissed'.
+    Unreviewed and pinned events are never automatically deleted.
+    """
     from pause_monitor.config import Config
     from pause_monitor.storage import get_connection, prune_old_data
 
@@ -335,31 +379,25 @@ def prune(samples_days: int | None, events_days: int | None, dry_run: bool, forc
         click.echo("Database not found.")
         return
 
-    samples_days = samples_days or config.retention.samples_days
     events_days = events_days or config.retention.events_days
 
     if dry_run:
-        click.echo(f"Would prune samples older than {samples_days} days")
-        click.echo(f"Would prune events older than {events_days} days")
+        click.echo(f"Would prune reviewed/dismissed events older than {events_days} days")
         return
 
     if not force:
         click.confirm(
-            f"Delete samples > {samples_days} days and events > {events_days} days?",
+            f"Delete reviewed/dismissed events older than {events_days} days?",
             abort=True,
         )
 
     conn = get_connection(config.db_path)
     try:
-        samples_deleted, events_deleted = prune_old_data(
-            conn,
-            samples_days=samples_days,
-            events_days=events_days,
-        )
+        events_deleted = prune_old_data(conn, events_days=events_days)
     finally:
         conn.close()
 
-    click.echo(f"Deleted {samples_deleted} samples, {events_deleted} events")
+    click.echo(f"Deleted {events_deleted} events (with their samples)")
 
 
 @main.group()

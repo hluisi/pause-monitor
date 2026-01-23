@@ -95,17 +95,10 @@ class ForensicsCapture:
 
 
 def identify_culprits(contents: "BufferContents") -> list[dict]:
-    """Identify likely culprits from ring buffer contents.
+    """Identify culprits by correlating stress factors with process data.
 
-    Correlates high stress factors with processes from snapshots:
-    - High memory stress -> top memory consumers
-    - High load stress -> top CPU consumers
-    - High GPU stress -> GPU-intensive processes
-
-    Note: Thermal and latency factors are NOT included because they are
-    system-wide conditions without clear per-process attribution.
-    Thermal throttling affects all processes equally, and latency spikes
-    are a symptom rather than a cause.
+    Uses stress scores to identify WHICH factors are elevated (the "what"),
+    then maps those factors to the relevant processes (the "who").
 
     Args:
         contents: Frozen ring buffer contents with samples and snapshots
@@ -117,82 +110,96 @@ def identify_culprits(contents: "BufferContents") -> list[dict]:
     if not contents.samples:
         return []
 
-    # Average stress factors over all samples
-    avg_load = sum(s.stress.load for s in contents.samples) / len(contents.samples)
-    avg_memory = sum(s.stress.memory for s in contents.samples) / len(contents.samples)
-    avg_gpu = sum(s.stress.gpu for s in contents.samples) / len(contents.samples)
-    avg_io = sum(s.stress.io for s in contents.samples) / len(contents.samples)
-    avg_wakeups = sum(s.stress.wakeups for s in contents.samples) / len(contents.samples)
+    # Find MAX stress for each factor across all samples (spikes are transient)
+    max_stress: dict[str, float] = {
+        "load": 0,
+        "memory": 0,
+        "thermal": 0,
+        "latency": 0,
+        "io": 0,
+        "gpu": 0,
+        "wakeups": 0,
+        "pageins": 0,
+    }
 
-    # Collect processes from all snapshots
-    all_by_cpu: list = []
-    all_by_memory: list = []
+    for sample in contents.samples:
+        if sample.stress:
+            max_stress["load"] = max(max_stress["load"], sample.stress.load)
+            max_stress["memory"] = max(max_stress["memory"], sample.stress.memory)
+            max_stress["thermal"] = max(max_stress["thermal"], sample.stress.thermal)
+            max_stress["latency"] = max(max_stress["latency"], sample.stress.latency)
+            max_stress["io"] = max(max_stress["io"], sample.stress.io)
+            max_stress["gpu"] = max(max_stress["gpu"], sample.stress.gpu)
+            max_stress["wakeups"] = max(max_stress["wakeups"], sample.stress.wakeups)
+            max_stress["pageins"] = max(max_stress["pageins"], sample.stress.pageins)
+
+    # Collect processes from snapshots (for load/memory factors)
+    cpu_processes: list[str] = []
+    memory_processes: list[str] = []
     for snapshot in contents.snapshots:
-        all_by_cpu.extend(snapshot.by_cpu)
-        all_by_memory.extend(snapshot.by_memory)
+        for proc in snapshot.by_cpu:
+            if proc.name not in cpu_processes:
+                cpu_processes.append(proc.name)
+        for proc in snapshot.by_memory:
+            if proc.name not in memory_processes:
+                memory_processes.append(proc.name)
 
-    # Dedupe and sort - get top 5 process names
-    cpu_names = list(
-        dict.fromkeys(p.name for p in sorted(all_by_cpu, key=lambda p: p.cpu_pct, reverse=True))
-    )[:5]
-    mem_names = list(
-        dict.fromkeys(
-            p.name for p in sorted(all_by_memory, key=lambda p: p.memory_mb, reverse=True)
-        )
-    )[:5]
+    # Collect per-process data from metrics (for pagein/wakeup/io factors)
+    pagein_processes: list[str] = []
+    wakeup_processes: list[str] = []
+    diskio_processes: list[str] = []
 
+    for sample in contents.samples:
+        if not sample.metrics:
+            continue
+
+        # Top pagein processes
+        if sample.metrics.top_pagein_processes:
+            for proc in sample.metrics.top_pagein_processes:
+                name = proc.get("name", "?")
+                if name not in pagein_processes:
+                    pagein_processes.append(name)
+
+        # Top wakeup processes
+        if sample.metrics.top_wakeup_processes:
+            for proc in sample.metrics.top_wakeup_processes:
+                name = proc.get("name", "?")
+                if name not in wakeup_processes:
+                    wakeup_processes.append(name)
+
+        # Top disk I/O processes
+        if sample.metrics.top_diskio_processes:
+            for proc in sample.metrics.top_diskio_processes:
+                name = proc.get("name", "?")
+                if name not in diskio_processes:
+                    diskio_processes.append(name)
+
+    # Map factors to their relevant process source
+    factor_to_processes = {
+        "load": cpu_processes,
+        "memory": memory_processes,
+        "thermal": cpu_processes,  # Thermal stress from CPU-heavy processes
+        "latency": cpu_processes,  # Latency often from CPU contention
+        "io": diskio_processes if diskio_processes else cpu_processes,
+        "gpu": cpu_processes,  # GPU stress from compute-heavy processes
+        "wakeups": wakeup_processes if wakeup_processes else cpu_processes,
+        "pageins": pagein_processes if pagein_processes else cpu_processes,
+    }
+
+    # Build culprits list for factors above threshold
+    threshold = 10  # Minimum score to be considered a culprit
     culprits = []
 
-    # Threshold for considering a factor "elevated".
-    # Individual factors contribute 0-20 to 0-40 points to the total stress score.
-    # A threshold of 10 means the factor is contributing meaningfully (~25-50% of
-    # its maximum) and warrants investigation.
-    threshold = 10
-
-    if avg_memory >= threshold:
-        culprits.append(
-            {
-                "factor": "memory",
-                "score": int(avg_memory),
-                "processes": mem_names,
-            }
-        )
-
-    if avg_load >= threshold:
-        culprits.append(
-            {
-                "factor": "load",
-                "score": int(avg_load),
-                "processes": cpu_names,
-            }
-        )
-
-    if avg_gpu >= threshold:
-        culprits.append(
-            {
-                "factor": "gpu",
-                "score": int(avg_gpu),
-                "processes": cpu_names,  # GPU processes typically high CPU too
-            }
-        )
-
-    if avg_io >= threshold:
-        culprits.append(
-            {
-                "factor": "io",
-                "score": int(avg_io),
-                "processes": [],  # I/O per-process not tracked yet
-            }
-        )
-
-    if avg_wakeups >= threshold:
-        culprits.append(
-            {
-                "factor": "wakeups",
-                "score": int(avg_wakeups),
-                "processes": [],  # Wakeups per-process not tracked yet
-            }
-        )
+    for factor, score in max_stress.items():
+        if score >= threshold:
+            processes = factor_to_processes.get(factor, [])[:5]
+            culprits.append(
+                {
+                    "factor": factor,
+                    "score": int(score),
+                    "processes": processes,
+                }
+            )
 
     return sorted(culprits, key=lambda c: c["score"], reverse=True)
 

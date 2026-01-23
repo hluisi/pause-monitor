@@ -32,6 +32,8 @@ def make_test_metrics(**kwargs) -> PowermetricsResult:
         "pageins_per_s": 0.0,
         "top_cpu_processes": [],
         "top_pagein_processes": [],
+        "top_wakeup_processes": [],
+        "top_diskio_processes": [],
     }
     defaults.update(kwargs)
     return PowermetricsResult(**defaults)
@@ -452,8 +454,12 @@ def test_identify_culprits_empty_buffer():
     assert culprits == []
 
 
-def test_identify_culprits_averages_samples():
-    """identify_culprits averages stress over all samples."""
+def test_identify_culprits_uses_peak_values():
+    """identify_culprits uses MAX (peak) stress, not averages.
+
+    This is important because stress spikes are transient - using averages
+    dilutes the signal when most of the 30-second buffer is idle.
+    """
     from datetime import datetime, timedelta
 
     from pause_monitor.forensics import identify_culprits
@@ -462,7 +468,7 @@ def test_identify_culprits_averages_samples():
 
     now = datetime.now()
     metrics = make_test_metrics()
-    # Three samples with memory stress: 20, 10, 0 -> average 10
+    # Three samples with memory stress: 20, 10, 0 -> MAX is 20
     samples = [
         RingSample(
             timestamp=now - timedelta(seconds=2),
@@ -496,10 +502,10 @@ def test_identify_culprits_averages_samples():
     contents = BufferContents(samples=samples, snapshots=snapshots)
     culprits = identify_culprits(contents)
 
-    # Average memory is 10, which is threshold
+    # MAX memory is 20 (the peak), not average of 10
     assert len(culprits) == 1
     assert culprits[0]["factor"] == "memory"
-    assert culprits[0]["score"] == 10
+    assert culprits[0]["score"] == 20
 
 
 def test_identify_culprits_below_threshold():
