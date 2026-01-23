@@ -13,7 +13,7 @@ from pause_monitor.stress import StressBreakdown
 
 log = structlog.get_logger()
 
-SCHEMA_VERSION = 3  # Updated for Data Dictionary alignment
+SCHEMA_VERSION = 4  # Added peak_stress to events
 
 # Valid event status values
 VALID_EVENT_STATUSES = frozenset({"unreviewed", "reviewed", "pinned", "dismissed"})
@@ -83,7 +83,8 @@ CREATE TABLE IF NOT EXISTS events (
     culprits        TEXT,
     event_dir       TEXT,
     status          TEXT DEFAULT 'unreviewed',
-    notes           TEXT
+    notes           TEXT,
+    peak_stress     INTEGER
 );
 
 CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events(timestamp);
@@ -305,6 +306,7 @@ class Event:
     status: str = "unreviewed"  # unreviewed, reviewed, pinned, dismissed
     notes: str | None = None
     id: int | None = None
+    peak_stress: int | None = None  # Peak stress during this event
 
 
 def insert_event(conn: sqlite3.Connection, event: Event) -> int:
@@ -314,8 +316,8 @@ def insert_event(conn: sqlite3.Connection, event: Event) -> int:
         INSERT INTO events (
             timestamp, duration, stress_total, stress_load, stress_memory,
             stress_thermal, stress_latency, stress_io, stress_gpu, stress_wakeups,
-            stress_pageins, culprits, event_dir, status, notes
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            stress_pageins, culprits, event_dir, status, notes, peak_stress
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             event.timestamp.timestamp(),
@@ -333,6 +335,7 @@ def insert_event(conn: sqlite3.Connection, event: Event) -> int:
             event.event_dir,
             event.status,
             event.notes,
+            event.peak_stress,
         ),
     )
     conn.commit()
@@ -350,7 +353,7 @@ def get_events(
     query = """
         SELECT id, timestamp, duration, stress_total, stress_load, stress_memory,
                stress_thermal, stress_latency, stress_io, stress_gpu, stress_wakeups,
-               stress_pageins, culprits, event_dir, status, notes
+               stress_pageins, culprits, event_dir, status, notes, peak_stress
         FROM events
     """
     params: list = []
@@ -393,6 +396,7 @@ def get_events(
             event_dir=row[13],
             status=row[14] or "unreviewed",
             notes=row[15],
+            peak_stress=row[16],
         )
         for row in rows
     ]
@@ -404,7 +408,7 @@ def get_event_by_id(conn: sqlite3.Connection, event_id: int) -> Event | None:
         """
         SELECT id, timestamp, duration, stress_total, stress_load, stress_memory,
                stress_thermal, stress_latency, stress_io, stress_gpu, stress_wakeups,
-               stress_pageins, culprits, event_dir, status, notes
+               stress_pageins, culprits, event_dir, status, notes, peak_stress
         FROM events WHERE id = ?
         """,
         (event_id,),
@@ -431,6 +435,7 @@ def get_event_by_id(conn: sqlite3.Connection, event_id: int) -> Event | None:
         event_dir=row[13],
         status=row[14] or "unreviewed",
         notes=row[15],
+        peak_stress=row[16],
     )
 
 

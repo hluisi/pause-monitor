@@ -1071,3 +1071,39 @@ def test_migrate_add_stress_columns_idempotent(tmp_path: Path):
     migrate_add_stress_columns(conn)
     migrate_add_stress_columns(conn)
     conn.close()
+
+
+def test_event_has_peak_stress(tmp_path):
+    """Event should support peak_stress field."""
+    from pause_monitor.storage import Event, get_events, insert_event
+
+    db_path = tmp_path / "test.db"
+    init_database(db_path)
+    conn = sqlite3.connect(db_path)
+
+    event = Event(
+        timestamp=datetime.now(),
+        duration=60.0,
+        stress=StressBreakdown(
+            load=10, memory=5, thermal=0, latency=2, io=0, gpu=5, wakeups=1, pageins=0
+        ),
+        culprits=["test_app"],
+        event_dir=None,
+        peak_stress=35,
+    )
+
+    event_id = insert_event(conn, event)
+    assert event_id > 0
+
+    events = get_events(conn, limit=1)
+    assert len(events) == 1
+    assert events[0].peak_stress == 35
+
+    # Also verify get_event_by_id reads peak_stress
+    from pause_monitor.storage import get_event_by_id
+
+    event_by_id = get_event_by_id(conn, event_id)
+    assert event_by_id is not None
+    assert event_by_id.peak_stress == 35
+
+    conn.close()
