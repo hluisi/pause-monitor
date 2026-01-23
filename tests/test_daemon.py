@@ -5,8 +5,10 @@ import os
 import signal
 import sqlite3
 import time
+from contextlib import ExitStack
 from datetime import datetime
 from pathlib import Path
+from typing import Iterator
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -16,6 +18,77 @@ from pause_monitor.daemon import Daemon, DaemonState
 from pause_monitor.sentinel import TierAction
 from pause_monitor.storage import get_events
 from pause_monitor.stress import StressBreakdown
+
+# === Test Fixtures ===
+
+
+@pytest.fixture
+def short_tmp_path() -> Iterator[Path]:
+    """Create a short temporary path for Unix sockets.
+
+    macOS has a 104-character limit for Unix socket paths.
+    pytest's tmp_path is too long, so we use /tmp directly.
+    """
+    import tempfile
+
+    with tempfile.TemporaryDirectory(dir="/tmp", prefix="pm_") as tmpdir:
+        yield Path(tmpdir)
+
+
+def _patch_config_paths(stack: ExitStack, base_path: Path) -> None:
+    """Apply all Config path property patches to the given ExitStack.
+
+    This helper eliminates deep nested `with patch.object()` blocks by using
+    ExitStack to manage multiple patches as a flat list.
+
+    Args:
+        stack: ExitStack to register patches with
+        base_path: Directory to use for all Config paths
+    """
+    # fmt: off
+    stack.enter_context(patch.object(
+        Config, "data_dir",
+        new_callable=lambda: property(lambda self: base_path)
+    ))
+    stack.enter_context(patch.object(
+        Config, "db_path",
+        new_callable=lambda: property(lambda self: base_path / "test.db")
+    ))
+    stack.enter_context(patch.object(
+        Config, "events_dir",
+        new_callable=lambda: property(lambda self: base_path / "events")
+    ))
+    stack.enter_context(patch.object(
+        Config, "pid_path",
+        new_callable=lambda: property(lambda self: base_path / "daemon.pid")
+    ))
+    stack.enter_context(patch.object(
+        Config, "socket_path",
+        new_callable=lambda: property(lambda self: base_path / "daemon.sock")
+    ))
+    # fmt: on
+
+
+@pytest.fixture
+def patched_config_paths(tmp_path: Path) -> Iterator[Path]:
+    """Fixture that patches all Config path properties to use tmp_path.
+
+    Yields the base path for tests that need to reference it directly.
+    """
+    with ExitStack() as stack:
+        _patch_config_paths(stack, tmp_path)
+        yield tmp_path
+
+
+@pytest.fixture
+def patched_config_short_paths(short_tmp_path: Path) -> Iterator[Path]:
+    """Fixture that patches Config paths using short paths for Unix sockets.
+
+    Use this instead of patched_config_paths when tests involve socket operations.
+    """
+    with ExitStack() as stack:
+        _patch_config_paths(stack, short_tmp_path)
+        yield short_tmp_path
 
 
 def test_daemon_state_initial():
@@ -63,33 +136,22 @@ def test_daemon_init_creates_components():
 
 
 @pytest.mark.asyncio
-async def test_daemon_start_initializes_database(tmp_path: Path):
+async def test_daemon_start_initializes_database(patched_config_paths):
     """Daemon.start() initializes database."""
     config = Config()
+    daemon = Daemon(config)
 
-    # Patch the property at the class level
-    with patch.object(Config, "data_dir", new_callable=lambda: property(lambda self: tmp_path)):
-        with patch.object(
-            Config, "db_path", new_callable=lambda: property(lambda self: tmp_path / "test.db")
-        ):
-            with patch.object(
-                Config,
-                "events_dir",
-                new_callable=lambda: property(lambda self: tmp_path / "events"),
-            ):
-                daemon = Daemon(config)
+    with patch.object(daemon.sentinel, "start", new_callable=AsyncMock):
+        with patch.object(daemon, "_start_caffeinate", new_callable=AsyncMock):
+            # Mock socket server (path too long for Unix sockets in tmp_path)
+            with patch("pause_monitor.daemon.SocketServer") as mock_socket_class:
+                mock_socket = AsyncMock()
+                mock_socket_class.return_value = mock_socket
+                # Start and immediately stop
+                daemon._shutdown_event.set()
+                await daemon.start()
 
-                with patch.object(daemon.sentinel, "start", new_callable=AsyncMock):
-                    with patch.object(daemon, "_start_caffeinate", new_callable=AsyncMock):
-                        # Mock socket server (path too long for Unix sockets in tmp_path)
-                        with patch("pause_monitor.daemon.SocketServer") as mock_socket_class:
-                            mock_socket = AsyncMock()
-                            mock_socket_class.return_value = mock_socket
-                            # Start and immediately stop
-                            daemon._shutdown_event.set()
-                            await daemon.start()
-
-                            assert (tmp_path / "test.db").exists()
+                assert (patched_config_paths / "test.db").exists()
 
 
 @pytest.mark.asyncio
@@ -203,52 +265,37 @@ def test_check_already_running_current_process(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_daemon_start_rejects_duplicate(tmp_path: Path):
+async def test_daemon_start_rejects_duplicate(patched_config_paths):
     """Daemon.start() raises if already running."""
     config = Config()
-    pid_file = tmp_path / "daemon.pid"
+    pid_file = patched_config_paths / "daemon.pid"
     # Simulate existing running daemon (use current PID)
     pid_file.write_text(str(os.getpid()))
 
-    with patch.object(Config, "data_dir", new_callable=lambda: property(lambda self: tmp_path)):
-        with patch.object(Config, "pid_path", new_callable=lambda: property(lambda self: pid_file)):
-            daemon = Daemon(config)
+    daemon = Daemon(config)
 
-            with pytest.raises(RuntimeError, match="already running"):
-                await daemon.start()
+    with pytest.raises(RuntimeError, match="already running"):
+        await daemon.start()
 
 
 @pytest.mark.asyncio
-async def test_daemon_start_writes_pid_file(tmp_path: Path):
+async def test_daemon_start_writes_pid_file(patched_config_paths):
     """Daemon.start() writes PID file."""
     config = Config()
-    pid_file = tmp_path / "daemon.pid"
+    pid_file = patched_config_paths / "daemon.pid"
+    daemon = Daemon(config)
 
-    with patch.object(Config, "data_dir", new_callable=lambda: property(lambda self: tmp_path)):
-        with patch.object(
-            Config, "db_path", new_callable=lambda: property(lambda self: tmp_path / "test.db")
-        ):
-            with patch.object(
-                Config,
-                "events_dir",
-                new_callable=lambda: property(lambda self: tmp_path / "events"),
-            ):
-                with patch.object(
-                    Config, "pid_path", new_callable=lambda: property(lambda self: pid_file)
-                ):
-                    daemon = Daemon(config)
+    with patch.object(daemon.sentinel, "start", new_callable=AsyncMock):
+        with patch.object(daemon, "_start_caffeinate", new_callable=AsyncMock):
+            # Mock socket server (path too long for Unix sockets in tmp_path)
+            with patch("pause_monitor.daemon.SocketServer") as mock_socket_class:
+                mock_socket = AsyncMock()
+                mock_socket_class.return_value = mock_socket
+                daemon._shutdown_event.set()
+                await daemon.start()
 
-                    with patch.object(daemon.sentinel, "start", new_callable=AsyncMock):
-                        with patch.object(daemon, "_start_caffeinate", new_callable=AsyncMock):
-                            # Mock socket server (path too long for Unix sockets in tmp_path)
-                            with patch("pause_monitor.daemon.SocketServer") as mock_socket_class:
-                                mock_socket = AsyncMock()
-                                mock_socket_class.return_value = mock_socket
-                                daemon._shutdown_event.set()
-                                await daemon.start()
-
-                                assert pid_file.exists()
-                                assert pid_file.read_text() == str(os.getpid())
+                assert pid_file.exists()
+                assert pid_file.read_text() == str(os.getpid())
 
 
 @pytest.mark.asyncio
@@ -275,281 +322,238 @@ async def test_daemon_stop_removes_pid_file(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_auto_prune_runs_on_timeout(tmp_path: Path):
+async def test_auto_prune_runs_on_timeout(patched_config_paths):
     """Auto-prune runs prune_old_data when timeout expires."""
+    from pause_monitor.storage import init_database
+
     config = Config()
+    daemon = Daemon(config)
 
-    with patch.object(Config, "data_dir", new_callable=lambda: property(lambda self: tmp_path)):
-        with patch.object(
-            Config, "db_path", new_callable=lambda: property(lambda self: tmp_path / "test.db")
-        ):
-            daemon = Daemon(config)
+    init_database(config.db_path)
+    daemon._conn = sqlite3.connect(config.db_path)
 
-            from pause_monitor.storage import init_database
+    # Patch prune_old_data to track calls and signal shutdown after first call
+    with patch("pause_monitor.daemon.prune_old_data", return_value=(0, 0)) as mock_prune:
+        mock_prune.side_effect = lambda *args, **kwargs: (
+            daemon._shutdown_event.set(),
+            (0, 0),
+        )[1]
 
-            init_database(config.db_path)
-            daemon._conn = sqlite3.connect(config.db_path)
+        # Create a side effect that properly closes the unawaited coroutine
+        call_count = 0
 
-            # Patch prune_old_data to track calls and signal shutdown after first call
-            with patch("pause_monitor.daemon.prune_old_data", return_value=(0, 0)) as mock_prune:
-                mock_prune.side_effect = lambda *args, **kwargs: (
-                    daemon._shutdown_event.set(),
-                    (0, 0),
-                )[1]
+        async def mock_wait_for_impl(coro, timeout):
+            nonlocal call_count
+            coro.close()  # Close the coroutine to prevent "never awaited" warning
+            call_count += 1
+            if call_count == 1:
+                raise asyncio.TimeoutError()
+            raise asyncio.CancelledError()
 
-                # Create a side effect that properly closes the unawaited coroutine
-                call_count = 0
+        with patch("pause_monitor.daemon.asyncio.wait_for", side_effect=mock_wait_for_impl):
+            try:
+                await daemon._auto_prune()
+            except asyncio.CancelledError:
+                pass
 
-                async def mock_wait_for_impl(coro, timeout):
-                    nonlocal call_count
-                    coro.close()  # Close the coroutine to prevent "never awaited" warning
-                    call_count += 1
-                    if call_count == 1:
-                        raise asyncio.TimeoutError()
-                    raise asyncio.CancelledError()
-
-                with patch("pause_monitor.daemon.asyncio.wait_for", side_effect=mock_wait_for_impl):
-                    try:
-                        await daemon._auto_prune()
-                    except asyncio.CancelledError:
-                        pass
-
-                mock_prune.assert_called_once_with(
-                    daemon._conn,
-                    samples_days=config.retention.samples_days,
-                    events_days=config.retention.events_days,
-                )
+        mock_prune.assert_called_once_with(
+            daemon._conn,
+            samples_days=config.retention.samples_days,
+            events_days=config.retention.events_days,
+        )
 
 
 @pytest.mark.asyncio
-async def test_auto_prune_exits_on_shutdown(tmp_path: Path):
+async def test_auto_prune_exits_on_shutdown(patched_config_paths):
     """Auto-prune exits cleanly when shutdown event is set."""
     config = Config()
+    daemon = Daemon(config)
 
-    with patch.object(Config, "data_dir", new_callable=lambda: property(lambda self: tmp_path)):
-        daemon = Daemon(config)
+    # Set shutdown event immediately
+    daemon._shutdown_event.set()
 
-        # Set shutdown event immediately
-        daemon._shutdown_event.set()
-
-        # Track that prune_old_data is NOT called
-        with patch("pause_monitor.daemon.prune_old_data") as mock_prune:
-            await daemon._auto_prune()
-            mock_prune.assert_not_called()
+    # Track that prune_old_data is NOT called
+    with patch("pause_monitor.daemon.prune_old_data") as mock_prune:
+        await daemon._auto_prune()
+        mock_prune.assert_not_called()
 
 
 @pytest.mark.asyncio
-async def test_auto_prune_skips_if_no_connection(tmp_path: Path):
+async def test_auto_prune_skips_if_no_connection(patched_config_paths):
     """Auto-prune skips pruning if database connection is None."""
     config = Config()
+    daemon = Daemon(config)
+    daemon._conn = None  # No connection
 
-    with patch.object(Config, "data_dir", new_callable=lambda: property(lambda self: tmp_path)):
-        daemon = Daemon(config)
-        daemon._conn = None  # No connection
+    with patch("pause_monitor.daemon.prune_old_data") as mock_prune:
+        # Patch wait_for to timeout once, then we set shutdown
 
-        with patch("pause_monitor.daemon.prune_old_data") as mock_prune:
-            # Patch wait_for to timeout once, then we set shutdown
+        async def mock_wait_for_impl(coro, timeout):
+            coro.close()  # Close the coroutine to prevent "never awaited" warning
+            # After first timeout, set shutdown so loop exits
+            daemon._shutdown_event.set()
+            raise asyncio.TimeoutError()
 
-            async def mock_wait_for_impl(coro, timeout):
-                coro.close()  # Close the coroutine to prevent "never awaited" warning
-                # After first timeout, set shutdown so loop exits
-                daemon._shutdown_event.set()
-                raise asyncio.TimeoutError()
+        with patch("pause_monitor.daemon.asyncio.wait_for", side_effect=mock_wait_for_impl):
+            # Run actual _auto_prune - since _conn is None, prune should not be called
+            await daemon._auto_prune()
 
-            with patch("pause_monitor.daemon.asyncio.wait_for", side_effect=mock_wait_for_impl):
-                # Run actual _auto_prune - since _conn is None, prune should not be called
-                await daemon._auto_prune()
-
-            mock_prune.assert_not_called()
+        mock_prune.assert_not_called()
 
 
 @pytest.mark.asyncio
-async def test_auto_prune_uses_config_retention_days(tmp_path: Path):
+async def test_auto_prune_uses_config_retention_days(patched_config_paths):
     """Auto-prune uses retention days from config."""
     from pause_monitor.config import RetentionConfig
+    from pause_monitor.storage import init_database
 
     config = Config(
         retention=RetentionConfig(samples_days=7, events_days=14),
     )
+    daemon = Daemon(config)
 
-    with patch.object(Config, "data_dir", new_callable=lambda: property(lambda self: tmp_path)):
-        with patch.object(
-            Config, "db_path", new_callable=lambda: property(lambda self: tmp_path / "test.db")
-        ):
-            daemon = Daemon(config)
+    init_database(config.db_path)
+    daemon._conn = sqlite3.connect(config.db_path)
 
-            from pause_monitor.storage import init_database
+    # Patch prune_old_data to track calls and signal shutdown after first call
+    with patch("pause_monitor.daemon.prune_old_data", return_value=(0, 0)) as mock_prune:
+        mock_prune.side_effect = lambda *args, **kwargs: (
+            daemon._shutdown_event.set(),
+            (0, 0),
+        )[1]
 
-            init_database(config.db_path)
-            daemon._conn = sqlite3.connect(config.db_path)
+        # Create a side effect that properly closes the unawaited coroutine
+        call_count = 0
 
-            # Patch prune_old_data to track calls and signal shutdown after first call
-            with patch("pause_monitor.daemon.prune_old_data", return_value=(0, 0)) as mock_prune:
-                mock_prune.side_effect = lambda *args, **kwargs: (
-                    daemon._shutdown_event.set(),
-                    (0, 0),
-                )[1]
+        async def mock_wait_for_impl(coro, timeout):
+            nonlocal call_count
+            coro.close()  # Close the coroutine to prevent "never awaited" warning
+            call_count += 1
+            if call_count == 1:
+                raise asyncio.TimeoutError()
+            raise asyncio.CancelledError()
 
-                # Create a side effect that properly closes the unawaited coroutine
-                call_count = 0
+        with patch("pause_monitor.daemon.asyncio.wait_for", side_effect=mock_wait_for_impl):
+            try:
+                await daemon._auto_prune()
+            except asyncio.CancelledError:
+                pass
 
-                async def mock_wait_for_impl(coro, timeout):
-                    nonlocal call_count
-                    coro.close()  # Close the coroutine to prevent "never awaited" warning
-                    call_count += 1
-                    if call_count == 1:
-                        raise asyncio.TimeoutError()
-                    raise asyncio.CancelledError()
-
-                with patch("pause_monitor.daemon.asyncio.wait_for", side_effect=mock_wait_for_impl):
-                    try:
-                        await daemon._auto_prune()
-                    except asyncio.CancelledError:
-                        pass
-
-                mock_prune.assert_called_once_with(
-                    daemon._conn,
-                    samples_days=7,
-                    events_days=14,
-                )
+        mock_prune.assert_called_once_with(
+            daemon._conn,
+            samples_days=7,
+            events_days=14,
+        )
 
 
 # === Sentinel Integration Tests ===
 
 
 @pytest.mark.asyncio
-async def test_daemon_uses_main_loop(tmp_path: Path):
+async def test_daemon_uses_main_loop(patched_config_paths):
     """Daemon runs _main_loop instead of sentinel.start()."""
     config = Config()
+    daemon = Daemon(config)
 
-    with patch.object(Config, "data_dir", new_callable=lambda: property(lambda self: tmp_path)):
-        with patch.object(
-            Config, "db_path", new_callable=lambda: property(lambda self: tmp_path / "test.db")
-        ):
-            with patch.object(
-                Config,
-                "events_dir",
-                new_callable=lambda: property(lambda self: tmp_path / "events"),
-            ):
-                with patch.object(
-                    Config, "pid_path", new_callable=lambda: property(lambda self: tmp_path / "pid")
-                ):
-                    daemon = Daemon(config)
+    # Verify ring_buffer is initialized
+    assert daemon.ring_buffer is not None
 
-                    # Verify ring_buffer is initialized
-                    assert daemon.ring_buffer is not None
+    # Track if _main_loop was called
+    main_loop_called = False
 
-                    # Track if _main_loop was called
-                    main_loop_called = False
+    async def mock_main_loop():
+        nonlocal main_loop_called
+        main_loop_called = True
+        # Immediately return to end daemon
+        return
 
-                    async def mock_main_loop():
-                        nonlocal main_loop_called
-                        main_loop_called = True
-                        # Immediately return to end daemon
-                        return
+    with patch.object(daemon, "_start_caffeinate", new_callable=AsyncMock):
+        with patch.object(daemon, "_main_loop", side_effect=mock_main_loop):
+            # Mock socket server (path too long for Unix sockets in tmp_path)
+            with patch("pause_monitor.daemon.SocketServer") as mock_socket_class:
+                mock_socket = AsyncMock()
+                mock_socket_class.return_value = mock_socket
+                # Start daemon - it should call _main_loop and return
+                await daemon.start()
 
-                    with patch.object(daemon, "_start_caffeinate", new_callable=AsyncMock):
-                        with patch.object(daemon, "_main_loop", side_effect=mock_main_loop):
-                            # Mock socket server (path too long for Unix sockets in tmp_path)
-                            with patch("pause_monitor.daemon.SocketServer") as mock_socket_class:
-                                mock_socket = AsyncMock()
-                                mock_socket_class.return_value = mock_socket
-                                # Start daemon - it should call _main_loop and return
-                                await daemon.start()
-
-                    # Verify _main_loop was called (not sentinel.start())
-                    assert main_loop_called
+    # Verify _main_loop was called (not sentinel.start())
+    assert main_loop_called
 
 
 @pytest.mark.asyncio
-async def test_daemon_sentinel_callbacks_wired(tmp_path: Path):
+async def test_daemon_sentinel_callbacks_wired(patched_config_paths):
     """Daemon wires up sentinel callbacks correctly."""
     config = Config()
+    daemon = Daemon(config)
 
-    with patch.object(Config, "data_dir", new_callable=lambda: property(lambda self: tmp_path)):
-        daemon = Daemon(config)
-
-        # Verify callbacks are wired
-        assert daemon.sentinel.on_tier_change is not None
-        assert daemon.sentinel.on_pause_detected is not None
+    # Verify callbacks are wired
+    assert daemon.sentinel.on_tier_change is not None
+    assert daemon.sentinel.on_pause_detected is not None
 
 
 @pytest.mark.asyncio
-async def test_daemon_handles_pause_with_buffer_contents(tmp_path: Path):
+async def test_daemon_handles_pause_with_buffer_contents(patched_config_paths):
     """Daemon handles pause with buffer contents from sentinel."""
+    from pause_monitor.ringbuffer import BufferContents
+    from pause_monitor.storage import get_events, init_database
+
     config = Config()
+    daemon = Daemon(config)
 
-    with patch.object(Config, "data_dir", new_callable=lambda: property(lambda self: tmp_path)):
-        with patch.object(
-            Config, "db_path", new_callable=lambda: property(lambda self: tmp_path / "test.db")
-        ):
-            events_prop = lambda: property(lambda self: tmp_path / "events")  # noqa: E731
-            with patch.object(Config, "events_dir", new_callable=events_prop):
-                daemon = Daemon(config)
+    init_database(config.db_path)
+    daemon._conn = sqlite3.connect(config.db_path)
 
-                from pause_monitor.storage import init_database
+    # Create mock buffer contents
+    contents = BufferContents(samples=[], snapshots=[])
 
-                init_database(config.db_path)
-                daemon._conn = sqlite3.connect(config.db_path)
+    # Mock was_recently_asleep and forensics
+    # Note: actual duration must be >= config.alerts.pause_min_duration (default 2.0)
+    with patch("pause_monitor.daemon.was_recently_asleep", return_value=None):
+        with patch("pause_monitor.daemon.run_full_capture", new_callable=AsyncMock):
+            with patch("pause_monitor.daemon.identify_culprits", return_value=[]):
+                await daemon._handle_pause_from_sentinel(
+                    actual=2.5,
+                    expected=0.1,
+                    contents=contents,
+                )
 
-                # Create mock buffer contents
-                from pause_monitor.ringbuffer import BufferContents
-
-                contents = BufferContents(samples=[], snapshots=[])
-
-                # Mock was_recently_asleep and forensics
-                # Note: actual duration must be >= config.alerts.pause_min_duration (default 2.0)
-                with patch("pause_monitor.daemon.was_recently_asleep", return_value=None):
-                    with patch("pause_monitor.daemon.run_full_capture", new_callable=AsyncMock):
-                        with patch("pause_monitor.daemon.identify_culprits", return_value=[]):
-                            await daemon._handle_pause_from_sentinel(
-                                actual=2.5,
-                                expected=0.1,
-                                contents=contents,
-                            )
-
-                # Verify event was stored
-                from pause_monitor.storage import get_events
-
-                events = get_events(daemon._conn)
-                assert len(events) == 1
-                assert events[0].duration == 2.5
+    # Verify event was stored
+    events = get_events(daemon._conn)
+    assert len(events) == 1
+    assert events[0].duration == 2.5
 
 
 @pytest.mark.asyncio
-async def test_daemon_tier_change_updates_state(tmp_path: Path):
+async def test_daemon_tier_change_updates_state(patched_config_paths):
     """Daemon updates state on tier changes from sentinel."""
     config = Config()
+    daemon = Daemon(config)
 
-    with patch.object(Config, "data_dir", new_callable=lambda: property(lambda self: tmp_path)):
-        daemon = Daemon(config)
+    # Initially not elevated
+    assert daemon.state.elevated_since is None
 
-        # Initially not elevated
-        assert daemon.state.elevated_since is None
+    # Trigger tier2_entry - should enter elevated
+    await daemon._handle_tier_change(TierAction.TIER2_ENTRY, 2)
+    assert daemon.state.elevated_since is not None
 
-        # Trigger tier2_entry - should enter elevated
-        await daemon._handle_tier_change(TierAction.TIER2_ENTRY, 2)
-        assert daemon.state.elevated_since is not None
+    # Trigger tier2_exit - should exit elevated
+    await daemon._handle_tier_change(TierAction.TIER2_EXIT, 1)
+    assert daemon.state.elevated_since is None
 
-        # Trigger tier2_exit - should exit elevated
-        await daemon._handle_tier_change(TierAction.TIER2_EXIT, 1)
-        assert daemon.state.elevated_since is None
+    # Trigger tier3_entry - should enter both elevated and critical
+    await daemon._handle_tier_change(TierAction.TIER3_ENTRY, 3)
+    assert daemon.state.elevated_since is not None
+    assert daemon.state.critical_since is not None
 
-        # Trigger tier3_entry - should enter both elevated and critical
-        await daemon._handle_tier_change(TierAction.TIER3_ENTRY, 3)
-        assert daemon.state.elevated_since is not None
-        assert daemon.state.critical_since is not None
-
-        # Trigger tier3_exit - should exit critical but stay elevated
-        await daemon._handle_tier_change(TierAction.TIER3_EXIT, 2)
-        assert daemon.state.elevated_since is not None
-        assert daemon.state.critical_since is None
+    # Trigger tier3_exit - should exit critical but stay elevated
+    await daemon._handle_tier_change(TierAction.TIER3_EXIT, 2)
+    assert daemon.state.elevated_since is not None
+    assert daemon.state.critical_since is None
 
 
-def test_daemon_has_tier_manager(tmp_path: Path):
+def test_daemon_has_tier_manager(patched_config_paths):
     """Daemon should have TierManager for tier transitions."""
     config = Config()
-    config._data_dir = tmp_path
     daemon = Daemon(config)
 
     assert hasattr(daemon, "tier_manager")
@@ -558,46 +562,40 @@ def test_daemon_has_tier_manager(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_daemon_handles_tier2_exit_writes_bookmark(tmp_path):
+async def test_daemon_handles_tier2_exit_writes_bookmark(patched_config_paths):
     """Daemon should write bookmark to DB on tier2_exit."""
     config = Config()
+    daemon = Daemon(config)
+    await daemon._init_database()
 
-    with patch.object(Config, "data_dir", new_callable=lambda: property(lambda self: tmp_path)):
-        with patch.object(
-            Config, "db_path", new_callable=lambda: property(lambda self: tmp_path / "test.db")
-        ):
-            daemon = Daemon(config)
-            await daemon._init_database()
+    # Trigger tier2 entry to capture entry time in daemon
+    entry_stress = StressBreakdown(
+        load=10, memory=8, thermal=5, latency=3, io=2, gpu=5, wakeups=2, pageins=0
+    )
+    await daemon._handle_tier_action(TierAction.TIER2_ENTRY, entry_stress)
 
-            # Trigger tier2 entry to capture entry time in daemon
-            entry_stress = StressBreakdown(
-                load=10, memory=8, thermal=5, latency=3, io=2, gpu=5, wakeups=2, pageins=0
-            )
-            await daemon._handle_tier_action(TierAction.TIER2_ENTRY, entry_stress)
+    # Simulate time passing by manipulating daemon's entry time
+    daemon._tier2_entry_time = time.monotonic() - 60  # Simulate 60s ago
 
-            # Simulate time passing by manipulating daemon's entry time
-            daemon._tier2_entry_time = time.monotonic() - 60  # Simulate 60s ago
+    # Handle tier2_exit
+    exit_stress = StressBreakdown(
+        load=5, memory=3, thermal=0, latency=0, io=0, gpu=2, wakeups=1, pageins=0
+    )
+    await daemon._handle_tier_action(TierAction.TIER2_EXIT, exit_stress)
 
-            # Handle tier2_exit
-            exit_stress = StressBreakdown(
-                load=5, memory=3, thermal=0, latency=0, io=0, gpu=2, wakeups=1, pageins=0
-            )
-            await daemon._handle_tier_action(TierAction.TIER2_EXIT, exit_stress)
-
-            # Verify event was written with peak_stress
-            events = get_events(daemon._conn, limit=1)
-            assert len(events) == 1
-            assert events[0].peak_stress == 35  # Peak from entry stress total
-            assert events[0].duration >= 59  # Should be ~60s (with some tolerance)
-            # Entry time should be cleared after exit
-            assert daemon._tier2_entry_time is None
+    # Verify event was written with peak_stress
+    events = get_events(daemon._conn, limit=1)
+    assert len(events) == 1
+    assert events[0].peak_stress == 35  # Peak from entry stress total
+    assert events[0].duration >= 59  # Should be ~60s (with some tolerance)
+    # Entry time should be cleared after exit
+    assert daemon._tier2_entry_time is None
 
 
-def test_daemon_calculate_stress_all_factors(tmp_path):
+def test_daemon_calculate_stress_all_factors(patched_config_paths):
     from pause_monitor.collector import PowermetricsResult
 
     config = Config()
-    config._data_dir = tmp_path
     daemon = Daemon(config)
 
     # Phase 1 updated PowermetricsResult - uses Data Dictionary fields
@@ -630,12 +628,11 @@ def test_daemon_calculate_stress_all_factors(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_daemon_handles_pause_runs_forensics(tmp_path, monkeypatch):
+async def test_daemon_handles_pause_runs_forensics(patched_config_paths, monkeypatch):
     """Daemon should run full forensics on pause detection."""
     from pause_monitor.collector import PowermetricsResult
 
     config = Config()
-    config._data_dir = tmp_path
     # Lower threshold so test pause triggers forensics
     config.alerts.pause_min_duration = 0.1
 
@@ -686,10 +683,9 @@ async def test_daemon_handles_pause_runs_forensics(tmp_path, monkeypatch):
     assert duration == 0.3
 
 
-def test_daemon_updates_peak_after_interval(tmp_path):
+def test_daemon_updates_peak_after_interval(patched_config_paths):
     """Daemon should update peak stress after peak_tracking_seconds."""
     config = Config()
-    config._data_dir = tmp_path
     config.sentinel.peak_tracking_seconds = 30
 
     daemon = Daemon(config)
@@ -712,10 +708,9 @@ def test_daemon_updates_peak_after_interval(tmp_path):
     assert daemon._tier2_peak_breakdown == new_stress
 
 
-def test_daemon_does_not_update_peak_before_interval(tmp_path):
+def test_daemon_does_not_update_peak_before_interval(patched_config_paths):
     """Daemon should not update peak before peak_tracking_seconds."""
     config = Config()
-    config._data_dir = tmp_path
     config.sentinel.peak_tracking_seconds = 30
 
     daemon = Daemon(config)
@@ -738,15 +733,13 @@ def test_daemon_does_not_update_peak_before_interval(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_daemon_main_loop_processes_powermetrics(tmp_path, monkeypatch):
+async def test_daemon_main_loop_processes_powermetrics(patched_config_paths, monkeypatch):
     """Daemon main loop should process powermetrics samples."""
     from unittest.mock import MagicMock
 
     from pause_monitor.collector import PowermetricsResult
 
     config = Config()
-    config._data_dir = tmp_path
-
     daemon = Daemon(config)
 
     # Track samples pushed to ring buffer (Phase 1: new signature)
@@ -811,72 +804,30 @@ async def test_daemon_main_loop_processes_powermetrics(tmp_path, monkeypatch):
 # === Socket Server Integration Tests ===
 
 
-@pytest.fixture
-def short_tmp_path():
-    """Create a short temporary path for Unix sockets.
-
-    macOS has a 104-character limit for Unix socket paths.
-    pytest's tmp_path is too long, so we use /tmp directly.
-    """
-    import tempfile
-
-    with tempfile.TemporaryDirectory(dir="/tmp", prefix="pm_") as tmpdir:
-        yield Path(tmpdir)
-
-
 @pytest.mark.asyncio
-async def test_daemon_socket_available_after_start(short_tmp_path, monkeypatch):
+async def test_daemon_socket_available_after_start(patched_config_short_paths, monkeypatch):
     """Daemon should have socket server listening after start."""
     config = Config()
+    daemon = Daemon(config)
 
-    # Patch config paths to use short_tmp_path (Unix socket path length limit)
-    with patch.object(
-        Config, "data_dir", new_callable=lambda: property(lambda self: short_tmp_path)
-    ):
-        with patch.object(
-            Config,
-            "db_path",
-            new_callable=lambda: property(lambda self: short_tmp_path / "test.db"),
-        ):
-            with patch.object(
-                Config,
-                "events_dir",
-                new_callable=lambda: property(lambda self: short_tmp_path / "events"),
-            ):
-                with patch.object(
-                    Config,
-                    "pid_path",
-                    new_callable=lambda: property(lambda self: short_tmp_path / "daemon.pid"),
-                ):
-                    with patch.object(
-                        Config,
-                        "socket_path",
-                        new_callable=lambda: property(lambda self: short_tmp_path / "daemon.sock"),
-                    ):
-                        daemon = Daemon(config)
+    # Mock _main_loop to exit immediately (we just want to test socket wiring)
+    async def mock_main_loop():
+        pass
 
-                        # Mock _main_loop to exit immediately (we just want to test socket wiring)
-                        async def mock_main_loop():
-                            pass
+    monkeypatch.setattr(daemon, "_main_loop", mock_main_loop)
 
-                        monkeypatch.setattr(daemon, "_main_loop", mock_main_loop)
+    # Mock caffeinate to avoid actual subprocess
+    with patch.object(daemon, "_start_caffeinate", new_callable=AsyncMock):
+        # Start daemon (will return after mock_main_loop completes)
+        await daemon.start()
 
-                        # Mock caffeinate to avoid actual subprocess
-                        with patch.object(daemon, "_start_caffeinate", new_callable=AsyncMock):
-                            # Start daemon (will return after mock_main_loop completes)
-                            await daemon.start()
+    # Socket file should exist and server should be listening
+    assert config.socket_path.exists(), "Socket file should exist after daemon start"
 
-                        # Socket file should exist and server should be listening
-                        assert config.socket_path.exists(), (
-                            "Socket file should exist after daemon start"
-                        )
+    # Verify we can connect (reader unused, only testing connection)
+    _, writer = await asyncio.open_unix_connection(str(config.socket_path))
+    writer.close()
+    await writer.wait_closed()
 
-                        # Verify we can connect
-                        reader, writer = await asyncio.open_unix_connection(str(config.socket_path))
-                        writer.close()
-                        await writer.wait_closed()
-
-                        await daemon.stop()
-                        assert not config.socket_path.exists(), (
-                            "Socket file should be cleaned up after stop"
-                        )
+    await daemon.stop()
+    assert not config.socket_path.exists(), "Socket file should be cleaned up after stop"
