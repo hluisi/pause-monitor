@@ -7,7 +7,7 @@ from asyncio.subprocess import Process
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from enum import Enum
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import structlog
 
@@ -33,13 +33,38 @@ class StreamStatus(Enum):
 
 @dataclass
 class PowermetricsResult:
-    """Parsed powermetrics sample data."""
+    """Parsed powermetrics sample data.
 
-    cpu_pct: float | None
-    cpu_freq: int | None  # MHz
-    cpu_temp: float | None
-    throttled: bool | None
-    gpu_pct: float | None
+    All fields derived from powermetrics plist output.
+    See Data Dictionary for field mappings and rationale.
+    """
+
+    # Timing (for pause detection)
+    elapsed_ns: int  # Actual sample interval from powermetrics
+
+    # Thermal
+    throttled: bool  # True if thermal_pressure != "Nominal"
+
+    # CPU power (from processor dict)
+    cpu_power: float | None  # Milliwatts from processor.cpu_power
+
+    # GPU (from gpu dict)
+    gpu_pct: float | None  # (1 - idle_ratio) * 100
+    gpu_power: float | None  # Milliwatts from processor.gpu_power
+
+    # Disk I/O (from disk dict) — kept separate per Data Dictionary
+    io_read_per_s: float  # bytes/sec from disk.rbytes_per_s
+    io_write_per_s: float  # bytes/sec from disk.wbytes_per_s
+
+    # Wakeups (summed from tasks array)
+    wakeups_per_s: float  # Sum of tasks[].idle_wakeups_per_s
+
+    # Page-ins (summed from tasks array) — CRITICAL for pause detection
+    pageins_per_s: float  # Sum of tasks[].pageins_per_s
+
+    # Top processes for culprit identification (two lists, 5 each)
+    top_cpu_processes: list[dict]  # [{name, pid, cpu_ms_per_s}] — top 5 by CPU
+    top_pagein_processes: list[dict]  # [{name, pid, pageins_per_s}] — top 5 by pageins
 
 
 def parse_powermetrics_sample(data: bytes) -> PowermetricsResult:
@@ -50,29 +75,28 @@ def parse_powermetrics_sample(data: bytes) -> PowermetricsResult:
 
     Returns:
         PowermetricsResult with extracted metrics
+
+    Note:
+        Actual field extraction to be implemented in Task 1.2.
+        Currently returns stub values for new fields.
     """
     try:
         plist = plistlib.loads(data)
     except plistlib.InvalidFileException:
         log.warning("invalid_plist_data")
         return PowermetricsResult(
-            cpu_pct=None,
-            cpu_freq=None,
-            cpu_temp=None,
-            throttled=None,
+            elapsed_ns=0,
+            throttled=False,
+            cpu_power=None,
             gpu_pct=None,
+            gpu_power=None,
+            io_read_per_s=0.0,
+            io_write_per_s=0.0,
+            wakeups_per_s=0.0,
+            pageins_per_s=0.0,
+            top_cpu_processes=[],
+            top_pagein_processes=[],
         )
-
-    # Extract CPU usage from cluster data
-    cpu_pct = _extract_cpu_usage(plist.get("processor", {}))
-
-    # Extract max CPU frequency
-    cpu_freq = _extract_cpu_freq(plist.get("processor", {}))
-
-    # CPU temperature (not always available)
-    cpu_temp = None
-    if "processor" in plist and "cpu_thermal_level" in plist["processor"]:
-        cpu_temp = plist["processor"]["cpu_thermal_level"]
 
     # Thermal throttling
     thermal_pressure = plist.get("thermal_pressure", "Nominal")
@@ -82,46 +106,21 @@ def parse_powermetrics_sample(data: bytes) -> PowermetricsResult:
     gpu_data = plist.get("gpu", {})
     gpu_pct = gpu_data.get("busy_percent")
 
+    # TODO(stub): Task 1.2 will implement full field extraction
+    # For now, return stub values for new fields
     return PowermetricsResult(
-        cpu_pct=cpu_pct,
-        cpu_freq=cpu_freq,
-        cpu_temp=cpu_temp,
+        elapsed_ns=0,  # Task 1.2: extract from plist
         throttled=throttled,
+        cpu_power=None,  # Task 1.2: extract from processor.cpu_power
         gpu_pct=gpu_pct,
+        gpu_power=None,  # Task 1.2: extract from processor.gpu_power
+        io_read_per_s=0.0,  # Task 1.2: extract from disk.rbytes_per_s
+        io_write_per_s=0.0,  # Task 1.2: extract from disk.wbytes_per_s
+        wakeups_per_s=0.0,  # Task 1.2: sum from tasks[].idle_wakeups_per_s
+        pageins_per_s=0.0,  # Task 1.2: sum from tasks[].pageins_per_s
+        top_cpu_processes=[],  # Task 1.2: top 5 by CPU
+        top_pagein_processes=[],  # Task 1.2: top 5 by pageins
     )
-
-
-def _extract_cpu_usage(processor: dict[str, Any]) -> float | None:
-    """Extract CPU usage percentage from processor data."""
-    clusters = processor.get("clusters", [])
-    if not clusters:
-        return None
-
-    total_usage = 0.0
-    cpu_count = 0
-
-    for cluster in clusters:
-        for cpu in cluster.get("cpus", []):
-            idle_pct = cpu.get("idle_percent", 100.0)
-            total_usage += 100.0 - idle_pct
-            cpu_count += 1
-
-    return total_usage / cpu_count if cpu_count > 0 else None
-
-
-def _extract_cpu_freq(processor: dict[str, Any]) -> int | None:
-    """Extract maximum CPU frequency in MHz."""
-    clusters = processor.get("clusters", [])
-    if not clusters:
-        return None
-
-    max_freq_hz = 0
-    for cluster in clusters:
-        for cpu in cluster.get("cpus", []):
-            freq_hz = cpu.get("freq_hz", 0)
-            max_freq_hz = max(max_freq_hz, freq_hz)
-
-    return max_freq_hz // 1_000_000 if max_freq_hz > 0 else None
 
 
 class PowermetricsStream:
