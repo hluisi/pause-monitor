@@ -62,6 +62,8 @@ class SentinelConfig:
 
     fast_interval_ms: int = 100
     ring_buffer_seconds: int = 30
+    pause_threshold_ratio: float = 2.0  # Latency ratio to detect pause
+    peak_tracking_seconds: int = 30  # Interval to update peak stress
 
 
 @dataclass
@@ -163,6 +165,8 @@ class Config:
         sentinel = tomlkit.table()
         sentinel.add("fast_interval_ms", self.sentinel.fast_interval_ms)
         sentinel.add("ring_buffer_seconds", self.sentinel.ring_buffer_seconds)
+        sentinel.add("pause_threshold_ratio", self.sentinel.pause_threshold_ratio)
+        sentinel.add("peak_tracking_seconds", self.sentinel.peak_tracking_seconds)
         doc.add("sentinel", sentinel)
         doc.add(tomlkit.nl())
 
@@ -230,6 +234,8 @@ class Config:
             sentinel=SentinelConfig(
                 fast_interval_ms=sentinel_data.get("fast_interval_ms", 100),
                 ring_buffer_seconds=sentinel_data.get("ring_buffer_seconds", 30),
+                pause_threshold_ratio=sentinel_data.get("pause_threshold_ratio", 2.0),
+                peak_tracking_seconds=sentinel_data.get("peak_tracking_seconds", 30),
             ),
             tiers=TiersConfig(
                 elevated_threshold=tiers_data.get("elevated_threshold", 15),

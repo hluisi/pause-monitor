@@ -188,3 +188,44 @@ fast_interval_ms = 200
     assert config.sentinel.fast_interval_ms == 200
     # Default value for omitted field
     assert config.sentinel.ring_buffer_seconds == 30
+
+
+def test_sentinel_config_has_pause_threshold():
+    """SentinelConfig should have pause detection threshold."""
+    config = SentinelConfig()
+    assert config.pause_threshold_ratio == 2.0  # Default: 2x expected latency
+
+
+def test_sentinel_config_has_peak_tracking_interval():
+    """SentinelConfig should have peak tracking interval."""
+    config = SentinelConfig()
+    assert config.peak_tracking_seconds == 30  # Default: one buffer cycle
+
+
+def test_config_loads_new_sentinel_fields(tmp_path):
+    """Config loads pause_threshold_ratio and peak_tracking_seconds."""
+    config_file = tmp_path / "config.toml"
+    config_file.write_text("""
+[sentinel]
+fast_interval_ms = 100
+ring_buffer_seconds = 30
+pause_threshold_ratio = 3.0
+peak_tracking_seconds = 60
+""")
+
+    config = Config.load(config_file)
+    assert config.sentinel.pause_threshold_ratio == 3.0
+    assert config.sentinel.peak_tracking_seconds == 60
+
+
+def test_config_save_includes_new_sentinel_fields(tmp_path):
+    """Config.save() writes pause_threshold_ratio and peak_tracking_seconds."""
+    config_path = tmp_path / "config.toml"
+    config = Config()
+    config.sentinel.pause_threshold_ratio = 2.5
+    config.sentinel.peak_tracking_seconds = 45
+    config.save(config_path)
+
+    content = config_path.read_text()
+    assert "pause_threshold_ratio = 2.5" in content
+    assert "peak_tracking_seconds = 45" in content

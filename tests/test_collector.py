@@ -315,3 +315,47 @@ def test_parse_throttled_sleeping():
     result = parse_powermetrics_sample(data)
 
     assert result.throttled is True
+
+
+def test_powermetrics_stream_default_interval_is_100ms():
+    """PowermetricsStream should default to 100ms for 10Hz sampling."""
+    stream = PowermetricsStream()
+    assert stream.interval_ms == 100
+
+
+def test_powermetrics_stream_includes_tasks_and_disk_samplers():
+    """PowermetricsStream should include tasks and disk samplers."""
+    stream = PowermetricsStream()
+    samplers_arg = stream.POWERMETRICS_CMD[stream.POWERMETRICS_CMD.index("--samplers") + 1]
+    assert "tasks" in samplers_arg
+    assert "disk" in samplers_arg
+
+
+@pytest.mark.asyncio
+async def test_powermetrics_stream_raises_on_permission_denied(monkeypatch):
+    """PowermetricsStream.start() should raise RuntimeError if permission denied."""
+    import asyncio
+
+    async def mock_create_subprocess(*args, **kwargs):
+        raise PermissionError("Operation not permitted")
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", mock_create_subprocess)
+
+    stream = PowermetricsStream()
+    with pytest.raises(RuntimeError, match="powermetrics failed to start"):
+        await stream.start()
+
+
+@pytest.mark.asyncio
+async def test_powermetrics_stream_raises_on_not_found(monkeypatch):
+    """PowermetricsStream.start() should raise RuntimeError if not found."""
+    import asyncio
+
+    async def mock_create_subprocess(*args, **kwargs):
+        raise FileNotFoundError("powermetrics not found")
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", mock_create_subprocess)
+
+    stream = PowermetricsStream()
+    with pytest.raises(RuntimeError, match="powermetrics not found"):
+        await stream.start()

@@ -164,12 +164,12 @@ class PowermetricsStream:
     POWERMETRICS_CMD = [
         "/usr/bin/powermetrics",
         "--samplers",
-        "cpu_power,gpu_power,thermal",
+        "cpu_power,gpu_power,thermal,tasks,disk",  # tasks for wakeups, disk for I/O
         "-f",
         "plist",
     ]
 
-    def __init__(self, interval_ms: int = 1000):
+    def __init__(self, interval_ms: int = 100):  # 100ms for 10Hz sampling
         self.interval_ms = interval_ms
         self._process: Process | None = None
         self._status = StreamStatus.NOT_STARTED
@@ -181,7 +181,11 @@ class PowermetricsStream:
         return self._status
 
     async def start(self) -> None:
-        """Start the powermetrics subprocess."""
+        """Start the powermetrics subprocess.
+
+        Raises:
+            RuntimeError: If powermetrics fails to start (permission denied, not found, etc.)
+        """
         if self._process is not None:
             return
 
@@ -193,33 +197,40 @@ class PowermetricsStream:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-
-            # Give it a moment to fail if it's going to
-            await asyncio.sleep(0.1)
-
-            if self._process.returncode is not None:
-                # Process already exited - likely permission error
-                stderr = b""
-                if self._process.stderr:
-                    stderr = await self._process.stderr.read()
-                stderr_msg = stderr.decode().strip()
-
-                self._status = StreamStatus.FAILED
-                if "superuser" in stderr_msg.lower():
-                    log.error("powermetrics_requires_sudo")
-                    raise PermissionError(
-                        "powermetrics requires root privileges. Run with: sudo pause-monitor daemon"
-                    )
-                else:
-                    log.error("powermetrics_start_failed", error=stderr_msg)
-                    raise RuntimeError(f"powermetrics failed: {stderr_msg}")
-
-            self._status = StreamStatus.RUNNING
-            log.info("powermetrics_started", interval_ms=self.interval_ms)
-        except (FileNotFoundError, PermissionError) as e:
+        except PermissionError as e:
             self._status = StreamStatus.FAILED
             log.error("powermetrics_start_failed", error=str(e))
-            raise
+            raise RuntimeError(
+                f"powermetrics failed to start: {e}. "
+                "Daemon requires root privileges (sudo) to run powermetrics."
+            ) from e
+        except FileNotFoundError as e:
+            self._status = StreamStatus.FAILED
+            log.error("powermetrics_start_failed", error=str(e))
+            raise RuntimeError(
+                f"powermetrics not found: {e}. Ensure /usr/bin/powermetrics exists (macOS only)."
+            ) from e
+        except OSError as e:
+            self._status = StreamStatus.FAILED
+            log.error("powermetrics_start_failed", error=str(e))
+            raise RuntimeError(f"powermetrics failed to start: {e}") from e
+
+        # Give it a moment to fail if it's going to
+        await asyncio.sleep(0.1)
+
+        if self._process.returncode is not None:
+            # Process already exited - likely permission error
+            stderr = b""
+            if self._process.stderr:
+                stderr = await self._process.stderr.read()
+            stderr_msg = stderr.decode().strip()
+
+            self._status = StreamStatus.FAILED
+            log.error("powermetrics_start_failed", error=stderr_msg)
+            raise RuntimeError(f"powermetrics failed to start: {stderr_msg}")
+
+        self._status = StreamStatus.RUNNING
+        log.info("powermetrics_started", interval_ms=self.interval_ms)
 
     async def stop(self) -> None:
         """Stop the powermetrics subprocess."""
