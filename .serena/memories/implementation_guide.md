@@ -1,10 +1,32 @@
 # Implementation Guide
 
-> ✅ **Phase 3 COMPLETE (2026-01-23).** Phase 4 (Socket Server) is next. See `docs/plans/phase-4-socket-server.md` for current work.
+> **Phase 5 COMPLETE (2026-01-22).** Redesign eliminated Sentinel; daemon now uses powermetrics directly.
 
-**Last updated:** 2026-01-23 (Phase 3 complete, Phase 4 next)
+**Last updated:** 2026-01-22 (Phase 5 complete - redesign done)
 
 This document describes the actual implementation of pause-monitor, module by module. For the canonical design specification, see `design_spec`. For known gaps, see `unimplemented_features`.
+
+## Architecture (Post-Redesign)
+
+### Data Flow
+- Single 100ms loop driven by powermetrics stream
+- Ring buffer receives complete samples continuously
+- TUI streams from Unix socket (not SQLite polling)
+- SQLite stores only tier events (elevated bookmarks, pause forensics)
+
+### Key Components
+- `Daemon._main_loop()` - Main 10Hz processing loop
+- `Daemon._calculate_stress()` - 8-factor stress from powermetrics
+- `TierManager` - Tier state machine (extracted from Sentinel)
+- `SocketServer` - Broadcasts ring buffer to TUI
+- `SocketClient` - TUI receives real-time data
+
+### Deleted (No Longer Exists)
+- `Sentinel` class - Deleted entirely, use `TierManager` directly
+- `calculate_stress()` function - Deleted, use `Daemon._calculate_stress()`
+- `IOBaselineManager` class - Deleted
+- `SamplePolicy` - Deleted
+- `slow_interval_ms` config - Deleted
 
 ## Architecture Overview
 
@@ -27,20 +49,18 @@ This document describes the actual implementation of pause-monitor, module by mo
 |  (daemon.py)     |                 |                   |   (tui/app.py)   |
 +--------+---------+                 |                   +--------+---------+
          |                           |                             |
-         |  +-----------------------+|                             |
-         |  |                       ||                             |
-         v  v                       vv                             v
+         |                           |                             |
+         v                           v                             v
 +------------------+        +------------------+          +------------------+
-|    Sentinel      |        |     Storage      |--------->|   Read queries   |
-|  (sentinel.py)   |        |   (storage.py)   |          |                  |
-+--------+---------+        +--------+---------+          +------------------+
-         |                           ^
-         |                           |
-         v                           |
-+------------------+                 |
-|   RingBuffer     |                 |
-| (ringbuffer.py)  |                 |
-+------------------+                 |
+|   TierManager    |        |     Storage      |          |   SocketClient   |
+|  (sentinel.py)   |        |   (storage.py)   |          | (socket_client)  |
++--------+---------+        +--------+---------+          +--------+---------+
+         |                           ^                             ^
+         v                           |                             |
++------------------+                 |                   +------------------+
+|   RingBuffer     |                 |                   |   SocketServer   |
+| (ringbuffer.py)  |-----------------+------------------>| (socket_server)  |
++------------------+                                     +------------------+
                                      |
 +------------------+   +-------------+-------------+   +------------------+
 |   Collector      |-->|                           |<--|   Forensics      |
@@ -56,22 +76,16 @@ This document describes the actual implementation of pause-monitor, module by mo
 Supporting modules:
 +------------------+  +------------------+  +------------------+
 |     stress.py    |  |  notifications.py |  |   sleepwake.py  |
-| (score calc)     |  |  (macOS alerts)  |  | (pmset parsing)  |
+| (StressBreakdown)|  |  (macOS alerts)  |  | (pmset parsing)  |
 +------------------+  +------------------+  +------------------+
-         ^
-         |
-+------------------+
-|    sysctl.py     |
-| (fast syscalls)  |
-+------------------+
 ```
 
 **Data Flow:**
-1. Daemon starts -> initializes Sentinel + PowermetricsStream
-2. Sentinel fast loop (100ms) -> collect_fast_metrics() via sysctl -> push to RingBuffer -> tier transitions
-3. Daemon slow loop (5s) -> PowermetricsStream -> parse_powermetrics_sample -> calculate_stress -> insert_sample to SQLite
-4. Pause detection: Sentinel detects latency_ratio > 2.0 -> freezes buffer -> Daemon runs forensics -> insert_event
-5. TUI/CLI: Read from SQLite via get_recent_samples() / get_events()
+1. Daemon starts -> initializes TierManager + SocketServer + PowermetricsStream
+2. Main loop (100ms) -> PowermetricsStream -> _calculate_stress() -> RingBuffer.push() -> TierManager.update()
+3. SocketServer broadcasts ring buffer samples to TUI via Unix socket
+4. Pause detection: latency_ratio > 2.0 -> freezes buffer -> Daemon runs forensics -> insert_event
+5. TUI: Receives real-time data via SocketClient (not SQLite polling)
 
 ---
 
@@ -145,42 +159,44 @@ Supporting modules:
 | Class | Purpose |
 |-------|---------|
 | `DaemonState` | Runtime state: sample_count, event_count, elevated/critical times, flags |
-| `Daemon` | Main orchestrator - manages Sentinel, PowermetricsStream, storage |
+| `Daemon` | Main orchestrator - manages TierManager, RingBuffer, SocketServer, PowermetricsStream |
 
 ### Key Methods (Daemon)
 | Method | Purpose |
 |--------|---------|
-| `__init__(config)` | Wire up all components: Sentinel, RingBuffer, SamplePolicy, Notifier, etc. |
+| `__init__(config)` | Wire up all components: TierManager, RingBuffer, SocketServer, Notifier, etc. |
 | `start()` | Initialize DB, write PID file, start caffeinate, start loops |
-| `stop()` | Shutdown event, stop Sentinel, stop powermetrics, cleanup |
-| `_run_loop()` | Main async loop - stream powermetrics, check pauses, collect samples |
-| `_collect_sample(pm_result, interval)` | Combine powermetrics + system metrics -> calculate_stress -> insert_sample |
-| `_check_for_pause(interval)` | Legacy pause detection via PauseDetector |
-| `_handle_tier_change(action, tier)` | Callback from Sentinel on tier transitions |
-| `_handle_pause_from_sentinel(actual, expected, contents)` | Callback when Sentinel detects pause - runs forensics, creates event |
+| `stop()` | Shutdown event, stop powermetrics, stop socket server, cleanup |
+| `_main_loop()` | Main 10Hz async loop - stream powermetrics, calculate stress, push to buffer |
 | `_calculate_stress(pm_result, latency_ratio)` | Calculate StressBreakdown with all 8 factors from powermetrics data |
 | `_handle_tier_action(action, stress)` | Handle TierAction transitions, write bookmarks on tier2_exit, track peak_stress |
+| `_handle_pause(actual, expected)` | Pause detection - freezes buffer, runs forensics, creates event |
+| `_maybe_update_peak(stress)` | Track peak stress during elevated/critical tiers |
 | `_run_forensics(capture)` | Background task for spindump/tailspin/logs |
 | `_auto_prune()` | Periodic task to clean old data |
 
-### Sentinel Integration
+### Integration with TierManager and SocketServer
 ```python
 # In __init__:
-self.sentinel = Sentinel(buffer=self.ring_buffer, ...)
-self.sentinel.on_tier_change = self._handle_tier_change
-self.sentinel.on_pause_detected = self._handle_pause_from_sentinel
+self.tier_manager = TierManager(config.tiers.elevated, config.tiers.critical)
+self.ring_buffer = RingBuffer(max_samples=300)  # 30s at 100ms
+self.socket_server = SocketServer(config.socket_path)
 
-# Sentinel runs independently via start():
-await self.sentinel.start()  # Starts fast_loop and slow_loop tasks
-
-# Daemon's _run_loop handles powermetrics stream for slow-path metrics
+# In _main_loop:
+stress = self._calculate_stress(pm_result, latency_ratio)
+self.ring_buffer.push(stress, self.tier_manager.current_tier)
+action = self.tier_manager.update(stress.total())
+if action:
+    self._handle_tier_action(action, stress)
+self.socket_server.broadcast(sample_message)
 ```
 
 ### Data Flow
-1. Daemon.start() -> init_database() + sentinel.start() + _run_loop()
-2. _run_loop() iterates PowermetricsStream -> _collect_sample() -> insert_sample()
-3. Sentinel._fast_loop() runs at 100ms -> tier changes -> callbacks to Daemon
-4. Pause detected -> _handle_pause_from_sentinel() -> create Event + ForensicsCapture
+1. Daemon.start() -> init_database() + socket_server.start() + _main_loop()
+2. _main_loop() iterates PowermetricsStream -> _calculate_stress() -> ring_buffer.push()
+3. TierManager.update() called on each sample -> returns TierAction on transitions
+4. SocketServer broadcasts samples to connected TUI clients
+5. Pause detected -> _handle_pause() -> create Event + ForensicsCapture
 
 ---
 
@@ -193,11 +209,8 @@ await self.sentinel.start()  # Starts fast_loop and slow_loop tasks
 |-------|---------|
 | `SystemMetrics` | Non-powermetrics data: load_avg, mem_available, swap, I/O counters, network |
 | `StreamStatus` | PowermetricsStream state enum (STOPPED, STARTING, RUNNING, ERROR) |
-| `PowermetricsResult` | Parsed powermetrics data: cpu_pct, cpu_temp, cpu_freq, throttled, gpu_pct |
+| `PowermetricsResult` | Parsed powermetrics data: cpu_pct, cpu_temp, cpu_freq, throttled, gpu_pct, wakeups_per_sec, pageins_per_sec, top_cpu_processes, top_pagein_processes |
 | `PowermetricsStream` | Async streaming plist reader from powermetrics subprocess |
-| `SamplingState` | Enum for adaptive policy states (NORMAL, ELEVATED, CRITICAL) |
-| `PolicyResult` | Result from policy update with state change info |
-| `SamplePolicy` | Adaptive sampling with hysteresis (elevate at 30, de-elevate at 20) |
 
 ### Key Functions
 | Function | Purpose |
@@ -227,20 +240,18 @@ await self.sentinel.start()  # Starts fast_loop and slow_loop tasks
 
 ## Module: stress.py
 
-**Purpose:** Multi-factor stress score calculation (0-100 scale).
+**Purpose:** Stress breakdown dataclass and memory pressure utilities. (Note: `calculate_stress()` and `IOBaselineManager` were deleted in Phase 5 redesign.)
 
 ### Classes
 | Class | Purpose |
 |-------|---------|
 | `MemoryPressureLevel` | Enum: NORMAL, WARN, CRITICAL with from_percent() class method |
 | `StressBreakdown` | Dataclass with per-factor scores + total() method |
-| `IOBaselineManager` | Track I/O baseline with EMA, detect spikes |
 
 ### Key Functions
 | Function | Purpose |
 |----------|---------|
 | `get_memory_pressure_fast()` | Get memory available % via sysctl (fast path) |
-| `calculate_stress(...)` | Main stress calculation from all metrics |
 
 ### Stress Factors (in StressBreakdown)
 | Factor | Max Points | Calculation |
@@ -249,14 +260,18 @@ await self.sentinel.start()  # Starts fast_loop and slow_loop tasks
 | `memory` | 30 | Based on memory available % |
 | `thermal` | 10 | 10 if throttled, 0 otherwise |
 | `latency` | 20 | Based on actual/expected interval ratio |
-| `io` | 10 | Based on I/O spike above baseline |
+| `io` | 10 | Based on I/O rate from powermetrics |
 | `gpu` | 20 | Based on GPU utilization % |
 | `wakeups` | 10 | Based on idle wakeups per second |
 | `pageins` | 30 | Based on swap pageins/sec (CRITICAL for pause detection) |
 
+### Deleted in Phase 5 Redesign
+- `calculate_stress()` function - Deleted, use `Daemon._calculate_stress()` instead
+- `IOBaselineManager` class - Deleted, I/O stress now calculated directly from powermetrics
+
 ### Data Flow
-- calculate_stress() called by Daemon._collect_sample() (slow path, full metrics)
-- Sentinel._calculate_fast_stress() uses simplified calculation for fast loop
+- `Daemon._calculate_stress()` creates StressBreakdown from PowermetricsResult
+- StressBreakdown.total() returns 0-100 score for tier decisions
 
 ---
 
@@ -439,23 +454,85 @@ await self.sentinel.start()  # Starts fast_loop and slow_loop tasks
 | `clear_snapshots()` | Clear snapshots on de-escalation |
 
 ### Data Flow
-1. Sentinel._fast_loop() calls buffer.push() every 100ms
+1. Daemon._main_loop() calls buffer.push() every 100ms
 2. On tier escalation, _handle_tier_action() calls buffer.snapshot_processes()
 3. On pause detection, buffer.freeze() captures state
 4. On tier2_exit, buffer.clear_snapshots() resets
 
 ---
 
+## Module: socket_server.py
+
+**Purpose:** Unix socket server for broadcasting ring buffer samples to TUI clients.
+
+### Classes
+| Class | Purpose |
+|-------|---------|
+| `SocketServer` | Manages Unix socket, accepts connections, broadcasts messages |
+
+### Key Methods
+| Method | Purpose |
+|--------|---------|
+| `__init__(socket_path)` | Initialize with path to Unix socket |
+| `start()` | Create socket, start accepting connections |
+| `stop()` | Close all connections, remove socket file |
+| `broadcast(message)` | Send JSON message to all connected clients |
+
+### Message Format
+```python
+{
+    "type": "sample",
+    "timestamp": "2026-01-22T12:34:56.789",
+    "stress": {"load": 5, "memory": 10, ...},  # StressBreakdown as dict
+    "tier": 1  # Current tier level
+}
+```
+
+### Data Flow
+1. Daemon calls socket_server.start() during startup
+2. TUI clients connect via SocketClient
+3. Each sample, Daemon calls socket_server.broadcast()
+4. On shutdown, socket_server.stop() cleans up
+
+---
+
+## Module: socket_client.py
+
+**Purpose:** Unix socket client for TUI to receive real-time samples from daemon.
+
+### Classes
+| Class | Purpose |
+|-------|---------|
+| `SocketClient` | Connects to daemon socket, receives sample stream |
+
+### Key Methods
+| Method | Purpose |
+|--------|---------|
+| `__init__(socket_path)` | Initialize with path to Unix socket |
+| `connect()` | Establish connection to daemon |
+| `disconnect()` | Close connection |
+| `read_message()` | Read next JSON message from socket |
+| `async for message in client` | Async iteration over messages |
+
+### Data Flow
+1. TUI creates SocketClient with daemon's socket path
+2. On mount, TUI calls client.connect()
+3. TUI receives messages via async iteration
+4. Messages parsed and used to update widgets
+5. On unmount, client.disconnect()
+
+---
+
 ## Module: sentinel.py
 
-**Purpose:** Continuous stress monitoring with tier state machine.
+**Purpose:** Tier state machine for stress level transitions. (Note: Sentinel class was deleted in Phase 5 redesign; only TierManager remains.)
 
 ### Classes
 | Class | Purpose |
 |-------|---------|
 | `Tier` | Enum: SENTINEL (1), ELEVATED (2), CRITICAL (3) |
+| `TierAction` | Enum: TIER2_ENTRY, TIER2_EXIT, TIER2_PEAK, TIER3_ENTRY, TIER3_EXIT |
 | `TierManager` | Manages tier transitions with hysteresis |
-| `Sentinel` | Runs fast/slow loops, manages buffer, detects pauses |
 
 ### TierManager State Machine
 ```
@@ -478,40 +555,30 @@ await self.sentinel.start()  # Starts fast_loop and slow_loop tasks
 | `__init__(elevated_threshold, critical_threshold)` | Initialize thresholds and timers |
 | `current_tier` | Property returning current Tier |
 | `peak_stress` | Property returning peak stress since elevation |
-| `update(stress_total)` | Process stress value, return action if state change |
+| `update(stress_total)` | Process stress value, return TierAction if state change |
 
-### Actions from update():
-Returns `TierAction` enum (not strings) as of Phase 3:
+### TierAction Returns from update():
 - `TierAction.TIER2_ENTRY` - entered elevated tier
 - `TierAction.TIER2_EXIT` - left elevated tier (after 5s hysteresis)
 - `TierAction.TIER3_ENTRY` - entered critical tier
 - `TierAction.TIER3_EXIT` - left critical tier (after 5s hysteresis)
 - `TierAction.TIER2_PEAK` - new peak stress in elevated tier
+- `None` - no state change
 
-### Sentinel Methods
-| Method | Purpose |
-|--------|---------|
-| `__init__(buffer, fast_interval_ms, ...)` | Initialize with RingBuffer and thresholds |
-| `start()` | Start fast_loop and slow_loop tasks |
-| `stop()` | Stop loops |
-| `_fast_loop()` | 100ms loop: collect_fast_metrics -> push to buffer -> tier update |
-| `_slow_loop()` | 1s loop: update cached GPU/wakeups/thermal from powermetrics |
-| `_calculate_fast_stress(metrics, latency_ratio)` | Compute stress from fast metrics |
-| `_handle_tier_action(action)` | Trigger snapshots, call on_tier_change callback |
-| `_handle_potential_pause(actual, expected)` | Check if pause, freeze buffer, call on_pause_detected |
-
-### Callbacks
+### Usage (from Daemon._main_loop)
 ```python
-# Set by Daemon:
-sentinel.on_tier_change: async (action: str, tier: int) -> None
-sentinel.on_pause_detected: async (actual: float, expected: float, contents: BufferContents) -> None
+# TierManager is used directly by Daemon, no Sentinel wrapper:
+action = self.tier_manager.update(stress.total())
+if action:
+    self._handle_tier_action(action, stress)
 ```
 
-### Data Flow
-1. start() spawns _fast_loop() and _slow_loop() tasks
-2. _fast_loop() at 100ms: collect_fast_metrics() -> _calculate_fast_stress() -> buffer.push() -> tier_manager.update()
-3. If update() returns action -> _handle_tier_action() -> snapshot_processes() if needed -> on_tier_change callback
-4. If latency_ratio > 2.0 -> _handle_potential_pause() -> buffer.freeze() -> on_pause_detected callback
+### Deleted in Phase 5 Redesign
+The `Sentinel` class was deleted entirely. Its responsibilities were absorbed by `Daemon._main_loop()`:
+- Fast loop timing -> now driven by powermetrics 100ms stream
+- Stress calculation -> `Daemon._calculate_stress()`
+- Buffer management -> direct `RingBuffer.push()` calls
+- Pause detection -> `Daemon._handle_pause()`
 
 ---
 
@@ -541,7 +608,7 @@ sentinel.on_pause_detected: async (actual: float, expected: float, contents: Buf
 
 ## Module: tui/app.py
 
-**Purpose:** Textual-based interactive dashboard.
+**Purpose:** Textual-based interactive dashboard with real-time socket streaming.
 
 ### Classes
 | Class | Purpose |
@@ -556,21 +623,21 @@ sentinel.on_pause_detected: async (actual: float, expected: float, contents: Buf
 ### PauseMonitorApp Methods
 | Method | Purpose |
 |--------|---------|
-| `__init__(config)` | Store config, set up refresh interval |
-| `on_mount()` | Open DB connection, start refresh timer |
-| `on_unmount()` | Close DB connection |
+| `__init__(config)` | Store config, create SocketClient |
+| `on_mount()` | Connect to socket, start message receiver |
+| `on_unmount()` | Disconnect socket, close DB |
 | `compose()` | Build UI layout |
-| `_refresh_data()` | Update all widgets from database |
+| `_handle_message(msg)` | Process incoming socket message, update widgets |
 | `action_refresh()` | Manual refresh keybinding |
 | `action_show_events()` | Show events screen |
 | `action_show_history()` | (Future) Show history screen |
 
-### Data Flow
-1. App opens DB connection via get_connection()
-2. Timer calls _refresh_data() periodically
-3. _refresh_data() calls get_recent_samples() and get_events()
-4. Updates StressGauge, MetricsPanel, EventsTable widgets
-5. Event selection pushes EventDetailScreen
+### Data Flow (Post-Redesign)
+1. App creates SocketClient, connects to daemon's Unix socket
+2. Async task receives messages from socket stream
+3. Each message triggers _handle_message() to update widgets
+4. Real-time updates without SQLite polling
+5. Events screen still queries SQLite for historical events
 
 ---
 
@@ -578,17 +645,18 @@ sentinel.on_pause_detected: async (actual: float, expected: float, contents: Buf
 
 | Decision | Rationale |
 |----------|-----------|
-| Two-loop architecture (Sentinel + Daemon) | Fast loop (100ms) for responsive tier transitions; slow loop (5s) for detailed metrics |
+| Single 10Hz loop (Post-Redesign) | Powermetrics stream drives timing; eliminates separate fast/slow loops |
+| Unix socket for TUI streaming | Real-time data without SQLite polling overhead |
+| TierManager extracted from Sentinel | Reusable state machine; Sentinel class deleted |
 | Ring buffer for forensics | Capture pre-pause context without storage overhead |
 | Tier hysteresis (5s delay) | Prevent oscillation between states |
-| sysctl direct access | Avoid subprocess overhead in fast path (~20us vs ~10ms) |
 | Streaming powermetrics | Lower latency than exec-per-sample approach |
 | Event status flags | Allow user triage; protect important events from pruning |
 | WAL mode SQLite | Better concurrent read/write performance |
 | TOML config format | Human-readable, standard Python tooling |
 | XDG paths | Standard macOS/Linux config/data locations |
-| Callbacks for Sentinel -> Daemon | Loose coupling; Sentinel doesn't know about storage |
 | StressBreakdown as canonical type | Single source of truth, imported by storage.py |
+| SQLite for tier events only | Samples flow through socket; only bookmarks/forensics persisted |
 
 ---
 

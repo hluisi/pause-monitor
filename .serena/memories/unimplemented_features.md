@@ -1,29 +1,37 @@
 # Unimplemented Features and Stubs
 
-> ✅ **Phase 3 COMPLETE (2026-01-23).** Phase 4 (Socket Server) is next. See `docs/plans/phase-4-socket-server.md` for current work.
+> **Phase 5 COMPLETE (2026-01-22).** Redesign eliminated Sentinel; daemon now uses powermetrics directly.
 
-**Last audited:** 2026-01-23
+**Last audited:** 2026-01-22
+
+## Completed (via Redesign)
+
+- ~~Sentinel slow loop~~ - Replaced by Daemon powermetrics integration
+- ~~TUI socket streaming~~ - Implemented via SocketServer/SocketClient
+- ~~Complete 8-factor stress (including pageins)~~ - All factors now calculated from powermetrics
+- ~~Process attribution~~ - Using powermetrics top_cpu_processes + top_pagein_processes
 
 ## Recently Implemented
 
 | Feature | Implementation |
 |---------|----------------|
 | **Ring Buffer** | `ringbuffer.py` - Stores last 30s of stress samples and process snapshots |
-| **Sentinel Monitoring** | `sentinel.py` - Fast 100ms loop for pause detection with tiered monitoring |
-| **Tier State Machine** | `sentinel.py:TierManager` - SENTINEL/ELEVATED/CRITICAL transitions |
+| **Tier State Machine** | `sentinel.py:TierManager` - SENTINEL/ELEVATED/CRITICAL transitions (extracted, Sentinel class deleted) |
 | **Culprit Identification** | `forensics.py:identify_culprits()` - Maps stress factors to processes from ring buffer |
 | **Event Status Management** | CLI `events mark` command and TUI screens for reviewed/pinned/dismissed |
 | **GPU Stress Factor** | Added to StressBreakdown and database schema |
 | **Wakeups Stress Factor** | Added to StressBreakdown and database schema |
 | **TUI Events Screen** | Full event listing with filtering and status management |
-| **Sentinel Integration** | `daemon.py` integrates Sentinel for pause detection callbacks |
+| **Socket Server** | `socket_server.py:SocketServer` - Broadcasts ring buffer to TUI via Unix socket |
+| **Socket Client** | `socket_client.py:SocketClient` - TUI receives real-time data from daemon |
+| **10Hz Main Loop** | `daemon.py:Daemon._main_loop()` - Single 100ms loop driven by powermetrics stream |
 
-### Phase 3 Complete (2026-01-23)
+### Phase 5 Complete (2026-01-22)
 
 | Feature | Implementation |
 |---------|----------------|
-| **TierAction Enum** | `sentinel.py:TierAction` - replaces string returns from TierManager.update() |
-| **8-Factor Stress** | `stress.py:StressBreakdown` now includes `pageins` (0-30, critical for pause detection) |
+| **TierAction Enum** | `sentinel.py:TierAction` - tier state machine actions |
+| **8-Factor Stress** | `stress.py:StressBreakdown` includes all 8 factors including `pageins` |
 | **Daemon._calculate_stress()** | Calculates all 8 stress factors from PowermetricsResult |
 | **Daemon._handle_tier_action()** | Handles TierAction transitions, writes bookmarks on tier2_exit |
 | **Daemon._main_loop()** | Single 10Hz loop processing powermetrics stream |
@@ -31,7 +39,16 @@
 | **Daemon._maybe_update_peak()** | Peak stress tracking during elevated/critical tiers |
 | **Event.peak_stress** | `storage.py:Event` tracks peak stress during event |
 | **SCHEMA_VERSION=5** | Schema updated for stress_pageins column |
-| **Deleted: _slow_loop, _get_io_counters, _get_network_counters** | Stubs removed, functionality now in main loop |
+
+### Deleted (No Longer Exists)
+
+| Component | Replacement |
+|-----------|-------------|
+| `Sentinel` class | Deleted entirely, use `TierManager` directly |
+| `calculate_stress()` function | Deleted, use `Daemon._calculate_stress()` |
+| `IOBaselineManager` class | Deleted |
+| `SamplePolicy` | Deleted |
+| `slow_interval_ms` config | Deleted |
 
 ## Explicit Stubs
 
