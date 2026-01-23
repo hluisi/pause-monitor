@@ -778,7 +778,10 @@ class Daemon:
 
             try:
                 await self._powermetrics.start()
-                last_sample_time = time.monotonic()
+                # Don't set last_sample_time until after first sample arrives
+                # to avoid counting startup time as latency
+                last_sample_time: float | None = None
+                is_first_sample = True
 
                 async for pm_result in self._powermetrics.read_samples():
                     if self._shutdown_event.is_set():
@@ -786,9 +789,15 @@ class Daemon:
 
                     # Measure actual interval for latency/pause detection
                     now = time.monotonic()
-                    actual_interval = now - last_sample_time
+                    if is_first_sample:
+                        # First sample - no latency measurement possible
+                        actual_interval = expected_interval  # Assume on-time
+                        latency_ratio = 1.0
+                        is_first_sample = False
+                    else:
+                        actual_interval = now - last_sample_time
+                        latency_ratio = actual_interval / expected_interval
                     last_sample_time = now
-                    latency_ratio = actual_interval / expected_interval
 
                     # Store latest powermetrics result for peak tracking
                     self._latest_pm_result = pm_result
