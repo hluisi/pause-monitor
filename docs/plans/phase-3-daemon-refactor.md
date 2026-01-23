@@ -1,6 +1,6 @@
 # Phase 3: Refactor Daemon as Single Loop
 
-Extracted from `2026-01-21-pause-monitor-implementation.md`
+Extracted from [`2026-01-21-pause-monitor-implementation.md`](2026-01-21-pause-monitor-implementation.md)
 
 **Prerequisites:** Phase 1 (Unified Data Model) and Phase 2 (PowermetricsStream 100ms) — both complete.
 
