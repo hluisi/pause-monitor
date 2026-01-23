@@ -36,9 +36,13 @@ def status() -> None:
     from datetime import datetime, timedelta
 
     from pause_monitor.config import Config
-    from pause_monitor.storage import get_connection, get_events, get_recent_samples
+    from pause_monitor.storage import get_connection, get_events
 
     config = Config.load()
+
+    # Check daemon status via socket file
+    daemon_running = config.socket_path.exists()
+    click.echo(f"Daemon: {'running' if daemon_running else 'stopped'}")
 
     if not config.db_path.exists():
         click.echo("Database not found. Run 'pause-monitor daemon' first.")
@@ -46,41 +50,33 @@ def status() -> None:
 
     conn = get_connection(config.db_path)
     try:
-        # Get latest sample
-        samples = get_recent_samples(conn, limit=1)
-
-        if not samples:
-            click.echo("No samples collected yet.")
-            return
-
-        latest = samples[0]
-        age = (datetime.now() - latest.timestamp).total_seconds()
-
-        # Check if daemon is running
-        daemon_status = "running" if age < 30 else "stopped"
-
-        click.echo(f"Daemon: {daemon_status}")
-        click.echo(f"Last sample: {int(age)}s ago")
-        click.echo(f"Stress: {latest.stress.total}/100")
-        click.echo(
-            f"  Load: {latest.stress.load}, Memory: {latest.stress.memory}, "
-            f"Thermal: {latest.stress.thermal}, Latency: {latest.stress.latency}, "
-            f"I/O: {latest.stress.io}"
-        )
-
         # Get recent events
         events = get_events(
             conn,
             start=datetime.now() - timedelta(days=1),
-            limit=3,
+            limit=5,
         )
 
-        if events:
-            click.echo(f"\nRecent events (last 24h): {len(events)}")
-            for event in events:
-                click.echo(
-                    f"  - {event.timestamp.strftime('%H:%M:%S')}: {event.duration:.1f}s pause"
-                )
+        if not events:
+            click.echo("No events in the last 24 hours.")
+            return
+
+        click.echo(f"\nRecent events (last 24h): {len(events)}")
+        for event in events:
+            # Compute duration if event has ended
+            if event.end_timestamp:
+                duration = (event.end_timestamp - event.start_timestamp).total_seconds()
+                duration_str = f"{duration:.1f}s"
+            else:
+                duration_str = "ongoing"
+
+            tier_str = f"tier {event.peak_tier}" if event.peak_tier else "elevated"
+            stress_str = f"peak {event.peak_stress}" if event.peak_stress else ""
+
+            click.echo(
+                f"  - {event.start_timestamp.strftime('%H:%M:%S')}: "
+                f"{duration_str} {tier_str} {stress_str}"
+            )
     finally:
         conn.close()
 
@@ -295,12 +291,16 @@ def events_mark(
 @click.option("--hours", "-H", default=24, help="Hours of history to show")
 @click.option("--format", "-f", "fmt", type=click.Choice(["table", "json", "csv"]), default="table")
 def history(hours: int, fmt: str) -> None:
-    """Query historical data."""
+    """Query historical events.
+
+    Note: Since Phase 6 redesign, continuous samples are no longer stored.
+    This command shows escalation events (elevated/critical periods) instead.
+    """
     import json
     from datetime import datetime, timedelta
 
     from pause_monitor.config import Config
-    from pause_monitor.storage import get_connection, get_recent_samples
+    from pause_monitor.storage import get_connection, get_events
 
     config = Config.load()
 
@@ -310,52 +310,73 @@ def history(hours: int, fmt: str) -> None:
 
     conn = get_connection(config.db_path)
     try:
-        # Get samples from time range
-        # Note: get_recent_samples returns newest first, so we get more than needed
-        # and filter by time
+        # Get events from time range
         cutoff = datetime.now() - timedelta(hours=hours)
-        samples = get_recent_samples(conn, limit=hours * 720)  # ~1 sample/5s max
-        samples = [s for s in samples if s.timestamp >= cutoff]
+        events = get_events(conn, start=cutoff, limit=1000)
 
-        if not samples:
-            click.echo(f"No samples in the last {hours} hour{'s' if hours != 1 else ''}.")
+        if not events:
+            click.echo(f"No events in the last {hours} hour{'s' if hours != 1 else ''}.")
             return
 
         if fmt == "json":
-            data = [
-                {
-                    "timestamp": s.timestamp.isoformat(),
-                    "stress": s.stress.total,
-                    "cpu_power": s.cpu_power,
-                    "load_avg": s.load_avg,
-                    "mem_pressure": s.mem_pressure,
-                    "pageins_per_s": s.pageins_per_s,
-                }
-                for s in samples
-            ]
+            data = []
+            for e in events:
+                duration = None
+                if e.end_timestamp:
+                    duration = (e.end_timestamp - e.start_timestamp).total_seconds()
+                data.append(
+                    {
+                        "id": e.id,
+                        "start": e.start_timestamp.isoformat(),
+                        "end": e.end_timestamp.isoformat() if e.end_timestamp else None,
+                        "duration_sec": duration,
+                        "peak_stress": e.peak_stress,
+                        "peak_tier": e.peak_tier,
+                        "status": e.status,
+                    }
+                )
             click.echo(json.dumps(data, indent=2))
         elif fmt == "csv":
-            click.echo("timestamp,stress,cpu_power,load_avg,mem_pressure,pageins_per_s")
-            for s in samples:
+            click.echo("id,start,end,duration_sec,peak_stress,peak_tier,status")
+            for e in events:
+                duration = ""
+                if e.end_timestamp:
+                    duration = f"{(e.end_timestamp - e.start_timestamp).total_seconds():.1f}"
+                end = e.end_timestamp.isoformat() if e.end_timestamp else ""
                 click.echo(
-                    f"{s.timestamp.isoformat()},{s.stress.total},"
-                    f"{s.cpu_power},{s.load_avg},{s.mem_pressure},{s.pageins_per_s}"
+                    f"{e.id},{e.start_timestamp.isoformat()},{end},"
+                    f"{duration},{e.peak_stress or ''},{e.peak_tier or ''},{e.status}"
                 )
         else:
             # Summary stats
-            stresses = [s.stress.total for s in samples]
-            click.echo(f"Samples: {len(samples)}")
-            click.echo(f"Time range: {samples[-1].timestamp} to {samples[0].timestamp}")
+            click.echo(f"Events: {len(events)}")
             click.echo(
-                f"Stress - Min: {min(stresses)}, Max: {max(stresses)}, "
-                f"Avg: {sum(stresses) / len(stresses):.1f}"
+                f"Time range: {events[-1].start_timestamp.strftime('%Y-%m-%d %H:%M')} "
+                f"to {events[0].start_timestamp.strftime('%Y-%m-%d %H:%M')}"
             )
 
-            # High stress periods
-            high_stress = [s for s in samples if s.stress.total >= 30]
-            if high_stress:
-                click.echo(f"\nHigh stress periods: {len(high_stress)} samples")
-                click.echo(f"  ({len(high_stress) / len(samples) * 100:.1f}% of time)")
+            # Peak stress stats
+            peak_stresses = [e.peak_stress for e in events if e.peak_stress]
+            if peak_stresses:
+                click.echo(
+                    f"Peak stress - Min: {min(peak_stresses)}, Max: {max(peak_stresses)}, "
+                    f"Avg: {sum(peak_stresses) / len(peak_stresses):.1f}"
+                )
+
+            # Tier breakdown
+            tier2_count = sum(1 for e in events if e.peak_tier == 2)
+            tier3_count = sum(1 for e in events if e.peak_tier == 3)
+            click.echo(f"\nTier 2 (elevated): {tier2_count} events")
+            click.echo(f"Tier 3 (critical): {tier3_count} events")
+
+            # Total elevated time
+            total_duration = 0.0
+            for e in events:
+                if e.end_timestamp:
+                    total_duration += (e.end_timestamp - e.start_timestamp).total_seconds()
+            if total_duration > 0:
+                mins = total_duration / 60
+                click.echo(f"\nTotal elevated time: {total_duration:.0f}s ({mins:.1f}m)")
     finally:
         conn.close()
 

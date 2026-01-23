@@ -1,8 +1,8 @@
 # Design Specification
 
-> ✅ **Phase 5 COMPLETE (2026-01-22).** Redesign eliminated Sentinel class; daemon uses powermetrics directly with TierManager.
+> ✅ **Phase 6 COMPLETE (2026-01-22).** Tier-based event storage redesign; SCHEMA_VERSION=6.
 
-**Last updated:** 2026-01-22 (Phase 5 complete - redesign done)
+**Last updated:** 2026-01-23 (Schema redesign for tier-based saving)
 
 ## Source Documents
 
@@ -10,6 +10,11 @@
 |----------|----------------|--------|
 | docs/plans/2026-01-20-pause-monitor-design.md | 2026-01-21 | Archived |
 | docs/plans/2026-01-21-ring-buffer-sentinel-design.md | 2026-01-22 | Archived |
+| docs/plans/2026-01-21-pause-monitor-redesign.md | 2026-01-23 | Archived |
+| docs/plans/2026-01-21-pause-monitor-implementation.md | 2026-01-23 | Archived |
+| docs/plans/phase-4-socket-server.md | 2026-01-23 | Archived |
+| docs/plans/phase-5-socket-client-tui.md | 2026-01-23 | Archived |
+| docs/plans/phase-6-cleanup.md | 2026-01-23 | Archived |
 
 ## Overview
 
@@ -129,33 +134,66 @@ A **real-time** system health monitoring tool for macOS that tracks down intermi
 
 ## Data Models
 
-### samples table
+### events table (Primary - Tier-Based Saving)
+| Field | Type | Purpose |
+|-------|------|---------|
+| id | INTEGER PRIMARY KEY | Auto-increment ID |
+| start_timestamp | REAL | Unix timestamp when escalation began |
+| end_timestamp | REAL | Unix timestamp when returned to tier 1 (NULL if ongoing) |
+| peak_stress | INTEGER | Highest stress score during event |
+| peak_tier | INTEGER | Highest tier reached (2 or 3) |
+| status | TEXT | "unreviewed", "reviewed", "pinned", "dismissed" |
+| notes | TEXT | User-added notes |
+
+### event_samples table (Primary - Tier-Based Saving)
+| Field | Type | Purpose |
+|-------|------|---------|
+| id | INTEGER PRIMARY KEY | Auto-increment ID |
+| event_id | INTEGER FK | References events(id) |
+| timestamp | REAL | Unix timestamp with ms precision |
+| tier | INTEGER | 2=peak save, 3=continuous 10Hz save |
+| elapsed_ns | INTEGER | Actual sample interval in nanoseconds |
+| throttled | INTEGER | Thermal throttling active |
+| cpu_power | REAL | CPU power in milliwatts |
+| gpu_pct | REAL | GPU utilization % |
+| gpu_power | REAL | GPU power in milliwatts |
+| io_read_per_s | REAL | Disk read bytes/sec |
+| io_write_per_s | REAL | Disk write bytes/sec |
+| wakeups_per_s | REAL | Idle wakeups per second |
+| pageins_per_s | REAL | Swap pageins per second |
+| stress_total | INTEGER | Combined stress score 0-100 |
+| stress_load | INTEGER | Load contribution |
+| stress_memory | INTEGER | Memory contribution |
+| stress_thermal | INTEGER | Thermal contribution |
+| stress_latency | INTEGER | Latency contribution |
+| stress_io | INTEGER | I/O contribution |
+| stress_gpu | INTEGER | GPU contribution |
+| stress_wakeups | INTEGER | Wakeups contribution |
+| stress_pageins | INTEGER | Pageins contribution |
+| top_cpu_procs | TEXT | JSON array of top 5 CPU processes |
+| top_pagein_procs | TEXT | JSON array of top 5 pagein processes |
+| top_wakeup_procs | TEXT | JSON array of top 5 wakeup processes |
+| top_diskio_procs | TEXT | JSON array of top 5 disk I/O processes |
+
+### samples table (Legacy - Not Used by Tier-Based Saving)
 | Field | Type | Purpose |
 |-------|------|---------|
 | id | INTEGER PRIMARY KEY | Auto-increment ID |
 | timestamp | REAL | Unix timestamp with ms precision |
 | interval | REAL | Actual seconds since last sample |
-| cpu_pct | REAL | System-wide CPU % |
 | load_avg | REAL | 1-minute load average |
-| mem_available | INTEGER | Bytes available |
-| swap_used | INTEGER | Bytes in swap |
-| io_read | INTEGER | Bytes/sec read |
-| io_write | INTEGER | Bytes/sec write |
-| net_sent | INTEGER | Bytes/sec sent |
-| net_recv | INTEGER | Bytes/sec received |
-| cpu_temp | REAL | Celsius (privileged) |
-| cpu_freq | INTEGER | MHz (privileged) |
-| throttled | BOOLEAN | Thermal throttling active |
+| mem_pressure | INTEGER | Memory pressure level |
+| throttled | INTEGER | Thermal throttling active |
+| cpu_power | REAL | CPU power in milliwatts |
 | gpu_pct | REAL | GPU utilization % |
-| stress_total | INTEGER | Combined stress score 0-100 |
-| stress_load | INTEGER | Load contribution 0-40 |
-| stress_memory | INTEGER | Memory contribution 0-30 |
-| stress_thermal | INTEGER | Thermal contribution 0-20 |
-| stress_latency | INTEGER | Latency contribution 0-30 |
-| stress_io | INTEGER | I/O contribution 0-10 |
-| stress_pageins | INTEGER | Pageins contribution 0-30 (critical for pause detection) |
+| gpu_power | REAL | GPU power in milliwatts |
+| io_read_per_s | REAL | Disk read bytes/sec |
+| io_write_per_s | REAL | Disk write bytes/sec |
+| wakeups_per_s | REAL | Idle wakeups per second |
+| pageins_per_s | REAL | Swap pageins per second |
+| stress_* | INTEGER | Stress breakdown (8 factors) |
 
-### process_samples table
+### process_samples table (Legacy - Not Used by Tier-Based Saving)
 | Field | Type | Purpose |
 |-------|------|---------|
 | id | INTEGER PRIMARY KEY | Auto-increment ID |
@@ -164,22 +202,10 @@ A **real-time** system health monitoring tool for macOS that tracks down intermi
 | name | TEXT | Process name |
 | cpu_pct | REAL | Process CPU % |
 | mem_pct | REAL | Process memory % |
-| io_read | INTEGER | Bytes/sec (via powermetrics) |
-| io_write | INTEGER | Bytes/sec (via powermetrics) |
+| io_read | INTEGER | Bytes/sec read |
+| io_write | INTEGER | Bytes/sec write |
 | energy_impact | REAL | Apple's composite energy score |
-| is_suspect | BOOLEAN | Matches suspect list |
-
-### events table
-| Field | Type | Purpose |
-|-------|------|---------|
-| id | INTEGER PRIMARY KEY | Auto-increment ID |
-| timestamp | REAL | Unix timestamp |
-| duration | REAL | Seconds system was unresponsive |
-| stress_* | INTEGER | Stress breakdown before pause |
-| culprits | TEXT | JSON array of {pid, name, reason} |
-| event_dir | TEXT | Path to forensics directory |
-| notes | TEXT | User-added notes |
-| peak_stress | INTEGER | Peak stress score during event |
+| is_suspect | INTEGER | Matches suspect list |
 
 ### daemon_state table
 | Field | Type | Purpose |

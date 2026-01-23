@@ -224,7 +224,7 @@ class TestHistoryCommand:
         assert "pause-monitor daemon" in result.output
 
     def test_history_empty_database(self, runner: CliRunner, tmp_path: Path) -> None:
-        """history with empty database shows 'No samples'."""
+        """history with empty database shows 'No events'."""
         db_path = tmp_path / "data.db"
         init_database(db_path)
 
@@ -235,34 +235,29 @@ class TestHistoryCommand:
             result = runner.invoke(main, ["history"])
 
         assert result.exit_code == 0
-        assert "No samples in the last 24 hours" in result.output
+        assert "No events in the last 24 hours" in result.output
 
     def test_history_table_format(self, runner: CliRunner, tmp_path: Path) -> None:
         """history with table format shows summary stats."""
-        from pause_monitor.storage import get_connection, insert_sample
+        from datetime import timedelta
+
+        from pause_monitor.storage import create_event, finalize_event, get_connection
 
         db_path = tmp_path / "data.db"
         init_database(db_path)
 
-        # Insert test samples
+        # Insert test events
         conn = get_connection(db_path)
-        for i in range(5):
-            stress = StressBreakdown(
-                load=10 + i * 5,
-                memory=5,
-                thermal=0,
-                latency=0,
-                io=0,
-                gpu=0,
-                wakeups=0,
-                pageins=0,
+        for i in range(3):
+            start = datetime.now() - timedelta(hours=i)
+            event_id = create_event(conn, start)
+            finalize_event(
+                conn,
+                event_id,
+                end_timestamp=start + timedelta(seconds=30 + i * 10),
+                peak_stress=20 + i * 10,
+                peak_tier=2,
             )
-            sample = make_test_sample(
-                interval=5.0,
-                load_avg=1.5 + i * 0.2,
-                stress=stress,
-            )
-            insert_sample(conn, sample)
         conn.close()
 
         with patch("pause_monitor.config.Config.load") as mock_load:
@@ -272,32 +267,32 @@ class TestHistoryCommand:
             result = runner.invoke(main, ["history"])
 
         assert result.exit_code == 0
-        assert "Samples: 5" in result.output
+        assert "Events: 3" in result.output
         assert "Time range:" in result.output
-        assert "Stress - Min:" in result.output
-        assert "Max:" in result.output
-        assert "Avg:" in result.output
+        assert "Peak stress - Min:" in result.output
+        assert "Tier 2 (elevated):" in result.output
 
     def test_history_json_format(self, runner: CliRunner, tmp_path: Path) -> None:
         """history --format json outputs JSON array."""
         import json
+        from datetime import timedelta
 
-        from pause_monitor.storage import get_connection, insert_sample
+        from pause_monitor.storage import create_event, finalize_event, get_connection
 
         db_path = tmp_path / "data.db"
         init_database(db_path)
 
-        # Insert test sample
+        # Insert test event
         conn = get_connection(db_path)
-        stress = StressBreakdown(
-            load=15, memory=5, thermal=0, latency=0, io=0, gpu=0, wakeups=0, pageins=0
+        start = datetime.now() - timedelta(hours=1)
+        event_id = create_event(conn, start)
+        finalize_event(
+            conn,
+            event_id,
+            end_timestamp=start + timedelta(seconds=45),
+            peak_stress=35,
+            peak_tier=2,
         )
-        sample = make_test_sample(
-            interval=5.0,
-            load_avg=2.0,
-            stress=stress,
-        )
-        insert_sample(conn, sample)
         conn.close()
 
         with patch("pause_monitor.config.Config.load") as mock_load:
@@ -310,30 +305,31 @@ class TestHistoryCommand:
         data = json.loads(result.output)
         assert isinstance(data, list)
         assert len(data) == 1
-        assert "timestamp" in data[0]
-        assert "stress" in data[0]
-        assert "load_avg" in data[0]
-        assert data[0]["stress"] == 20  # 15 + 5
-        assert data[0]["load_avg"] == 2.0
+        assert "start" in data[0]
+        assert "peak_stress" in data[0]
+        assert data[0]["peak_stress"] == 35
+        assert data[0]["peak_tier"] == 2
 
     def test_history_csv_format(self, runner: CliRunner, tmp_path: Path) -> None:
         """history --format csv outputs CSV with header."""
-        from pause_monitor.storage import get_connection, insert_sample
+        from datetime import timedelta
+
+        from pause_monitor.storage import create_event, finalize_event, get_connection
 
         db_path = tmp_path / "data.db"
         init_database(db_path)
 
-        # Insert test sample
+        # Insert test event
         conn = get_connection(db_path)
-        stress = StressBreakdown(
-            load=10, memory=5, thermal=0, latency=0, io=0, gpu=0, wakeups=0, pageins=0
+        start = datetime.now() - timedelta(hours=1)
+        event_id = create_event(conn, start)
+        finalize_event(
+            conn,
+            event_id,
+            end_timestamp=start + timedelta(seconds=30),
+            peak_stress=25,
+            peak_tier=2,
         )
-        sample = make_test_sample(
-            interval=5.0,
-            load_avg=1.5,
-            stress=stress,
-        )
-        insert_sample(conn, sample)
         conn.close()
 
         with patch("pause_monitor.config.Config.load") as mock_load:
@@ -344,38 +340,34 @@ class TestHistoryCommand:
 
         assert result.exit_code == 0
         lines = result.output.strip().split("\n")
-        # Header should have new fields
-        assert "timestamp" in lines[0]
-        assert "stress" in lines[0]
-        assert "load_avg" in lines[0]
+        # Header should have event fields
+        assert "id" in lines[0]
+        assert "start" in lines[0]
+        assert "peak_stress" in lines[0]
         assert len(lines) == 2  # header + 1 data row
 
-    def test_history_high_stress_periods(self, runner: CliRunner, tmp_path: Path) -> None:
-        """history shows high stress period summary when present."""
-        from pause_monitor.storage import get_connection, insert_sample
+    def test_history_tier_breakdown(self, runner: CliRunner, tmp_path: Path) -> None:
+        """history shows tier breakdown with tier 2 and tier 3 events."""
+        from datetime import timedelta
+
+        from pause_monitor.storage import create_event, finalize_event, get_connection
 
         db_path = tmp_path / "data.db"
         init_database(db_path)
 
-        # Insert samples with varying stress (some >= 30)
+        # Insert events with different tiers
         conn = get_connection(db_path)
-        for stress_val in [10, 20, 35, 45, 25]:
-            stress = StressBreakdown(
-                load=stress_val,
-                memory=0,
-                thermal=0,
-                latency=0,
-                io=0,
-                gpu=0,
-                wakeups=0,
-                pageins=0,
+        # 2 tier 2 events
+        for i in range(2):
+            start = datetime.now() - timedelta(hours=i)
+            event_id = create_event(conn, start)
+            finalize_event(
+                conn, event_id, start + timedelta(seconds=30), peak_stress=25, peak_tier=2
             )
-            sample = make_test_sample(
-                interval=5.0,
-                load_avg=1.5,
-                stress=stress,
-            )
-            insert_sample(conn, sample)
+        # 1 tier 3 event
+        start = datetime.now() - timedelta(hours=3)
+        event_id = create_event(conn, start)
+        finalize_event(conn, event_id, start + timedelta(seconds=60), peak_stress=55, peak_tier=3)
         conn.close()
 
         with patch("pause_monitor.config.Config.load") as mock_load:
@@ -385,30 +377,23 @@ class TestHistoryCommand:
             result = runner.invoke(main, ["history"])
 
         assert result.exit_code == 0
-        assert "High stress periods: 2 samples" in result.output
-        assert "40.0% of time" in result.output
+        assert "Tier 2 (elevated): 2 events" in result.output
+        assert "Tier 3 (critical): 1 events" in result.output
 
     def test_history_hours_option(self, runner: CliRunner, tmp_path: Path) -> None:
         """history --hours limits time range."""
         from datetime import timedelta
 
-        from pause_monitor.storage import get_connection, insert_sample
+        from pause_monitor.storage import create_event, finalize_event, get_connection
 
         db_path = tmp_path / "data.db"
         init_database(db_path)
 
-        # Insert sample from 2 hours ago (outside --hours 1 range)
+        # Insert event from 2 hours ago (outside --hours 1 range)
         conn = get_connection(db_path)
-        stress = StressBreakdown(
-            load=10, memory=5, thermal=0, latency=0, io=0, gpu=0, wakeups=0, pageins=0
-        )
-        old_sample = make_test_sample(
-            timestamp=datetime.now() - timedelta(hours=2),
-            interval=5.0,
-            load_avg=1.5,
-            stress=stress,
-        )
-        insert_sample(conn, old_sample)
+        start = datetime.now() - timedelta(hours=2)
+        event_id = create_event(conn, start)
+        finalize_event(conn, event_id, start + timedelta(seconds=30), peak_stress=25, peak_tier=2)
         conn.close()
 
         with patch("pause_monitor.config.Config.load") as mock_load:
@@ -418,7 +403,7 @@ class TestHistoryCommand:
             result = runner.invoke(main, ["history", "-H", "1"])
 
         assert result.exit_code == 0
-        assert "No samples in the last 1 hour" in result.output
+        assert "No events in the last 1 hour" in result.output
 
 
 class TestPruneCommand:

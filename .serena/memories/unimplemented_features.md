@@ -1,8 +1,8 @@
 # Unimplemented Features and Stubs
 
-> **Phase 5 COMPLETE (2026-01-22).** Redesign eliminated Sentinel; daemon now uses powermetrics directly.
+> **Phase 6 COMPLETE (2026-01-22).** Tier-based event storage; SCHEMA_VERSION=6.
 
-**Last audited:** 2026-01-22
+**Last audited:** 2026-01-23
 
 ## Completed (via Redesign)
 
@@ -10,134 +10,117 @@
 - ~~TUI socket streaming~~ - Implemented via SocketServer/SocketClient
 - ~~Complete 8-factor stress (including pageins)~~ - All factors now calculated from powermetrics
 - ~~Process attribution~~ - Using powermetrics top_cpu_processes + top_pagein_processes
-
-## Recently Implemented
-
-| Feature | Implementation |
-|---------|----------------|
-| **Ring Buffer** | `ringbuffer.py` - Stores last 30s of stress samples and process snapshots |
-| **Tier State Machine** | `sentinel.py:TierManager` - SENTINEL/ELEVATED/CRITICAL transitions (extracted, Sentinel class deleted) |
-| **Culprit Identification** | `forensics.py:identify_culprits()` - Maps stress factors to processes from ring buffer |
-| **Event Status Management** | CLI `events mark` command and TUI screens for reviewed/pinned/dismissed |
-| **GPU Stress Factor** | Added to StressBreakdown and database schema |
-| **Wakeups Stress Factor** | Added to StressBreakdown and database schema |
-| **TUI Events Screen** | Full event listing with filtering and status management |
-| **Socket Server** | `socket_server.py:SocketServer` - Broadcasts ring buffer to TUI via Unix socket |
-| **Socket Client** | `socket_client.py:SocketClient` - TUI receives real-time data from daemon |
-| **10Hz Main Loop** | `daemon.py:Daemon._main_loop()` - Single 100ms loop driven by powermetrics stream |
-
-### Phase 5 Complete (2026-01-22)
-
-| Feature | Implementation |
-|---------|----------------|
-| **TierAction Enum** | `sentinel.py:TierAction` - tier state machine actions |
-| **8-Factor Stress** | `stress.py:StressBreakdown` includes all 8 factors including `pageins` |
-| **Daemon._calculate_stress()** | Calculates all 8 stress factors from PowermetricsResult |
-| **Daemon._handle_tier_action()** | Handles TierAction transitions, writes bookmarks on tier2_exit |
-| **Daemon._main_loop()** | Single 10Hz loop processing powermetrics stream |
-| **Daemon._handle_pause()** | Pause detection with forensics capture |
-| **Daemon._maybe_update_peak()** | Peak stress tracking during elevated/critical tiers |
-| **Event.peak_stress** | `storage.py:Event` tracks peak stress during event |
-| **SCHEMA_VERSION=5** | Schema updated for stress_pageins column |
-
-### Deleted (No Longer Exists)
-
-| Component | Replacement |
-|-----------|-------------|
-| `Sentinel` class | Deleted entirely, use `TierManager` directly |
-| `calculate_stress()` function | Deleted, use `Daemon._calculate_stress()` |
-| `IOBaselineManager` class | Deleted |
-| `SamplePolicy` | Deleted |
-| `slow_interval_ms` config | Deleted |
+- ~~Ring Buffer~~ - `ringbuffer.py` stores last 30s of stress samples
+- ~~Tier State Machine~~ - `sentinel.py:TierManager` manages tier transitions
+- ~~Event Status Management~~ - CLI `events mark` command and TUI EventsScreen
+- ~~Socket Server/Client~~ - Real-time data streaming to TUI
+- ~~10Hz Main Loop~~ - Single 100ms loop driven by powermetrics stream
 
 ## Explicit Stubs
 
 | Location | Current Behavior | Expected Behavior |
 |----------|------------------|-------------------|
-| `tui/app.py:525` `action_show_history()` | `self.notify("History view not yet implemented")` | Navigate to history view with charts/graphs showing stress trends |
+| `tui/app.py:843-845` `action_show_history()` | `self.notify("History view not yet implemented")` | Navigate to history view with charts/graphs showing stress trends |
+
+## Broken Code (Needs Fix)
+
+| Location | Issue | Impact |
+|----------|-------|--------|
+| `cli.py:81` `status` command | References `event.timestamp` and `event.duration` which don't exist on new `Event` class (should be `event.start_timestamp` and computed duration) | **AttributeError** - `status` command crashes when events exist |
+| `cli.py:50,317` `status`/`history` commands | Use `get_recent_samples()` which queries legacy `samples` table | Shows stale/empty data since daemon no longer inserts into `samples` |
 
 ## Config Defined But Not Used
 
 | Config Key | Where Defined | What Should Happen |
 |------------|---------------|-------------------|
-| `learning_mode` | `config.py:86` | Daemon should suppress alerts, store all samples, and track pause correlations for calibration. Currently only stored/loaded but never checked in daemon logic. |
-| `suspects.patterns` | `config.py:43-57` | Should be used to flag processes matching patterns as suspects in forensics and culprit identification. Pattern list exists but is never searched against process names. |
+| `learning_mode` | `config.py:87` | Daemon should suppress alerts, store all samples, and track pause correlations for calibration. Currently only stored/loaded in config but never checked in daemon logic. |
+| `suspects.patterns` | `config.py:46-57` | Should flag processes matching patterns as suspects in forensics and culprit identification. Pattern list exists but is never searched against process names in daemon.py or forensics.py. |
 
-## Database Tables Not Populated
+## Database Tables Status
 
-| Table | Schema Exists | Insert Function | Problem |
-|-------|---------------|-----------------|---------|
-| `process_samples` | Yes (`storage.py:51-63`) | None exists | Table defined but no code ever inserts rows. Design doc says top 10 CPU + top 5 I/O processes per sample should be captured. |
-| `daemon_state` | Yes (`storage.py:88-93`) | Only in `init_database` | Only `schema_version` is stored. Design doc specifies `io_baseline` and `last_sample_id` should be persisted across daemon restarts. |
+| Table | Status | Notes |
+|-------|--------|-------|
+| `events` | **Active** | Tier-based event storage (start/end timestamps, peak_tier) |
+| `event_samples` | **Active** | Samples captured during escalation events (tier 2: peaks, tier 3: continuous 10Hz) |
+| `samples` | **Legacy/Orphaned** | Not written by daemon; still queried by `status` and `history` commands (causing stale results) |
+| `process_samples` | **Legacy/Unused** | Schema exists, no INSERT statements, never populated |
+| `daemon_state` | **Partial** | Only `schema_version` is used; design spec says `io_baseline` and `last_sample_id` should also be persisted |
 
-## Design Doc Gaps
+## Design Spec Gaps (Missing CLI Commands)
 
-Features specified in design_spec but not implemented:
+| Command | Design Doc Section | Current State |
+|---------|-------------------|---------------|
+| `calibrate` | CLI Commands table | **Does not exist.** Should analyze learning mode data and suggest thresholds. |
+
+## Design Spec Gaps (Missing Features)
 
 | Feature | Design Doc Section | Current State |
 |---------|-------------------|---------------|
-| **`calibrate` CLI command** | CLI Commands table | Command does not exist. Should analyze learning mode data and suggest thresholds. |
-| **`history --at "<time>"` option** | CLI Commands table | Option not implemented. History command only has `--hours` and `--format`. |
-| **Sudoers generation** | Install Process step 5 | `install` command creates launchd plist but no sudoers rules for privileged operations. |
-| **tailspin enable** | Install Process step 6 | `install` does not call `tailspin enable`. |
-| **SIGHUP config reload** | Design Decisions | No signal handler in daemon for hot-reloading config. |
-| **Per-process I/O capture** | process_samples table | PowermetricsStream uses minimal samplers, does not request `--show-process-io`. |
-| **ForensicsHealth check** | Install Process step 8 | `check_forensics_health()` not implemented. |
-| **Responsible PID mapping** | "Maps XPC helper activity to parent app" | Not parsed from powermetrics plist. |
-| **Energy impact sorting** | "processes sorted by Apple's composite energy score" | Not implemented in process capture. |
+| `history --at "<time>"` option | CLI Commands table | Option not implemented. History command only has `--hours` and `--format`. |
+| Sudoers generation | Install Process step 5 | `install` command creates launchd plist but no sudoers rules for privileged operations (spindump, tailspin, powermetrics --show-process-io). |
+| tailspin enable | Install Process step 6 | `install` command does not call `tailspin enable`. |
+| SIGHUP config reload | Design Decisions | No signal handler in daemon for hot-reloading config. Only SIGTERM/SIGINT are handled. |
+| ForensicsHealth check | Install Process step 8 | `check_forensics_health()` not implemented. |
+| Event directory cleanup on prune | Storage design | `prune_old_data()` deletes database records but not orphaned event directories in `~/.local/share/pause-monitor/events/`. |
 
-## Code Review Deferred Items
+## Legacy Data Issues
 
-| Source | Issue | Rationale for Deferral |
-|--------|-------|----------------------|
-| Task 11 review | Event directory cleanup on prune | Pre-existing gap - `prune_old_data` doesn't delete orphaned event directories. Would need to track event_dir paths and rmtree them. |
+| Issue | Impact | Fix Needed |
+|-------|--------|-----------|
+| `samples` table orphaned | `status` and `history` CLI commands show stale/no data | Either (a) update commands to use `event_samples` or (b) have daemon also write to `samples` |
+| `process_samples` table unused | No per-process data stored in database | Design intended this for forensics; either delete table or implement insertion |
 
 ## Priority Recommendations
 
-### High Priority
+### High Priority (Broken Functionality)
 
-1. **Per-process data capture** - Need to add `tasks,disk` samplers to PowermetricsStream and parse per-process metrics from plist. This is essential for meaningful culprit identification.
+1. **Fix `status` command** - References wrong Event attributes (`timestamp` → `start_timestamp`, add duration calculation). This crashes when events exist.
 
-2. **Sudoers/tailspin setup** - Forensics requires privileged access. Install command should configure sudoers rules and enable tailspin.
+2. **Fix `status`/`history` data source** - These commands query legacy `samples` table which daemon no longer populates. Need to update to use `event_samples` or add backward-compatible sample insertion.
 
-3. **Process samples insertion** - Schema exists but data is never captured. Need `insert_process_sample()` function and daemon logic to call it.
+### Medium Priority (Missing Core Features)
 
-### Medium Priority
+3. **Learning mode** - Make `config.learning_mode` actually do something in daemon (suppress alerts, collect calibration data).
 
-4. **Learning mode** - Make `config.learning_mode` actually do something in daemon (suppress alerts, collect calibration data).
+4. **Suspects patterns** - Use `config.suspects.patterns` to flag known-problematic processes in forensics output.
 
-5. **Suspects patterns** - Use `config.suspects.patterns` to flag known-problematic processes in forensics output.
+5. **Sudoers/tailspin setup** - `install` command should configure sudoers rules and enable tailspin for privileged forensics operations.
 
 6. **`calibrate` command** - Implement CLI command to analyze learning data and suggest threshold values.
 
-### Low Priority
+7. **Event directory cleanup** - `prune_old_data()` should also delete orphaned event directories.
 
-7. **TUI history view** - Events screen is done, history view remains as stub notification.
+### Low Priority (Nice to Have)
 
-8. **SIGHUP config reload** - Nice to have for live tuning without daemon restart.
+8. **TUI history view** - Events screen is done, history view remains as stub notification.
 
-9. **`history --at` option** - Query what was happening at a specific point in time.
+9. **SIGHUP config reload** - Nice to have for live tuning without daemon restart.
 
-10. **Daemon state persistence** - Persist `io_baseline` and `last_sample_id` across daemon restarts.
+10. **`history --at` option** - Query what was happening at a specific point in time.
+
+11. **Daemon state persistence** - Persist `io_baseline` and `last_sample_id` across daemon restarts.
 
 ## Verification Commands
 
 ```bash
 # Check for explicit stubs/TODOs
-grep -rn "TODO\|FIXME\|placeholder\|not.*implemented" src/pause_monitor/
+grep -rn "TODO\|FIXME\|not.*implemented" src/pause_monitor/
 
-# Check learning_mode usage in daemon
+# Verify status command crash (if events exist in DB)
+uv run pause-monitor status
+
+# Check learning_mode usage in daemon (should be empty)
 grep -rn "learning_mode" src/pause_monitor/daemon.py
 
-# Check suspects.patterns usage (should appear outside config.py)
+# Check suspects.patterns usage (should only be in config.py)
 grep -rn "suspects\|patterns" src/pause_monitor/*.py | grep -v config.py | grep -v __pycache__
 
-# Check process_samples insertions
-grep -rn "INSERT INTO process_samples" src/
+# Check legacy samples table population (should be empty)
+grep -rn "insert_sample" src/pause_monitor/daemon.py
 
-# Check powermetrics samplers being used
-grep -rn "samplers\|show-process" src/pause_monitor/collector.py
+# Check event directory cleanup (should find nothing)
+grep -rn "rmtree\|shutil" src/pause_monitor/storage.py
 
-# List all CLI commands
+# List CLI commands that exist
 uv run pause-monitor --help
 ```
