@@ -42,18 +42,20 @@ def get_memory_pressure_fast() -> int:
 
 @dataclass
 class StressBreakdown:
-    """Per-factor stress scores.
+    """Per-factor stress scores (8 factors).
 
     This is the CANONICAL definition - storage.py imports from here.
+    Note: 8 factors as of redesign (pageins added for pause detection).
     """
 
-    load: int  # 0-40: load/cores ratio
+    load: int  # 0-30: load/cores ratio
     memory: int  # 0-30: memory pressure
-    thermal: int  # 0-20: throttling active
-    latency: int  # 0-30: self-latency
-    io: int  # 0-20: disk I/O spike
+    thermal: int  # 0-10: throttling active
+    latency: int  # 0-20: self-latency
+    io: int  # 0-10: disk I/O activity
     gpu: int  # 0-20: GPU usage sustained high
-    wakeups: int  # 0-20: idle wakeups sustained high
+    wakeups: int  # 0-10: idle wakeups sustained high
+    pageins: int = 0  # 0-30: swap activity (CRITICAL for pause detection)
 
     @property
     def total(self) -> int:
@@ -66,6 +68,7 @@ class StressBreakdown:
             + self.io
             + self.gpu
             + self.wakeups
+            + self.pageins
         )
         return min(100, raw)
 
@@ -122,6 +125,7 @@ def calculate_stress(
     io_baseline: int,
     gpu_pct: float | None = None,
     wakeups_per_sec: int | None = None,
+    pageins_per_sec: float | None = None,
 ) -> StressBreakdown:
     """Calculate stress score from current system metrics.
 
@@ -135,9 +139,10 @@ def calculate_stress(
         io_baseline: Baseline I/O bytes/sec (EMA)
         gpu_pct: GPU utilization percentage (0-100), None if unknown
         wakeups_per_sec: Idle wakeups per second, None if unknown
+        pageins_per_sec: Memory page-ins per second, None if unknown
 
     Returns:
-        StressBreakdown with per-factor and total scores
+        StressBreakdown with per-factor and total scores (8 factors)
     """
     # Load average relative to cores (max 40 points)
     load_ratio = load_avg / core_count if core_count > 0 else 0
@@ -166,6 +171,10 @@ def calculate_stress(
     # Idle wakeups (20 points if above 1000/sec)
     wakeups_score = 20 if wakeups_per_sec is not None and wakeups_per_sec > 1000 else 0
 
+    # Pageins - CRITICAL for detecting swap activity causing pauses
+    # 30 points if above 100/sec (indicates active swapping)
+    pageins_score = 30 if pageins_per_sec is not None and pageins_per_sec > 100 else 0
+
     return StressBreakdown(
         load=load_score,
         memory=mem_score,
@@ -174,4 +183,5 @@ def calculate_stress(
         io=io_score,
         gpu=gpu_score,
         wakeups=wakeups_score,
+        pageins=pageins_score,
     )

@@ -189,6 +189,32 @@ def test_tier_manager_escalates_at_exact_threshold():
     assert action == "tier3_entry"
 
 
+def test_tier_manager_entry_time_accessors():
+    """TierManager exposes entry times for Daemon to read."""
+    import time
+
+    manager = TierManager(elevated_threshold=15, critical_threshold=50)
+
+    # Initially None
+    assert manager.tier2_entry_time is None
+    assert manager.tier3_entry_time is None
+
+    # After entering tier 2
+    manager.update(20)
+    assert manager.tier2_entry_time is not None
+    assert manager.tier3_entry_time is None
+
+    # After entering tier 3
+    manager.update(60)
+    assert manager.tier3_entry_time is not None
+    # tier2_entry_time may still be set (from earlier escalation)
+
+    # After de-escalating from tier 3 to tier 2 (after hysteresis)
+    manager._tier3_low_since = time.monotonic() - 10  # Force hysteresis
+    manager.update(30)  # Below critical
+    assert manager.tier3_entry_time is None  # Cleared on exit
+
+
 # === Sentinel Tests ===
 
 

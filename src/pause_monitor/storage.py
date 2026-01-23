@@ -13,7 +13,7 @@ from pause_monitor.stress import StressBreakdown
 
 log = structlog.get_logger()
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3  # Updated for Data Dictionary alignment
 
 # Valid event status values
 VALID_EVENT_STATUSES = frozenset({"unreviewed", "reviewed", "pinned", "dismissed"})
@@ -24,18 +24,19 @@ CREATE TABLE IF NOT EXISTS samples (
     id              INTEGER PRIMARY KEY,
     timestamp       REAL NOT NULL,
     interval        REAL NOT NULL,
-    cpu_pct         REAL,
+    -- System metrics (not from powermetrics)
     load_avg        REAL,
-    mem_available   INTEGER,
-    swap_used       INTEGER,
-    io_read         INTEGER,
-    io_write        INTEGER,
-    net_sent        INTEGER,
-    net_recv        INTEGER,
-    cpu_temp        REAL,
-    cpu_freq        INTEGER,
+    mem_pressure    INTEGER,
+    -- From PowermetricsResult
     throttled       INTEGER,
+    cpu_power       REAL,
     gpu_pct         REAL,
+    gpu_power       REAL,
+    io_read_per_s   REAL,
+    io_write_per_s  REAL,
+    wakeups_per_s   REAL,
+    pageins_per_s   REAL,
+    -- Stress breakdown (8 factors)
     stress_total    INTEGER,
     stress_load     INTEGER,
     stress_memory   INTEGER,
@@ -43,7 +44,8 @@ CREATE TABLE IF NOT EXISTS samples (
     stress_latency  INTEGER,
     stress_io       INTEGER,
     stress_gpu      INTEGER,
-    stress_wakeups  INTEGER
+    stress_wakeups  INTEGER,
+    stress_pageins  INTEGER
 );
 
 CREATE INDEX IF NOT EXISTS idx_samples_timestamp ON samples(timestamp);
@@ -77,6 +79,7 @@ CREATE TABLE IF NOT EXISTS events (
     stress_io       INTEGER,
     stress_gpu      INTEGER,
     stress_wakeups  INTEGER,
+    stress_pageins  INTEGER,
     culprits        TEXT,
     event_dir       TEXT,
     status          TEXT DEFAULT 'unreviewed',
@@ -184,25 +187,26 @@ def migrate_add_stress_columns(conn: sqlite3.Connection) -> None:
 
 @dataclass
 class Sample:
-    """Single metrics sample.
-
-    Field names match design doc exactly.
-    """
+    """Single metrics sample - matches Data Dictionary exactly."""
 
     timestamp: datetime
-    interval: float
-    cpu_pct: float | None
-    load_avg: float | None
-    mem_available: int | None
-    swap_used: int | None
-    io_read: int | None
-    io_write: int | None
-    net_sent: int | None
-    net_recv: int | None
-    cpu_temp: float | None
-    cpu_freq: int | None
+    interval: float  # elapsed_ns / 1e9
+
+    # System metrics (not from powermetrics)
+    load_avg: float | None  # os.getloadavg()[0]
+    mem_pressure: int | None  # sysctl kern.memorystatus_level (0-100)
+
+    # From PowermetricsResult
     throttled: bool | None
+    cpu_power: float | None
     gpu_pct: float | None
+    gpu_power: float | None
+    io_read_per_s: float | None
+    io_write_per_s: float | None
+    wakeups_per_s: float | None
+    pageins_per_s: float | None  # CRITICAL for pause detection
+
+    # Computed stress breakdown (includes stress_pageins)
     stress: StressBreakdown
 
 
@@ -211,27 +215,26 @@ def insert_sample(conn: sqlite3.Connection, sample: Sample) -> int:
     cursor = conn.execute(
         """
         INSERT INTO samples (
-            timestamp, interval, cpu_pct, load_avg, mem_available, swap_used,
-            io_read, io_write, net_sent, net_recv, cpu_temp, cpu_freq,
-            throttled, gpu_pct, stress_total, stress_load, stress_memory,
-            stress_thermal, stress_latency, stress_io, stress_gpu, stress_wakeups
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            timestamp, interval, load_avg, mem_pressure,
+            throttled, cpu_power, gpu_pct, gpu_power,
+            io_read_per_s, io_write_per_s, wakeups_per_s, pageins_per_s,
+            stress_total, stress_load, stress_memory, stress_thermal,
+            stress_latency, stress_io, stress_gpu, stress_wakeups, stress_pageins
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             sample.timestamp.timestamp(),
             sample.interval,
-            sample.cpu_pct,
             sample.load_avg,
-            sample.mem_available,
-            sample.swap_used,
-            sample.io_read,
-            sample.io_write,
-            sample.net_sent,
-            sample.net_recv,
-            sample.cpu_temp,
-            sample.cpu_freq,
+            sample.mem_pressure,
             int(sample.throttled) if sample.throttled is not None else None,
+            sample.cpu_power,
             sample.gpu_pct,
+            sample.gpu_power,
+            sample.io_read_per_s,
+            sample.io_write_per_s,
+            sample.wakeups_per_s,
+            sample.pageins_per_s,
             sample.stress.total,
             sample.stress.load,
             sample.stress.memory,
@@ -240,6 +243,7 @@ def insert_sample(conn: sqlite3.Connection, sample: Sample) -> int:
             sample.stress.io,
             sample.stress.gpu,
             sample.stress.wakeups,
+            sample.stress.pageins,
         ),
     )
     conn.commit()
@@ -250,10 +254,11 @@ def get_recent_samples(conn: sqlite3.Connection, limit: int = 100) -> list[Sampl
     """Get most recent samples."""
     rows = conn.execute(
         """
-        SELECT timestamp, interval, cpu_pct, load_avg, mem_available, swap_used,
-               io_read, io_write, net_sent, net_recv, cpu_temp, cpu_freq,
-               throttled, gpu_pct, stress_total, stress_load, stress_memory,
-               stress_thermal, stress_latency, stress_io, stress_gpu, stress_wakeups
+        SELECT timestamp, interval, load_avg, mem_pressure,
+               throttled, cpu_power, gpu_pct, gpu_power,
+               io_read_per_s, io_write_per_s, wakeups_per_s, pageins_per_s,
+               stress_total, stress_load, stress_memory, stress_thermal,
+               stress_latency, stress_io, stress_gpu, stress_wakeups, stress_pageins
         FROM samples ORDER BY timestamp DESC LIMIT ?
         """,
         (limit,),
@@ -263,26 +268,25 @@ def get_recent_samples(conn: sqlite3.Connection, limit: int = 100) -> list[Sampl
         Sample(
             timestamp=datetime.fromtimestamp(row[0]),
             interval=row[1],
-            cpu_pct=row[2],
-            load_avg=row[3],
-            mem_available=row[4],
-            swap_used=row[5],
-            io_read=row[6],
-            io_write=row[7],
-            net_sent=row[8],
-            net_recv=row[9],
-            cpu_temp=row[10],
-            cpu_freq=row[11],
-            throttled=bool(row[12]) if row[12] is not None else None,
-            gpu_pct=row[13],
+            load_avg=row[2],
+            mem_pressure=row[3],
+            throttled=bool(row[4]) if row[4] is not None else None,
+            cpu_power=row[5],
+            gpu_pct=row[6],
+            gpu_power=row[7],
+            io_read_per_s=row[8],
+            io_write_per_s=row[9],
+            wakeups_per_s=row[10],
+            pageins_per_s=row[11],
             stress=StressBreakdown(
-                load=row[15] or 0,
-                memory=row[16] or 0,
-                thermal=row[17] or 0,
-                latency=row[18] or 0,
-                io=row[19] or 0,
-                gpu=row[20] or 0,
-                wakeups=row[21] or 0,
+                load=row[13] or 0,
+                memory=row[14] or 0,
+                thermal=row[15] or 0,
+                latency=row[16] or 0,
+                io=row[17] or 0,
+                gpu=row[18] or 0,
+                wakeups=row[19] or 0,
+                pageins=row[20] or 0,
             ),
         )
         for row in rows
@@ -310,8 +314,8 @@ def insert_event(conn: sqlite3.Connection, event: Event) -> int:
         INSERT INTO events (
             timestamp, duration, stress_total, stress_load, stress_memory,
             stress_thermal, stress_latency, stress_io, stress_gpu, stress_wakeups,
-            culprits, event_dir, status, notes
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            stress_pageins, culprits, event_dir, status, notes
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             event.timestamp.timestamp(),
@@ -324,6 +328,7 @@ def insert_event(conn: sqlite3.Connection, event: Event) -> int:
             event.stress.io,
             event.stress.gpu,
             event.stress.wakeups,
+            event.stress.pageins,
             json.dumps(event.culprits),
             event.event_dir,
             event.status,
@@ -345,7 +350,7 @@ def get_events(
     query = """
         SELECT id, timestamp, duration, stress_total, stress_load, stress_memory,
                stress_thermal, stress_latency, stress_io, stress_gpu, stress_wakeups,
-               culprits, event_dir, status, notes
+               stress_pageins, culprits, event_dir, status, notes
         FROM events
     """
     params: list = []
@@ -382,11 +387,12 @@ def get_events(
                 io=row[8] or 0,
                 gpu=row[9] or 0,
                 wakeups=row[10] or 0,
+                pageins=row[11] or 0,
             ),
-            culprits=json.loads(row[11]) if row[11] else [],
-            event_dir=row[12],
-            status=row[13] or "unreviewed",
-            notes=row[14],
+            culprits=json.loads(row[12]) if row[12] else [],
+            event_dir=row[13],
+            status=row[14] or "unreviewed",
+            notes=row[15],
         )
         for row in rows
     ]
@@ -398,7 +404,7 @@ def get_event_by_id(conn: sqlite3.Connection, event_id: int) -> Event | None:
         """
         SELECT id, timestamp, duration, stress_total, stress_load, stress_memory,
                stress_thermal, stress_latency, stress_io, stress_gpu, stress_wakeups,
-               culprits, event_dir, status, notes
+               stress_pageins, culprits, event_dir, status, notes
         FROM events WHERE id = ?
         """,
         (event_id,),
@@ -419,11 +425,12 @@ def get_event_by_id(conn: sqlite3.Connection, event_id: int) -> Event | None:
             io=row[8] or 0,
             gpu=row[9] or 0,
             wakeups=row[10] or 0,
+            pageins=row[11] or 0,
         ),
-        culprits=json.loads(row[11]) if row[11] else [],
-        event_dir=row[12],
-        status=row[13] or "unreviewed",
-        notes=row[14],
+        culprits=json.loads(row[12]) if row[12] else [],
+        event_dir=row[13],
+        status=row[14] or "unreviewed",
+        notes=row[15],
     )
 
 

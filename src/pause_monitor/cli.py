@@ -285,16 +285,21 @@ def history(hours: int, fmt: str) -> None:
                 {
                     "timestamp": s.timestamp.isoformat(),
                     "stress": s.stress.total,
-                    "cpu_pct": s.cpu_pct,
+                    "cpu_power": s.cpu_power,
                     "load_avg": s.load_avg,
+                    "mem_pressure": s.mem_pressure,
+                    "pageins_per_s": s.pageins_per_s,
                 }
                 for s in samples
             ]
             click.echo(json.dumps(data, indent=2))
         elif fmt == "csv":
-            click.echo("timestamp,stress,cpu_pct,load_avg")
+            click.echo("timestamp,stress,cpu_power,load_avg,mem_pressure,pageins_per_s")
             for s in samples:
-                click.echo(f"{s.timestamp.isoformat()},{s.stress.total},{s.cpu_pct},{s.load_avg}")
+                click.echo(
+                    f"{s.timestamp.isoformat()},{s.stress.total},"
+                    f"{s.cpu_power},{s.load_avg},{s.mem_pressure},{s.pageins_per_s}"
+                )
         else:
             # Summary stats
             stresses = [s.stress.total for s in samples]

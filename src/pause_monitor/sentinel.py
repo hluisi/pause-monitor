@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING
 
 import structlog
 
-from pause_monitor.collector import get_core_count
+from pause_monitor.collector import PowermetricsResult, get_core_count
 from pause_monitor.stress import StressBreakdown, calculate_stress
 from pause_monitor.sysctl import sysctl_int
 
@@ -69,6 +69,16 @@ class TierManager:
     def peak_stress(self) -> int:
         """Peak stress value seen during elevated states."""
         return self._peak_stress
+
+    @property
+    def tier2_entry_time(self) -> float | None:
+        """Time (monotonic) when tier 2 was entered, or None if not in tier 2+."""
+        return self._tier2_entry_time
+
+    @property
+    def tier3_entry_time(self) -> float | None:
+        """Time (monotonic) when tier 3 was entered, or None if not in tier 3."""
+        return self._tier3_entry_time
 
     def update(self, stress_total: int) -> str | None:
         """Update tier state based on current stress.
@@ -219,7 +229,22 @@ class Sentinel:
             metrics = collect_fast_metrics()
             stress = self._calculate_fast_stress(metrics, latency_ratio)
 
-            self.buffer.push(stress, tier=self.tier_manager.current_tier)
+            # Create minimal PowermetricsResult from fast metrics for buffer storage.
+            # This is transitional - will be replaced by real powermetrics in Phase 3.
+            pm_result = PowermetricsResult(
+                elapsed_ns=int(elapsed * 1_000_000_000),
+                throttled=False,
+                cpu_power=0.0,
+                gpu_pct=0.0,
+                gpu_power=0.0,
+                io_read_per_s=0.0,
+                io_write_per_s=0.0,
+                wakeups_per_s=0.0,
+                pageins_per_s=0.0,
+                top_cpu_processes=[],
+                top_pagein_processes=[],
+            )
+            self.buffer.push(pm_result, stress, tier=self.tier_manager.current_tier)
 
             action = self.tier_manager.update(stress.total)
             if action:

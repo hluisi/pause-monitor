@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from pause_monitor.collector import PowermetricsResult
 from pause_monitor.forensics import (
     ForensicsCapture,
     capture_spindump,
@@ -15,6 +16,25 @@ from pause_monitor.forensics import (
     create_event_dir,
     run_full_capture,
 )
+
+
+def make_test_metrics(**kwargs) -> PowermetricsResult:
+    """Create PowermetricsResult with sensible defaults for testing."""
+    defaults = {
+        "elapsed_ns": 100_000_000,
+        "throttled": False,
+        "cpu_power": 5.0,
+        "gpu_pct": 10.0,
+        "gpu_power": 1.0,
+        "io_read_per_s": 1000.0,
+        "io_write_per_s": 500.0,
+        "wakeups_per_s": 50.0,
+        "pageins_per_s": 0.0,
+        "top_cpu_processes": [],
+        "top_pagein_processes": [],
+    }
+    defaults.update(kwargs)
+    return PowermetricsResult(**defaults)
 
 
 def test_create_event_dir(tmp_path: Path):
@@ -253,9 +273,10 @@ def test_forensics_capture_includes_ring_buffer(tmp_path):
 
     # Create buffer with samples
     buffer = RingBuffer(max_samples=10)
+    metrics = make_test_metrics()
     stress = StressBreakdown(load=10, memory=5, thermal=0, latency=0, io=0, gpu=0, wakeups=0)
-    buffer.push(stress, tier=1)
-    buffer.push(stress, tier=2)
+    buffer.push(metrics, stress, tier=1)
+    buffer.push(metrics, stress, tier=2)
     frozen = buffer.freeze()
 
     # Create capture with buffer
@@ -292,9 +313,10 @@ def test_forensics_capture_ring_buffer_with_snapshots(tmp_path):
 
     # Create buffer with samples and a snapshot
     buffer = RingBuffer(max_samples=10)
+    metrics = make_test_metrics()
     stress = StressBreakdown(load=10, memory=5, thermal=0, latency=0, io=0, gpu=0, wakeups=0)
-    buffer.push(stress, tier=1)
-    buffer.push(stress, tier=2)
+    buffer.push(metrics, stress, tier=1)
+    buffer.push(metrics, stress, tier=2)
 
     # Manually add a snapshot to test serialization
     from datetime import datetime
@@ -350,9 +372,11 @@ def test_identify_culprits_from_buffer():
     from pause_monitor.stress import StressBreakdown
 
     # High memory stress
+    metrics = make_test_metrics()
     samples = [
         RingSample(
             timestamp=datetime.now(),
+            metrics=metrics,
             stress=StressBreakdown(load=5, memory=25, thermal=0, latency=0, io=0, gpu=0, wakeups=0),
             tier=2,
         )
@@ -385,9 +409,11 @@ def test_identify_culprits_multiple_factors():
     from pause_monitor.stress import StressBreakdown
 
     # High load and memory stress
+    metrics = make_test_metrics()
     samples = [
         RingSample(
             timestamp=datetime.now(),
+            metrics=metrics,
             stress=StressBreakdown(
                 load=30, memory=15, thermal=0, latency=0, io=0, gpu=0, wakeups=0
             ),
@@ -435,20 +461,24 @@ def test_identify_culprits_averages_samples():
     from pause_monitor.stress import StressBreakdown
 
     now = datetime.now()
+    metrics = make_test_metrics()
     # Three samples with memory stress: 20, 10, 0 -> average 10
     samples = [
         RingSample(
             timestamp=now - timedelta(seconds=2),
+            metrics=metrics,
             stress=StressBreakdown(load=0, memory=20, thermal=0, latency=0, io=0, gpu=0, wakeups=0),
             tier=2,
         ),
         RingSample(
             timestamp=now - timedelta(seconds=1),
+            metrics=metrics,
             stress=StressBreakdown(load=0, memory=10, thermal=0, latency=0, io=0, gpu=0, wakeups=0),
             tier=2,
         ),
         RingSample(
             timestamp=now,
+            metrics=metrics,
             stress=StressBreakdown(load=0, memory=0, thermal=0, latency=0, io=0, gpu=0, wakeups=0),
             tier=1,
         ),
@@ -481,9 +511,11 @@ def test_identify_culprits_below_threshold():
     from pause_monitor.stress import StressBreakdown
 
     # All factors below threshold of 10
+    metrics = make_test_metrics()
     samples = [
         RingSample(
             timestamp=datetime.now(),
+            metrics=metrics,
             stress=StressBreakdown(load=5, memory=5, thermal=0, latency=0, io=5, gpu=5, wakeups=5),
             tier=1,
         )
@@ -513,9 +545,11 @@ def test_identify_culprits_gpu_factor():
     from pause_monitor.stress import StressBreakdown
 
     # High GPU stress (above threshold of 10)
+    metrics = make_test_metrics()
     samples = [
         RingSample(
             timestamp=datetime.now(),
+            metrics=metrics,
             stress=StressBreakdown(load=5, memory=5, thermal=0, latency=0, io=0, gpu=15, wakeups=0),
             tier=2,
         )

@@ -67,10 +67,10 @@ class MetricsPanel(Static):
         """Update displayed metrics."""
         self._metrics = metrics
         lines = [
-            f"CPU: {metrics.get('cpu_pct', 0):.1f}%",
+            f"Power: {metrics.get('cpu_power', 0):.1f} W",
             f"Load: {metrics.get('load_avg', 0):.2f}",
-            f"Memory: {metrics.get('mem_available', 0) / 1e9:.1f} GB free",
-            f"Freq: {metrics.get('cpu_freq', 0)} MHz",
+            f"Mem Pressure: {metrics.get('mem_pressure', 0)}%",
+            f"Pageins/s: {metrics.get('pageins_per_s', 0):.1f}",
             f"Throttled: {'Yes' if metrics.get('throttled') else 'No'}",
         ]
         self.update("\n".join(lines))
@@ -478,22 +478,22 @@ class PauseMonitorApp(App):
             metrics_panel = self.query_one("#metrics", MetricsPanel)
             metrics_panel.update_metrics(
                 {
-                    "cpu_pct": sample.cpu_pct or 0,
+                    "cpu_power": sample.cpu_power or 0,
                     "load_avg": sample.load_avg or 0,
-                    "mem_available": sample.mem_available or 0,
-                    "cpu_freq": sample.cpu_freq or 0,
+                    "mem_pressure": sample.mem_pressure or 0,
+                    "pageins_per_s": sample.pageins_per_s or 0,
                     "throttled": sample.throttled or False,
                 }
             )
 
-            # Update stress breakdown
+            # Update stress breakdown (8 factors including pageins)
             breakdown = self.query_one("#breakdown", Static)
             breakdown.update(
                 f"Load: {sample.stress.load:3d}  Memory: {sample.stress.memory:3d}  "
                 f"GPU: {sample.stress.gpu:3d}\n"
                 f"Thermal: {sample.stress.thermal:3d}  Latency: {sample.stress.latency:3d}  "
                 f"Wakeups: {sample.stress.wakeups:3d}\n"
-                f"I/O: {sample.stress.io:3d}"
+                f"I/O: {sample.stress.io:3d}  Pageins: {sample.stress.pageins:3d}"
             )
 
         # Update events table

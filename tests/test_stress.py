@@ -211,8 +211,10 @@ def test_io_baseline_manager_learning_spike_threshold():
 
 
 def test_stress_breakdown_has_all_factors():
-    """Verify StressBreakdown has all 7 factors."""
-    breakdown = StressBreakdown(load=10, memory=15, thermal=0, latency=5, io=10, gpu=8, wakeups=5)
+    """Verify StressBreakdown has all 8 factors."""
+    breakdown = StressBreakdown(
+        load=10, memory=15, thermal=0, latency=5, io=10, gpu=8, wakeups=5, pageins=12
+    )
     assert breakdown.load == 10
     assert breakdown.memory == 15
     assert breakdown.thermal == 0
@@ -220,14 +222,15 @@ def test_stress_breakdown_has_all_factors():
     assert breakdown.io == 10
     assert breakdown.gpu == 8
     assert breakdown.wakeups == 5
+    assert breakdown.pageins == 12
 
 
 def test_stress_breakdown_total_includes_all_factors():
-    """Verify total sums all 7 factors."""
+    """Verify total sums all 8 factors."""
     breakdown = StressBreakdown(
-        load=40, memory=30, thermal=20, latency=30, io=20, gpu=20, wakeups=20
+        load=40, memory=30, thermal=20, latency=30, io=20, gpu=20, wakeups=20, pageins=30
     )
-    # 40+30+20+30+20+20+20 = 180, capped at 100
+    # 40+30+20+30+20+20+20+30 = 210, capped at 100
     assert breakdown.total == 100
 
 
@@ -299,3 +302,54 @@ def test_stress_wakeups_below_threshold():
         wakeups_per_sec=500,
     )
     assert breakdown.wakeups == 0
+
+
+def test_stress_pageins_contribution():
+    """Pageins stress when above 100/sec (swap activity causing pauses)."""
+    breakdown = calculate_stress(
+        load_avg=1.0,
+        core_count=4,
+        mem_available_pct=50.0,
+        throttled=False,
+        latency_ratio=1.0,
+        io_rate=0,
+        io_baseline=0,
+        gpu_pct=0.0,
+        wakeups_per_sec=0,
+        pageins_per_sec=150.0,
+    )
+    assert breakdown.pageins == 30
+
+
+def test_stress_pageins_below_threshold():
+    """No pageins stress below 100/sec."""
+    breakdown = calculate_stress(
+        load_avg=1.0,
+        core_count=4,
+        mem_available_pct=50.0,
+        throttled=False,
+        latency_ratio=1.0,
+        io_rate=0,
+        io_baseline=0,
+        gpu_pct=0.0,
+        wakeups_per_sec=0,
+        pageins_per_sec=50.0,
+    )
+    assert breakdown.pageins == 0
+
+
+def test_stress_pageins_none_is_safe():
+    """Pageins None (unknown) doesn't contribute to stress."""
+    breakdown = calculate_stress(
+        load_avg=1.0,
+        core_count=4,
+        mem_available_pct=50.0,
+        throttled=False,
+        latency_ratio=1.0,
+        io_rate=0,
+        io_baseline=0,
+        gpu_pct=0.0,
+        wakeups_per_sec=0,
+        pageins_per_sec=None,
+    )
+    assert breakdown.pageins == 0

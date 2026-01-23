@@ -6,8 +6,31 @@ from pathlib import Path
 
 import pytest
 
-from pause_monitor.storage import SCHEMA_VERSION, get_schema_version, init_database
+from pause_monitor.storage import SCHEMA_VERSION, Sample, get_schema_version, init_database
 from pause_monitor.stress import StressBreakdown
+
+
+def make_test_sample(**kwargs) -> Sample:
+    """Create Sample with sensible defaults for testing."""
+    defaults = {
+        "timestamp": datetime.now(),
+        "interval": 0.1,
+        "load_avg": 1.0,
+        "mem_pressure": 50,
+        "throttled": False,
+        "cpu_power": 5.0,
+        "gpu_pct": 10.0,
+        "gpu_power": 1.0,
+        "io_read_per_s": 1000.0,
+        "io_write_per_s": 500.0,
+        "wakeups_per_s": 50.0,
+        "pageins_per_s": 0.0,
+        "stress": StressBreakdown(
+            load=0, memory=0, thermal=0, latency=0, io=0, gpu=0, wakeups=0, pageins=0
+        ),
+    }
+    defaults.update(kwargs)
+    return Sample(**defaults)
 
 
 def test_init_database_creates_file(tmp_path: Path):
@@ -58,50 +81,57 @@ def test_init_database_sets_schema_version(tmp_path: Path):
 
 
 def test_sample_dataclass_fields():
-    """Sample has correct fields matching design doc."""
-    from pause_monitor.storage import Sample
-    from pause_monitor.stress import StressBreakdown
-
-    sample = Sample(
-        timestamp=datetime.now(),
+    """Sample has correct fields matching Data Dictionary."""
+    sample = make_test_sample(
         interval=5.0,
-        cpu_pct=25.5,
         load_avg=1.5,
-        mem_available=8_000_000_000,
-        swap_used=100_000_000,
-        io_read=1_000_000,
-        io_write=500_000,
-        net_sent=10_000,
-        net_recv=20_000,
-        cpu_temp=65.0,
-        cpu_freq=3000,
+        mem_pressure=45,
         throttled=False,
+        cpu_power=5.2,
         gpu_pct=10.0,
-        stress=StressBreakdown(load=10, memory=5, thermal=0, latency=0, io=0, gpu=0, wakeups=0),
+        gpu_power=1.5,
+        io_read_per_s=1024.0,
+        io_write_per_s=512.0,
+        wakeups_per_s=150.0,
+        pageins_per_s=0.0,
+        stress=StressBreakdown(
+            load=10, memory=5, thermal=0, latency=0, io=0, gpu=0, wakeups=0, pageins=0
+        ),
     )
-    assert sample.cpu_pct == 25.5
+    assert sample.io_read_per_s == 1024.0
+    assert sample.wakeups_per_s == 150.0
+    assert sample.pageins_per_s == 0.0
+    assert sample.mem_pressure == 45
     assert sample.stress.total == 15
+
+    # Removed fields don't exist
+    assert not hasattr(sample, "io_read")
+    assert not hasattr(sample, "io_write")
+    assert not hasattr(sample, "net_sent")
+    assert not hasattr(sample, "net_recv")
+    assert not hasattr(sample, "cpu_pct")
+    assert not hasattr(sample, "cpu_freq")
+    assert not hasattr(sample, "cpu_temp")
+    assert not hasattr(sample, "mem_available")
+    assert not hasattr(sample, "swap_used")
 
 
 def test_insert_sample(initialized_db: Path, sample_stress):
     """insert_sample stores sample in database."""
-    from pause_monitor.storage import Sample, insert_sample
+    from pause_monitor.storage import insert_sample
 
-    sample = Sample(
-        timestamp=datetime.now(),
+    sample = make_test_sample(
         interval=5.0,
-        cpu_pct=25.5,
         load_avg=1.5,
-        mem_available=8_000_000_000,
-        swap_used=100_000_000,
-        io_read=1_000_000,
-        io_write=500_000,
-        net_sent=10_000,
-        net_recv=20_000,
-        cpu_temp=65.0,
-        cpu_freq=3000,
+        mem_pressure=50,
         throttled=False,
+        cpu_power=5.0,
         gpu_pct=10.0,
+        gpu_power=1.0,
+        io_read_per_s=1000.0,
+        io_write_per_s=500.0,
+        wakeups_per_s=50.0,
+        pageins_per_s=0.0,
         stress=sample_stress,
     )
 
@@ -114,26 +144,16 @@ def test_insert_sample(initialized_db: Path, sample_stress):
 
 def test_get_recent_samples(initialized_db: Path, sample_stress):
     """get_recent_samples returns samples in reverse chronological order."""
-    from pause_monitor.storage import Sample, get_recent_samples, insert_sample
+    from pause_monitor.storage import get_recent_samples, insert_sample
 
     conn = sqlite3.connect(initialized_db)
 
     for i in range(5):
-        sample = Sample(
+        sample = make_test_sample(
             timestamp=datetime.fromtimestamp(1000000 + i * 5),
             interval=5.0,
-            cpu_pct=10.0 + i,
-            load_avg=1.0,
-            mem_available=8_000_000_000,
-            swap_used=0,
-            io_read=0,
-            io_write=0,
-            net_sent=0,
-            net_recv=0,
-            cpu_temp=None,
-            cpu_freq=None,
-            throttled=None,
-            gpu_pct=None,
+            load_avg=1.0 + i * 0.1,  # Varying load for verification
+            mem_pressure=50,
             stress=sample_stress,
         )
         insert_sample(conn, sample)
@@ -142,8 +162,9 @@ def test_get_recent_samples(initialized_db: Path, sample_stress):
     conn.close()
 
     assert len(samples) == 3
-    assert samples[0].cpu_pct == 14.0  # Most recent
-    assert samples[2].cpu_pct == 12.0
+    # Most recent has highest load_avg (1.4)
+    assert samples[0].load_avg == pytest.approx(1.4, rel=0.01)
+    assert samples[2].load_avg == pytest.approx(1.2, rel=0.01)
 
 
 def test_event_dataclass():
@@ -250,46 +271,24 @@ def test_prune_old_data_deletes_old_samples(initialized_db: Path, sample_stress)
     """prune_old_data deletes samples older than cutoff."""
     import time
 
-    from pause_monitor.storage import Sample, insert_sample, prune_old_data
+    from pause_monitor.storage import insert_sample, prune_old_data
 
     conn = sqlite3.connect(initialized_db)
 
     # Insert old sample (40 days ago)
-    old_sample = Sample(
+    old_sample = make_test_sample(
         timestamp=datetime.fromtimestamp(time.time() - 40 * 86400),
         interval=5.0,
-        cpu_pct=25.0,
         load_avg=1.5,
-        mem_available=8_000_000_000,
-        swap_used=0,
-        io_read=0,
-        io_write=0,
-        net_sent=0,
-        net_recv=0,
-        cpu_temp=None,
-        cpu_freq=None,
-        throttled=None,
-        gpu_pct=None,
         stress=sample_stress,
     )
     insert_sample(conn, old_sample)
 
     # Insert recent sample (1 day ago)
-    recent_sample = Sample(
+    recent_sample = make_test_sample(
         timestamp=datetime.fromtimestamp(time.time() - 1 * 86400),
         interval=5.0,
-        cpu_pct=30.0,
         load_avg=2.0,
-        mem_available=8_000_000_000,
-        swap_used=0,
-        io_read=0,
-        io_write=0,
-        net_sent=0,
-        net_recv=0,
-        cpu_temp=None,
-        cpu_freq=None,
-        throttled=None,
-        gpu_pct=None,
         stress=sample_stress,
     )
     insert_sample(conn, recent_sample)
@@ -354,26 +353,15 @@ def test_prune_old_data_deletes_process_samples(initialized_db: Path, sample_str
     """prune_old_data deletes process_samples linked to old samples."""
     import time
 
-    from pause_monitor.storage import Sample, insert_sample, prune_old_data
+    from pause_monitor.storage import insert_sample, prune_old_data
 
     conn = sqlite3.connect(initialized_db)
 
     # Insert old sample (40 days ago)
-    old_sample = Sample(
+    old_sample = make_test_sample(
         timestamp=datetime.fromtimestamp(time.time() - 40 * 86400),
         interval=5.0,
-        cpu_pct=25.0,
         load_avg=1.5,
-        mem_available=8_000_000_000,
-        swap_used=0,
-        io_read=0,
-        io_write=0,
-        net_sent=0,
-        net_recv=0,
-        cpu_temp=None,
-        cpu_freq=None,
-        throttled=None,
-        gpu_pct=None,
         stress=sample_stress,
     )
     sample_id = insert_sample(conn, old_sample)
@@ -408,26 +396,15 @@ def test_prune_old_data_with_nothing_to_delete(initialized_db: Path, sample_stre
     """prune_old_data returns zeros when nothing to delete."""
     import time
 
-    from pause_monitor.storage import Event, Sample, insert_event, insert_sample, prune_old_data
+    from pause_monitor.storage import Event, insert_event, insert_sample, prune_old_data
 
     conn = sqlite3.connect(initialized_db)
 
     # Insert recent sample (1 day ago)
-    recent_sample = Sample(
+    recent_sample = make_test_sample(
         timestamp=datetime.fromtimestamp(time.time() - 1 * 86400),
         interval=5.0,
-        cpu_pct=30.0,
         load_avg=2.0,
-        mem_available=8_000_000_000,
-        swap_used=0,
-        io_read=0,
-        io_write=0,
-        net_sent=0,
-        net_recv=0,
-        cpu_temp=None,
-        cpu_freq=None,
-        throttled=None,
-        gpu_pct=None,
         stress=sample_stress,
     )
     insert_sample(conn, recent_sample)
@@ -983,24 +960,14 @@ def test_prune_recent_dismissed_not_pruned(initialized_db: Path, sample_stress):
 
 def test_insert_sample_with_gpu_and_wakeups(initialized_db: Path):
     """Samples store and retrieve GPU and wakeups stress correctly."""
-    from pause_monitor.storage import Sample, get_recent_samples, insert_sample
+    from pause_monitor.storage import get_recent_samples, insert_sample
 
-    stress = StressBreakdown(load=10, memory=5, thermal=0, latency=0, io=0, gpu=15, wakeups=12)
-    sample = Sample(
-        timestamp=datetime.now(),
+    stress = StressBreakdown(
+        load=10, memory=5, thermal=0, latency=0, io=0, gpu=15, wakeups=12, pageins=0
+    )
+    sample = make_test_sample(
         interval=1.0,
-        cpu_pct=50.0,
         load_avg=2.0,
-        mem_available=8_000_000_000,
-        swap_used=0,
-        io_read=0,
-        io_write=0,
-        net_sent=0,
-        net_recv=0,
-        cpu_temp=None,
-        cpu_freq=None,
-        throttled=None,
-        gpu_pct=None,
         stress=stress,
     )
 
@@ -1011,8 +978,8 @@ def test_insert_sample_with_gpu_and_wakeups(initialized_db: Path):
 
     assert samples[0].stress.gpu == 15
     assert samples[0].stress.wakeups == 12
-    # Verify total includes gpu and wakeups
-    assert samples[0].stress.total == 10 + 5 + 0 + 0 + 0 + 15 + 12
+    # Verify total includes gpu, wakeups, and pageins
+    assert samples[0].stress.total == 10 + 5 + 0 + 0 + 0 + 15 + 12 + 0
 
 
 def test_insert_event_with_gpu_and_wakeups(initialized_db: Path):

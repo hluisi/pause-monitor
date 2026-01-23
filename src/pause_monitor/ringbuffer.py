@@ -11,6 +11,7 @@ from datetime import datetime
 
 import psutil
 
+from pause_monitor.collector import PowermetricsResult
 from pause_monitor.stress import StressBreakdown
 
 
@@ -36,10 +37,11 @@ class ProcessSnapshot:
 
 @dataclass
 class RingSample:
-    """Single stress sample in the ring buffer."""
+    """Single sample in the ring buffer - stores raw metrics for forensics."""
 
     timestamp: datetime
-    stress: StressBreakdown
+    metrics: PowermetricsResult  # Raw metrics for forensic analysis
+    stress: StressBreakdown  # Computed stress scores
     tier: int  # 1, 2, or 3 at time of capture
 
 
@@ -72,11 +74,12 @@ class RingBuffer:
         """Read-only access to snapshots (returns a copy)."""
         return list(self._snapshots)
 
-    def push(self, stress: StressBreakdown, tier: int) -> None:
+    def push(self, metrics: PowermetricsResult, stress: StressBreakdown, tier: int) -> None:
         """Add a stress sample to the buffer."""
         self._samples.append(
             RingSample(
                 timestamp=datetime.now(),
+                metrics=metrics,
                 stress=stress,
                 tier=tier,
             )

@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, PropertyMock
 
 import pytest
 
+from pause_monitor.collector import PowermetricsResult
 from pause_monitor.config import Config, SentinelConfig, TiersConfig
 from pause_monitor.ringbuffer import (
     BufferContents,
@@ -18,6 +19,25 @@ from pause_monitor.ringbuffer import (
 from pause_monitor.sentinel import Tier, TierManager
 from pause_monitor.storage import Event, get_events, init_database, insert_event
 from pause_monitor.stress import StressBreakdown
+
+
+def make_test_metrics(**kwargs) -> PowermetricsResult:
+    """Create PowermetricsResult with sensible defaults for testing."""
+    defaults = {
+        "elapsed_ns": 100_000_000,
+        "throttled": False,
+        "cpu_power": 5.0,
+        "gpu_pct": 10.0,
+        "gpu_power": 1.0,
+        "io_read_per_s": 1000.0,
+        "io_write_per_s": 500.0,
+        "wakeups_per_s": 50.0,
+        "pageins_per_s": 0.0,
+        "top_cpu_processes": [],
+        "top_pagein_processes": [],
+    }
+    defaults.update(kwargs)
+    return PowermetricsResult(**defaults)
 
 
 def make_test_config(tmp_path: Path) -> Config:
@@ -88,13 +108,14 @@ class TestRingBufferDataFlow:
     def test_buffer_captures_samples_across_tiers(self):
         """Ring buffer correctly stores samples from different tiers."""
         buffer = RingBuffer(max_samples=100)
+        metrics = make_test_metrics()
 
-        # Add samples from different tiers using push(stress, tier)
+        # Add samples from different tiers using push(metrics, stress, tier)
         for tier in [1, 2, 2, 3, 3, 3]:
             stress = StressBreakdown(
                 load=tier * 10, memory=0, thermal=0, latency=0, io=0, gpu=0, wakeups=0
             )
-            buffer.push(stress, tier)
+            buffer.push(metrics, stress, tier)
 
         contents = buffer.freeze()
         assert len(contents.samples) == 6
@@ -120,11 +141,12 @@ class TestRingBufferDataFlow:
     def test_buffer_evicts_old_samples(self):
         """Ring buffer evicts old samples when full."""
         buffer = RingBuffer(max_samples=5)
+        metrics = make_test_metrics()
 
         # Add more samples than buffer can hold
         for i in range(10):
             stress = StressBreakdown(load=i, memory=0, thermal=0, latency=0, io=0, gpu=0, wakeups=0)
-            buffer.push(stress, tier=1)
+            buffer.push(metrics, stress, tier=1)
 
         contents = buffer.freeze()
         assert len(contents.samples) == 5
@@ -142,8 +164,12 @@ class TestCulpritIdentification:
         from pause_monitor.forensics import identify_culprits
 
         # Create buffer with high memory stress
+        metrics = make_test_metrics()
         stress = StressBreakdown(load=5, memory=25, thermal=0, latency=0, io=0, gpu=0, wakeups=0)
-        samples = [RingSample(timestamp=datetime.now(), stress=stress, tier=2) for _ in range(3)]
+        samples = [
+            RingSample(timestamp=datetime.now(), metrics=metrics, stress=stress, tier=2)
+            for _ in range(3)
+        ]
 
         snapshots = [
             ProcessSnapshot(
@@ -166,8 +192,12 @@ class TestCulpritIdentification:
         """Multiple elevated factors are ranked by score."""
         from pause_monitor.forensics import identify_culprits
 
+        metrics = make_test_metrics()
         stress = StressBreakdown(load=30, memory=20, thermal=0, latency=0, io=15, gpu=0, wakeups=0)
-        samples = [RingSample(timestamp=datetime.now(), stress=stress, tier=3) for _ in range(3)]
+        samples = [
+            RingSample(timestamp=datetime.now(), metrics=metrics, stress=stress, tier=3)
+            for _ in range(3)
+        ]
 
         snapshots = [
             ProcessSnapshot(
@@ -313,8 +343,12 @@ class TestDaemonSentinelIntegration:
         daemon.notifier.pause_detected = MagicMock()
 
         # Create buffer contents
+        metrics = make_test_metrics()
         stress = StressBreakdown(load=40, memory=30, thermal=0, latency=0, io=0, gpu=15, wakeups=0)
-        samples = [RingSample(timestamp=datetime.now(), stress=stress, tier=3) for _ in range(5)]
+        samples = [
+            RingSample(timestamp=datetime.now(), metrics=metrics, stress=stress, tier=3)
+            for _ in range(5)
+        ]
         snapshots = [
             ProcessSnapshot(
                 timestamp=datetime.now(),
