@@ -417,13 +417,35 @@ class Daemon:
             self._tier2_peak_stress = stress.total
             self._tier2_peak_breakdown = stress
             self.ring_buffer.snapshot_processes(trigger=action.value)
-            log.info("tier2_entered", stress=stress.total)
+            log.info(
+                "tier2_entered",
+                stress=stress.total,
+                load=stress.load,
+                memory=stress.memory,
+                thermal=stress.thermal,
+                latency=stress.latency,
+                io=stress.io,
+                gpu=stress.gpu,
+                wakeups=stress.wakeups,
+                pageins=stress.pageins,
+            )
 
         elif action == TierAction.TIER2_PEAK:
             self._tier2_peak_stress = stress.total
             self._tier2_peak_breakdown = stress
             self.ring_buffer.snapshot_processes(trigger=action.value)
-            log.info("tier2_new_peak", stress=stress.total)
+            log.info(
+                "tier2_new_peak",
+                stress=stress.total,
+                load=stress.load,
+                memory=stress.memory,
+                thermal=stress.thermal,
+                latency=stress.latency,
+                io=stress.io,
+                gpu=stress.gpu,
+                wakeups=stress.wakeups,
+                pageins=stress.pageins,
+            )
 
         elif action == TierAction.TIER2_EXIT:
             # Read entry time from Daemon (tracked at entry)
@@ -453,7 +475,18 @@ class Daemon:
 
         elif action == TierAction.TIER3_ENTRY:
             self.ring_buffer.snapshot_processes(trigger=action.value)
-            log.warning("tier3_entered", stress=stress.total)
+            log.warning(
+                "tier3_entered",
+                stress=stress.total,
+                load=stress.load,
+                memory=stress.memory,
+                thermal=stress.thermal,
+                latency=stress.latency,
+                io=stress.io,
+                gpu=stress.gpu,
+                wakeups=stress.wakeups,
+                pageins=stress.pageins,
+            )
 
         elif action == TierAction.TIER3_EXIT:
             # De-escalating to tier 2 - TierManager handles entry time tracking
