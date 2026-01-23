@@ -131,7 +131,8 @@ def test_daemon_init_creates_components():
     assert daemon.config is config
     assert daemon.state is not None
     assert daemon.notifier is not None
-    assert daemon.io_baseline is not None
+    assert daemon.tier_manager is not None
+    assert daemon.ring_buffer is not None
     assert daemon.core_count > 0
 
 
@@ -141,17 +142,16 @@ async def test_daemon_start_initializes_database(patched_config_paths):
     config = Config()
     daemon = Daemon(config)
 
-    with patch.object(daemon.sentinel, "start", new_callable=AsyncMock):
-        with patch.object(daemon, "_start_caffeinate", new_callable=AsyncMock):
-            # Mock socket server (path too long for Unix sockets in tmp_path)
-            with patch("pause_monitor.daemon.SocketServer") as mock_socket_class:
-                mock_socket = AsyncMock()
-                mock_socket_class.return_value = mock_socket
-                # Start and immediately stop
-                daemon._shutdown_event.set()
-                await daemon.start()
+    with patch.object(daemon, "_start_caffeinate", new_callable=AsyncMock):
+        # Mock socket server (path too long for Unix sockets in tmp_path)
+        with patch("pause_monitor.daemon.SocketServer") as mock_socket_class:
+            mock_socket = AsyncMock()
+            mock_socket_class.return_value = mock_socket
+            # Start and immediately stop
+            daemon._shutdown_event.set()
+            await daemon.start()
 
-                assert (patched_config_paths / "test.db").exists()
+            assert (patched_config_paths / "test.db").exists()
 
 
 @pytest.mark.asyncio
@@ -285,17 +285,16 @@ async def test_daemon_start_writes_pid_file(patched_config_paths):
     pid_file = patched_config_paths / "daemon.pid"
     daemon = Daemon(config)
 
-    with patch.object(daemon.sentinel, "start", new_callable=AsyncMock):
-        with patch.object(daemon, "_start_caffeinate", new_callable=AsyncMock):
-            # Mock socket server (path too long for Unix sockets in tmp_path)
-            with patch("pause_monitor.daemon.SocketServer") as mock_socket_class:
-                mock_socket = AsyncMock()
-                mock_socket_class.return_value = mock_socket
-                daemon._shutdown_event.set()
-                await daemon.start()
+    with patch.object(daemon, "_start_caffeinate", new_callable=AsyncMock):
+        # Mock socket server (path too long for Unix sockets in tmp_path)
+        with patch("pause_monitor.daemon.SocketServer") as mock_socket_class:
+            mock_socket = AsyncMock()
+            mock_socket_class.return_value = mock_socket
+            daemon._shutdown_event.set()
+            await daemon.start()
 
-                assert pid_file.exists()
-                assert pid_file.read_text() == str(os.getpid())
+            assert pid_file.exists()
+            assert pid_file.read_text() == str(os.getpid())
 
 
 @pytest.mark.asyncio
@@ -446,12 +445,12 @@ async def test_auto_prune_uses_config_retention_days(patched_config_paths):
         )
 
 
-# === Sentinel Integration Tests ===
+# === Tier Management Tests ===
 
 
 @pytest.mark.asyncio
 async def test_daemon_uses_main_loop(patched_config_paths):
-    """Daemon runs _main_loop instead of sentinel.start()."""
+    """Daemon runs _main_loop for powermetrics-driven monitoring."""
     config = Config()
     daemon = Daemon(config)
 
@@ -478,17 +477,6 @@ async def test_daemon_uses_main_loop(patched_config_paths):
 
     # Verify _main_loop was called (not sentinel.start())
     assert main_loop_called
-
-
-@pytest.mark.asyncio
-async def test_daemon_sentinel_callbacks_wired(patched_config_paths):
-    """Daemon wires up sentinel callbacks correctly."""
-    config = Config()
-    daemon = Daemon(config)
-
-    # Verify callbacks are wired
-    assert daemon.sentinel.on_tier_change is not None
-    assert daemon.sentinel.on_pause_detected is not None
 
 
 @pytest.mark.asyncio

@@ -20,7 +20,7 @@ from pause_monitor.forensics import (
 )
 from pause_monitor.notifications import Notifier
 from pause_monitor.ringbuffer import BufferContents, RingBuffer
-from pause_monitor.sentinel import Sentinel, TierAction, TierManager
+from pause_monitor.sentinel import TierAction, TierManager
 from pause_monitor.sleepwake import was_recently_asleep
 from pause_monitor.socket_server import SocketServer
 from pause_monitor.storage import (
@@ -30,7 +30,6 @@ from pause_monitor.storage import (
     prune_old_data,
 )
 from pause_monitor.stress import (
-    IOBaselineManager,
     StressBreakdown,
     get_memory_pressure_fast,
 )
@@ -97,26 +96,13 @@ class Daemon:
         self.state = DaemonState()
 
         self.notifier = Notifier(config.alerts)
-        self.io_baseline = IOBaselineManager(persisted_baseline=None)
         self.core_count = get_core_count()
 
         # Initialize ring buffer: ring_buffer_seconds * 10 samples (10Hz fast loop)
         max_samples = config.sentinel.ring_buffer_seconds * 10
         self.ring_buffer = RingBuffer(max_samples=max_samples)
 
-        # Initialize sentinel with config values
-        self.sentinel = Sentinel(
-            buffer=self.ring_buffer,
-            fast_interval_ms=config.sentinel.fast_interval_ms,
-            elevated_threshold=config.tiers.elevated_threshold,
-            critical_threshold=config.tiers.critical_threshold,
-        )
-
-        # Wire up sentinel callbacks
-        self.sentinel.on_tier_change = self._handle_tier_change
-        self.sentinel.on_pause_detected = self._handle_pause_from_sentinel
-
-        # Tier management (replaces sentinel.tier_manager)
+        # Tier management
         self.tier_manager = TierManager(
             elevated_threshold=config.tiers.elevated_threshold,
             critical_threshold=config.tiers.critical_threshold,
@@ -203,9 +189,6 @@ class Daemon:
         """Stop the daemon gracefully."""
         log.info("daemon_stopping")
         self.state.running = False
-
-        # Stop sentinel
-        self.sentinel.stop()
 
         # Stop socket server
         if self._socket_server:
@@ -388,10 +371,10 @@ class Daemon:
 
         log.info("forensics_started", event_dir=str(event_dir), culprits=culprit_names)
 
-    # === Sentinel Callbacks ===
+    # === Tier Callbacks ===
 
     async def _handle_tier_change(self, action: TierAction, tier: int) -> None:
-        """Handle tier state changes from sentinel.
+        """Handle tier state changes from TierManager.
 
         Args:
             action: The tier action (TIER2_ENTRY, TIER2_EXIT, TIER3_ENTRY, TIER3_EXIT, TIER2_PEAK)
@@ -411,11 +394,11 @@ class Daemon:
 
         # Send notifications for tier changes
         if action == TierAction.TIER2_ENTRY:
-            self.notifier.elevated_entered(self.sentinel.tier_manager.peak_stress)
+            self.notifier.elevated_entered(self.tier_manager.peak_stress)
         elif action == TierAction.TIER3_ENTRY:
             # Critical stress notification
             self.notifier.critical_stress(
-                self.sentinel.tier_manager.peak_stress,
+                self.tier_manager.peak_stress,
                 0.0,  # Just entered, no duration yet
             )
 
@@ -545,10 +528,10 @@ class Daemon:
         expected: float,
         contents: BufferContents,
     ) -> None:
-        """Handle pause detection from sentinel.
+        """Handle pause detection (legacy method, used by tests).
 
-        NOTE: This method will be removed in Task 3.6-3.7 when the main loop
-        replaces Sentinel. Use _handle_pause for new code paths.
+        This method is retained for test compatibility. Production code
+        should use _handle_pause() instead.
 
         Args:
             actual: Actual elapsed time
@@ -601,8 +584,8 @@ class Daemon:
                 "duration": duration,
                 "expected_interval": expected,
                 "latency_ratio": actual / expected,
-                "tier": self.sentinel.tier_manager.current_tier,
-                "peak_stress": self.sentinel.tier_manager.peak_stress,
+                "tier": self.tier_manager.current_tier,
+                "peak_stress": self.tier_manager.peak_stress,
                 "culprits": culprits,
             }
         )

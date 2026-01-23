@@ -1,4 +1,4 @@
-"""End-to-end integration tests for the Ring Buffer Sentinel system."""
+"""End-to-end integration tests for the Ring Buffer and Tier system."""
 
 import sqlite3
 from datetime import datetime
@@ -271,26 +271,26 @@ class TestEventStatusIntegration:
         assert events[0].stress.wakeups == 5
 
 
-class TestDaemonSentinelIntegration:
-    """Test daemon integration with Sentinel."""
+class TestDaemonTierIntegration:
+    """Test daemon integration with TierManager."""
 
     @pytest.fixture
     def mock_config(self, tmp_path) -> Config:
         """Create config pointing to temp directory."""
         return make_test_config(tmp_path)
 
-    def test_daemon_initializes_with_sentinel(self, mock_config):
-        """Daemon correctly initializes Sentinel with callbacks."""
+    def test_daemon_initializes_with_tier_manager(self, mock_config):
+        """Daemon correctly initializes TierManager and RingBuffer."""
         from pause_monitor.daemon import Daemon
 
         daemon = Daemon(mock_config)
 
-        # Verify Sentinel is initialized
-        assert daemon.sentinel is not None
+        # Verify TierManager and RingBuffer are initialized
+        assert daemon.tier_manager is not None
         assert daemon.ring_buffer is not None
-        # Callbacks should be wired
-        assert daemon.sentinel.on_tier_change is not None
-        assert daemon.sentinel.on_pause_detected is not None
+        # Verify thresholds are configured
+        assert daemon.tier_manager.elevated_threshold == mock_config.tiers.elevated_threshold
+        assert daemon.tier_manager.critical_threshold == mock_config.tiers.critical_threshold
 
     @pytest.mark.asyncio
     async def test_daemon_handles_tier_change(self, mock_config):
