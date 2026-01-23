@@ -121,6 +121,11 @@ class Config:
         """PID file path."""
         return self.data_dir / "daemon.pid"
 
+    @property
+    def socket_path(self) -> Path:
+        """Unix socket path for daemon IPC."""
+        return self.data_dir / "daemon.sock"
+
     def save(self, path: Path | None = None) -> None:
         """Save config to TOML file."""
         path = path or self.config_path

@@ -22,6 +22,7 @@ from pause_monitor.notifications import Notifier
 from pause_monitor.ringbuffer import BufferContents, RingBuffer
 from pause_monitor.sentinel import Sentinel, TierAction, TierManager
 from pause_monitor.sleepwake import was_recently_asleep
+from pause_monitor.socket_server import SocketServer
 from pause_monitor.storage import (
     Event,
     init_database,
@@ -140,6 +141,7 @@ class Daemon:
         self._shutdown_event = asyncio.Event()
         self._auto_prune_task: asyncio.Task | None = None
         self._powermetrics: PowermetricsStream | None = None
+        self._socket_server: SocketServer | None = None
 
     async def _init_database(self) -> None:
         """Initialize database connection.
@@ -180,6 +182,13 @@ class Daemon:
         # Start caffeinate to prevent App Nap
         await self._start_caffeinate()
 
+        # Start socket server for TUI communication
+        self._socket_server = SocketServer(
+            socket_path=self.config.socket_path,
+            ring_buffer=self.ring_buffer,
+        )
+        await self._socket_server.start()
+
         self.state.running = True
         log.info("daemon_started")
 
@@ -197,6 +206,11 @@ class Daemon:
 
         # Stop sentinel
         self.sentinel.stop()
+
+        # Stop socket server
+        if self._socket_server:
+            await self._socket_server.stop()
+            self._socket_server = None
 
         # Cancel auto-prune task
         if self._auto_prune_task:

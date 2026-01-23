@@ -81,11 +81,15 @@ async def test_daemon_start_initializes_database(tmp_path: Path):
 
                 with patch.object(daemon.sentinel, "start", new_callable=AsyncMock):
                     with patch.object(daemon, "_start_caffeinate", new_callable=AsyncMock):
-                        # Start and immediately stop
-                        daemon._shutdown_event.set()
-                        await daemon.start()
+                        # Mock socket server (path too long for Unix sockets in tmp_path)
+                        with patch("pause_monitor.daemon.SocketServer") as mock_socket_class:
+                            mock_socket = AsyncMock()
+                            mock_socket_class.return_value = mock_socket
+                            # Start and immediately stop
+                            daemon._shutdown_event.set()
+                            await daemon.start()
 
-                        assert (tmp_path / "test.db").exists()
+                            assert (tmp_path / "test.db").exists()
 
 
 @pytest.mark.asyncio
@@ -236,11 +240,15 @@ async def test_daemon_start_writes_pid_file(tmp_path: Path):
 
                     with patch.object(daemon.sentinel, "start", new_callable=AsyncMock):
                         with patch.object(daemon, "_start_caffeinate", new_callable=AsyncMock):
-                            daemon._shutdown_event.set()
-                            await daemon.start()
+                            # Mock socket server (path too long for Unix sockets in tmp_path)
+                            with patch("pause_monitor.daemon.SocketServer") as mock_socket_class:
+                                mock_socket = AsyncMock()
+                                mock_socket_class.return_value = mock_socket
+                                daemon._shutdown_event.set()
+                                await daemon.start()
 
-                            assert pid_file.exists()
-                            assert pid_file.read_text() == str(os.getpid())
+                                assert pid_file.exists()
+                                assert pid_file.read_text() == str(os.getpid())
 
 
 @pytest.mark.asyncio
@@ -442,8 +450,12 @@ async def test_daemon_uses_main_loop(tmp_path: Path):
 
                     with patch.object(daemon, "_start_caffeinate", new_callable=AsyncMock):
                         with patch.object(daemon, "_main_loop", side_effect=mock_main_loop):
-                            # Start daemon - it should call _main_loop and return
-                            await daemon.start()
+                            # Mock socket server (path too long for Unix sockets in tmp_path)
+                            with patch("pause_monitor.daemon.SocketServer") as mock_socket_class:
+                                mock_socket = AsyncMock()
+                                mock_socket_class.return_value = mock_socket
+                                # Start daemon - it should call _main_loop and return
+                                await daemon.start()
 
                     # Verify _main_loop was called (not sentinel.start())
                     assert main_loop_called
@@ -794,3 +806,77 @@ async def test_daemon_main_loop_processes_powermetrics(tmp_path, monkeypatch):
     assert len(pushed_samples) == 2
     # Second sample had higher stress (throttled, high GPU)
     assert pushed_samples[1][1].thermal == 10  # throttled = 10 points
+
+
+# === Socket Server Integration Tests ===
+
+
+@pytest.fixture
+def short_tmp_path():
+    """Create a short temporary path for Unix sockets.
+
+    macOS has a 104-character limit for Unix socket paths.
+    pytest's tmp_path is too long, so we use /tmp directly.
+    """
+    import tempfile
+
+    with tempfile.TemporaryDirectory(dir="/tmp", prefix="pm_") as tmpdir:
+        yield Path(tmpdir)
+
+
+@pytest.mark.asyncio
+async def test_daemon_socket_available_after_start(short_tmp_path, monkeypatch):
+    """Daemon should have socket server listening after start."""
+    config = Config()
+
+    # Patch config paths to use short_tmp_path (Unix socket path length limit)
+    with patch.object(
+        Config, "data_dir", new_callable=lambda: property(lambda self: short_tmp_path)
+    ):
+        with patch.object(
+            Config,
+            "db_path",
+            new_callable=lambda: property(lambda self: short_tmp_path / "test.db"),
+        ):
+            with patch.object(
+                Config,
+                "events_dir",
+                new_callable=lambda: property(lambda self: short_tmp_path / "events"),
+            ):
+                with patch.object(
+                    Config,
+                    "pid_path",
+                    new_callable=lambda: property(lambda self: short_tmp_path / "daemon.pid"),
+                ):
+                    with patch.object(
+                        Config,
+                        "socket_path",
+                        new_callable=lambda: property(lambda self: short_tmp_path / "daemon.sock"),
+                    ):
+                        daemon = Daemon(config)
+
+                        # Mock _main_loop to exit immediately (we just want to test socket wiring)
+                        async def mock_main_loop():
+                            pass
+
+                        monkeypatch.setattr(daemon, "_main_loop", mock_main_loop)
+
+                        # Mock caffeinate to avoid actual subprocess
+                        with patch.object(daemon, "_start_caffeinate", new_callable=AsyncMock):
+                            # Start daemon (will return after mock_main_loop completes)
+                            await daemon.start()
+
+                        # Socket file should exist and server should be listening
+                        assert config.socket_path.exists(), (
+                            "Socket file should exist after daemon start"
+                        )
+
+                        # Verify we can connect
+                        reader, writer = await asyncio.open_unix_connection(str(config.socket_path))
+                        writer.close()
+                        await writer.wait_closed()
+
+                        await daemon.stop()
+                        assert not config.socket_path.exists(), (
+                            "Socket file should be cleaned up after stop"
+                        )
