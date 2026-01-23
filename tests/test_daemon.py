@@ -397,8 +397,8 @@ async def test_auto_prune_uses_config_retention_days(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_daemon_uses_sentinel(tmp_path: Path):
-    """Daemon starts sentinel instead of old adaptive sampling."""
+async def test_daemon_uses_main_loop(tmp_path: Path):
+    """Daemon runs _main_loop instead of sentinel.start()."""
     config = Config()
 
     with patch.object(Config, "data_dir", new_callable=lambda: property(lambda self: tmp_path)):
@@ -415,32 +415,25 @@ async def test_daemon_uses_sentinel(tmp_path: Path):
                 ):
                     daemon = Daemon(config)
 
-                    # Verify sentinel and ring_buffer are initialized
-                    assert daemon.sentinel is not None
+                    # Verify ring_buffer is initialized
                     assert daemon.ring_buffer is not None
 
-                    # Mock collect_fast_metrics to avoid real system calls
-                    with patch("pause_monitor.sentinel.collect_fast_metrics") as mock_metrics:
-                        mock_metrics.return_value = {
-                            "load_avg": 1.0,
-                            "memory_pressure": 80,
-                            "page_free_count": 100000,
-                        }
+                    # Track if _main_loop was called
+                    main_loop_called = False
 
-                        with patch.object(daemon, "_start_caffeinate", new_callable=AsyncMock):
-                            # Start daemon in background
-                            task = asyncio.create_task(daemon.start())
-                            await asyncio.sleep(0.3)  # Let it run
-                            daemon.sentinel.stop()
+                    async def mock_main_loop():
+                        nonlocal main_loop_called
+                        main_loop_called = True
+                        # Immediately return to end daemon
+                        return
 
-                            # Wait for task to complete
-                            try:
-                                await asyncio.wait_for(task, timeout=1.0)
-                            except asyncio.TimeoutError:
-                                pass
+                    with patch.object(daemon, "_start_caffeinate", new_callable=AsyncMock):
+                        with patch.object(daemon, "_main_loop", side_effect=mock_main_loop):
+                            # Start daemon - it should call _main_loop and return
+                            await daemon.start()
 
-                    # Verify sentinel was used
-                    assert len(daemon.ring_buffer.samples) > 0
+                    # Verify _main_loop was called (not sentinel.start())
+                    assert main_loop_called
 
 
 @pytest.mark.asyncio

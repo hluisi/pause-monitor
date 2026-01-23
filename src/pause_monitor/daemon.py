@@ -26,8 +26,6 @@ from pause_monitor.storage import (
     Event,
     init_database,
     insert_event,
-    migrate_add_event_status,
-    migrate_add_stress_columns,
     prune_old_data,
 )
 from pause_monitor.stress import (
@@ -157,6 +155,13 @@ class Daemon:
         """Start the daemon."""
         log.info("daemon_starting")
 
+        # Set QoS to USER_INITIATED for reliable sampling under load
+        # Ensures we get CPU time even when system is busy (when monitoring matters most)
+        try:
+            os.setpriority(os.PRIO_PROCESS, 0, -10)  # Negative nice = higher priority
+        except PermissionError:
+            log.warning("qos_priority_failed", msg="Could not set high priority, running as normal")
+
         # Setup signal handlers
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGTERM, signal.SIGINT):
@@ -170,13 +175,7 @@ class Daemon:
         self._write_pid_file()
 
         # Initialize database
-        self.config.data_dir.mkdir(parents=True, exist_ok=True)
-        init_database(self.config.db_path)
-        self._conn = sqlite3.connect(self.config.db_path)
-
-        # Run migrations for existing databases
-        migrate_add_event_status(self._conn)
-        migrate_add_stress_columns(self._conn)
+        await self._init_database()
 
         # Start caffeinate to prevent App Nap
         await self._start_caffeinate()
@@ -184,11 +183,12 @@ class Daemon:
         self.state.running = True
         log.info("daemon_started")
 
-        # Start auto-prune task (tracked for cleanup)
+        # Start auto-prune task
         self._auto_prune_task = asyncio.create_task(self._auto_prune())
 
-        # Run sentinel (replaces the old powermetrics-based _run_loop)
-        await self.sentinel.start()
+        # Run main loop (powermetrics -> stress -> ring buffer -> tiers)
+        # This replaces the old sentinel.start() call
+        await self._main_loop()
 
     async def stop(self) -> None:
         """Stop the daemon gracefully."""
