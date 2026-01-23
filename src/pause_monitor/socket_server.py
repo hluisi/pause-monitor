@@ -154,7 +154,11 @@ class SocketServer:
 
         try:
             # Send initial state from ring buffer
-            await self._send_initial_state(writer)
+            try:
+                await self._send_initial_state(writer)
+            except Exception:
+                log.debug("socket_initial_state_failed")
+                return  # Client disconnected, cleanup happens in finally
 
             # Keep connection alive until client disconnects
             # Client just needs to stay connected; data comes via broadcast()
