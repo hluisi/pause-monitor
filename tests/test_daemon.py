@@ -19,7 +19,6 @@ from pause_monitor.daemon import Daemon, DaemonState
 from pause_monitor.ringbuffer import RingBuffer
 from pause_monitor.sentinel import TierAction
 from pause_monitor.storage import get_events
-from pause_monitor.stress import StressBreakdown
 
 # === Test Fixtures ===
 
@@ -604,176 +603,12 @@ async def test_daemon_handles_tier2_exit_writes_bookmark(patched_config_paths):
     assert daemon._tier2_entry_time is None
 
 
-# Note: _calculate_stress was removed in Task 10 - stress scoring is now per-process
-# via TopCollector. See test_daemon_main_loop_updates_tier_manager for scoring tests.
-
-
-@pytest.mark.skip(reason="Needs daemon.py update for per-process scoring (Task 10)")
-@pytest.mark.asyncio
-async def test_daemon_handles_pause_runs_forensics(patched_config_paths, monkeypatch):
-    """Daemon should run full forensics on pause detection."""
-    from pause_monitor.collector import PowermetricsResult
-
-    config = Config()
-    # Lower threshold so test pause triggers forensics
-    config.alerts.pause_min_duration = 0.1
-
-    daemon = Daemon(config)
-    await daemon._init_database()
-
-    # Track forensics calls
-    forensics_called = []
-
-    async def mock_run_forensics(contents, *, duration):
-        forensics_called.append((contents, duration))
-
-    monkeypatch.setattr(daemon, "_run_forensics", mock_run_forensics)
-
-    # Mock sleep wake detection to return False (not a sleep wake)
-    monkeypatch.setattr(
-        "pause_monitor.daemon.was_recently_asleep",
-        lambda within_seconds: False,
-    )
-
-    # Add some samples to ring buffer (Phase 1: push requires metrics)
-    for i in range(5):
-        metrics = PowermetricsResult(
-            elapsed_ns=100_000_000,
-            throttled=False,
-            cpu_power=5.0 + i,
-            gpu_pct=10.0,
-            gpu_power=1.0,
-            io_read_per_s=1000.0,
-            io_write_per_s=500.0,
-            wakeups_per_s=50.0,
-            pageins_per_s=0.0,
-            top_cpu_processes=[],
-            top_pagein_processes=[],
-            top_wakeup_processes=[],
-            top_diskio_processes=[],
-        )
-        stress = StressBreakdown(
-            load=10 + i, memory=5, thermal=0, latency=0, io=0, gpu=0, wakeups=0, pageins=0
-        )
-        daemon.ring_buffer.push(metrics, stress, tier=1)
-
-    # Handle pause (300ms actual when 100ms expected = 3x latency)
-    await daemon._handle_pause(actual_interval=0.3, expected_interval=0.1)
-
-    assert len(forensics_called) == 1
-    # Forensics received frozen buffer contents and duration
-    contents, duration = forensics_called[0]
-    assert len(contents.samples) == 5
-    assert duration == 0.3
-
-
-@pytest.mark.skip(reason="Needs daemon.py update for per-process scoring (Task 10)")
-def test_daemon_updates_peak_after_interval(patched_config_paths):
-    """Daemon should update peak stress after peak_tracking_seconds."""
-    config = Config()
-    config.sentinel.peak_tracking_seconds = 30
-
-    daemon = Daemon(config)
-
-    # Simulate being in tier 2 via TierManager (single source of truth)
-    daemon.tier_manager.update(20)  # Enter tier 2
-    daemon.tier_manager._tier2_entry_time = time.monotonic() - 60  # Simulate 60s ago
-    daemon._tier2_peak_stress = 20
-    daemon._last_peak_check = time.time() - 35  # 35 seconds ago
-
-    # New stress is higher
-    new_stress = StressBreakdown(
-        load=15, memory=10, thermal=5, latency=3, io=2, gpu=5, wakeups=2, pageins=5
-    )
-
-    # Should update peak
-    daemon._maybe_update_peak(new_stress)
-
-    assert daemon._tier2_peak_stress == new_stress.total
-    assert daemon._tier2_peak_breakdown == new_stress
-
-
-# Note: _maybe_update_peak was removed in Task 10 - peak tracking is now handled
-# by TierManager.peak_score directly. See test_tier_manager.py for peak tracking tests.
-
-
-@pytest.mark.skip(reason="Needs daemon.py update for per-process scoring (Task 10)")
-@pytest.mark.asyncio
-async def test_daemon_main_loop_processes_powermetrics(patched_config_paths, monkeypatch):
-    """Daemon main loop should process powermetrics samples."""
-    from unittest.mock import MagicMock
-
-    from pause_monitor.collector import PowermetricsResult
-    from pause_monitor.storage import init_database
-
-    config = Config()
-    daemon = Daemon(config)
-
-    # Initialize database to prevent NoneType errors
-    init_database(config.db_path)
-    daemon._conn = sqlite3.connect(config.db_path)
-
-    # Track samples pushed to ring buffer (Phase 1: new signature)
-    pushed_samples = []
-    original_push = daemon.ring_buffer.push
-
-    def track_push(metrics, stress, tier):
-        pushed_samples.append((metrics, stress, tier))
-        return original_push(metrics, stress, tier)
-
-    monkeypatch.setattr(daemon.ring_buffer, "push", track_push)
-
-    # Mock powermetrics to yield two samples then stop
-    # Phase 1 updated PowermetricsResult - uses Data Dictionary fields
-    samples = [
-        PowermetricsResult(
-            elapsed_ns=100_000_000,
-            throttled=False,
-            cpu_power=5.0,
-            gpu_pct=30.0,
-            gpu_power=2.0,
-            io_read_per_s=0.0,
-            io_write_per_s=0.0,
-            wakeups_per_s=100.0,
-            pageins_per_s=0.0,
-            top_cpu_processes=[{"name": "test", "pid": 1, "cpu_ms_per_s": 100}],
-            top_pagein_processes=[],
-            top_wakeup_processes=[],
-            top_diskio_processes=[],
-        ),
-        PowermetricsResult(
-            elapsed_ns=100_000_000,
-            throttled=True,
-            cpu_power=12.0,
-            gpu_pct=60.0,
-            gpu_power=5.0,
-            io_read_per_s=0.0,
-            io_write_per_s=0.0,
-            wakeups_per_s=200.0,
-            pageins_per_s=10.0,  # Some swap activity
-            top_cpu_processes=[{"name": "test", "pid": 1, "cpu_ms_per_s": 200}],
-            top_pagein_processes=[{"name": "swapper", "pid": 2, "pageins_per_s": 10.0}],
-            top_wakeup_processes=[{"name": "test", "pid": 1, "wakeups_per_s": 200.0}],
-            top_diskio_processes=[],
-        ),
-    ]
-
-    async def mock_read_samples():
-        for s in samples:
-            yield s
-
-    mock_stream = MagicMock()
-    mock_stream.start = AsyncMock()
-    mock_stream.stop = AsyncMock()
-    mock_stream.read_samples = mock_read_samples
-    daemon._powermetrics = mock_stream
-
-    # Run main loop (will exit after samples exhausted)
-    await daemon._main_loop()
-
-    assert len(pushed_samples) == 2
-    # Second sample had higher stress (throttled, high GPU)
-    assert pushed_samples[1][1].thermal == 10  # throttled = 10 points
+# Note: Tests for old PowermetricsResult/StressBreakdown API were removed in Task 10.
+# The new per-process scoring via TopCollector is tested in:
+# - test_daemon_main_loop_collects_samples
+# - test_daemon_main_loop_updates_tier_manager
+# - test_daemon_main_loop_handles_pause_detection
+# Peak tracking is tested in test_tier_manager.py.
 
 
 # === Socket Server Integration Tests ===

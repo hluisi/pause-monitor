@@ -25,6 +25,7 @@ from pause_monitor.storage import (
     create_event,
     finalize_event,
     init_database,
+    insert_process_sample,
     prune_old_data,
 )
 
@@ -84,6 +85,9 @@ class DaemonState:
 
 class Daemon:
     """Main daemon class orchestrating sampling and detection."""
+
+    # Expected sample interval in milliseconds (1Hz sampling)
+    SAMPLE_INTERVAL_MS = 1000
 
     def __init__(self, config: Config):
         self.config = config
@@ -393,18 +397,21 @@ class Daemon:
         Args:
             samples: Current ProcessSamples with rogues
             tier: Current tier (2 or 3)
-
-        Note: Event sample storage requires schema update (Task 13).
-        For now, samples are captured in the ring buffer for forensics.
         """
         if self._current_event_id is None or self._conn is None:
             return
 
-        # TODO: Update EventSample schema to store ProcessSamples data
-        # For now, rogues are available in ring buffer for forensics
+        record_id = insert_process_sample(
+            self._conn,
+            self._current_event_id,
+            tier,
+            samples,
+        )
+
         log.debug(
-            "event_sample_captured",
+            "event_sample_saved",
             event_id=self._current_event_id,
+            record_id=record_id,
             tier=tier,
             max_score=samples.max_score,
             rogue_count=len(samples.rogues),
@@ -420,6 +427,9 @@ class Daemon:
             samples: Current ProcessSamples with rogues and max_score
         """
         score = samples.max_score
+
+        # Handle state updates and notifications for tier changes
+        await self._handle_tier_change(action, self.tier_manager.current_tier)
 
         if action == TierAction.TIER2_ENTRY:
             # Create new event on first escalation from tier 1
@@ -560,8 +570,7 @@ class Daemon:
 
         The loop runs until shutdown event is set.
         """
-        # Expected interval is 1000ms (1Hz)
-        expected_ms = 1000
+        expected_ms = self.SAMPLE_INTERVAL_MS
         pause_threshold = self.config.sentinel.pause_threshold_ratio
 
         while not self._shutdown_event.is_set():
