@@ -8,6 +8,8 @@ import pytest
 
 from pause_monitor.collector import (
     PowermetricsStream,
+    ProcessSamples,
+    ProcessScore,
     StreamStatus,
     get_core_count,
     parse_powermetrics_sample,
@@ -361,3 +363,80 @@ async def test_powermetrics_stream_raises_on_not_found(monkeypatch):
     stream = PowermetricsStream()
     with pytest.raises(RuntimeError, match="powermetrics not found"):
         await stream.start()
+
+
+# ProcessScore and ProcessSamples tests
+
+
+def test_process_score_to_dict():
+    """ProcessScore should serialize to dict."""
+    ps = ProcessScore(
+        pid=123,
+        command="test",
+        cpu=50.0,
+        state="running",
+        mem=1000000,
+        cmprs=0,
+        pageins=10,
+        csw=100,
+        sysbsd=50,
+        threads=4,
+        score=42,
+        categories=frozenset({"cpu", "pageins"}),
+    )
+    d = ps.to_dict()
+    assert d["pid"] == 123
+    assert d["score"] == 42
+    assert set(d["categories"]) == {"cpu", "pageins"}
+
+
+def test_process_score_from_dict():
+    """ProcessScore should deserialize from dict."""
+    d = {
+        "pid": 123,
+        "command": "test",
+        "cpu": 50.0,
+        "state": "running",
+        "mem": 1000000,
+        "cmprs": 0,
+        "pageins": 10,
+        "csw": 100,
+        "sysbsd": 50,
+        "threads": 4,
+        "score": 42,
+        "categories": ["cpu", "pageins"],
+    }
+    ps = ProcessScore.from_dict(d)
+    assert ps.pid == 123
+    assert ps.categories == frozenset({"cpu", "pageins"})
+
+
+def test_process_samples_json_roundtrip():
+    """ProcessSamples should roundtrip through JSON."""
+    samples = ProcessSamples(
+        timestamp=datetime(2026, 1, 23, 12, 0, 0),
+        elapsed_ms=1050,
+        process_count=500,
+        max_score=75,
+        rogues=[
+            ProcessScore(
+                pid=1,
+                command="test",
+                cpu=80.0,
+                state="running",
+                mem=1000,
+                cmprs=0,
+                pageins=0,
+                csw=10,
+                sysbsd=5,
+                threads=2,
+                score=75,
+                categories=frozenset({"cpu"}),
+            ),
+        ],
+    )
+    json_str = samples.to_json()
+    restored = ProcessSamples.from_json(json_str)
+    assert restored.max_score == 75
+    assert len(restored.rogues) == 1
+    assert restored.rogues[0].command == "test"

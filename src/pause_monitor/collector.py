@@ -1,11 +1,13 @@
 """Metrics collector using powermetrics."""
 
 import asyncio
+import json
 import os
 import plistlib
 from asyncio.subprocess import Process
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
+from datetime import datetime
 from enum import Enum
 from typing import TYPE_CHECKING
 
@@ -15,6 +17,94 @@ if TYPE_CHECKING:
     pass
 
 log = structlog.get_logger()
+
+
+@dataclass
+class ProcessScore:
+    """Single process with its stressor score."""
+
+    pid: int
+    command: str
+    cpu: float
+    state: str
+    mem: int
+    cmprs: int
+    pageins: int
+    csw: int
+    sysbsd: int
+    threads: int
+    score: int
+    categories: frozenset[str]
+
+    def to_dict(self) -> dict:
+        """Serialize to a dictionary."""
+        return {
+            "pid": self.pid,
+            "command": self.command,
+            "cpu": self.cpu,
+            "state": self.state,
+            "mem": self.mem,
+            "cmprs": self.cmprs,
+            "pageins": self.pageins,
+            "csw": self.csw,
+            "sysbsd": self.sysbsd,
+            "threads": self.threads,
+            "score": self.score,
+            "categories": list(self.categories),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "ProcessScore":
+        """Deserialize from a dictionary."""
+        return cls(
+            pid=data["pid"],
+            command=data["command"],
+            cpu=data["cpu"],
+            state=data["state"],
+            mem=data["mem"],
+            cmprs=data["cmprs"],
+            pageins=data["pageins"],
+            csw=data["csw"],
+            sysbsd=data["sysbsd"],
+            threads=data["threads"],
+            score=data["score"],
+            categories=frozenset(data["categories"]),
+        )
+
+
+@dataclass
+class ProcessSamples:
+    """Collection of scored processes from one sample."""
+
+    timestamp: datetime
+    elapsed_ms: int
+    process_count: int
+    max_score: int
+    rogues: list[ProcessScore]
+
+    def to_json(self) -> str:
+        """Serialize to JSON string."""
+        return json.dumps(
+            {
+                "timestamp": self.timestamp.isoformat(),
+                "elapsed_ms": self.elapsed_ms,
+                "process_count": self.process_count,
+                "max_score": self.max_score,
+                "rogues": [r.to_dict() for r in self.rogues],
+            }
+        )
+
+    @classmethod
+    def from_json(cls, data: str) -> "ProcessSamples":
+        """Deserialize from JSON string."""
+        d = json.loads(data)
+        return cls(
+            timestamp=datetime.fromisoformat(d["timestamp"]),
+            elapsed_ms=d["elapsed_ms"],
+            process_count=d["process_count"],
+            max_score=d["max_score"],
+            rogues=[ProcessScore.from_dict(r) for r in d["rogues"]],
+        )
 
 
 def get_core_count() -> int:
