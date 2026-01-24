@@ -462,3 +462,61 @@ class TopCollector:
                 continue
 
         return processes
+
+    def _select_rogues(self, processes: list[dict]) -> list[dict]:
+        """Apply rogue selection rules from config.
+
+        Returns a list of process dicts with an added '_categories' set
+        indicating why each process was selected.
+        """
+        selected: dict[int, dict] = {}  # pid -> process with _categories
+
+        # 1. Always include stuck (hardcoded, not configurable)
+        for proc in processes:
+            if proc["state"] == "stuck":
+                pid = proc["pid"]
+                if pid not in selected:
+                    selected[pid] = {**proc, "_categories": set()}
+                selected[pid]["_categories"].add("stuck")
+
+        # 2. Include configured states (zombie, etc.) - excluding stuck which is already handled
+        state_cfg = self.config.rogue_selection.state
+        if state_cfg.enabled:
+            matching = [
+                p for p in processes if p["state"] in state_cfg.states and p["state"] != "stuck"
+            ]
+            if state_cfg.count > 0:
+                matching = matching[: state_cfg.count]
+            for proc in matching:
+                pid = proc["pid"]
+                if pid not in selected:
+                    selected[pid] = {**proc, "_categories": set()}
+                selected[pid]["_categories"].add("state")
+
+        # 3. Top N per enabled category above threshold
+        categories = [
+            ("cpu", "cpu", self.config.rogue_selection.cpu),
+            ("mem", "mem", self.config.rogue_selection.mem),
+            ("cmprs", "cmprs", self.config.rogue_selection.cmprs),
+            ("threads", "threads", self.config.rogue_selection.threads),
+            ("csw", "csw", self.config.rogue_selection.csw),
+            ("sysbsd", "sysbsd", self.config.rogue_selection.sysbsd),
+            ("pageins", "pageins", self.config.rogue_selection.pageins),
+        ]
+
+        for cat_name, metric, cfg in categories:
+            if not cfg.enabled:
+                continue
+
+            # Filter by threshold and sort
+            eligible = [p for p in processes if p[metric] > cfg.threshold]
+            eligible.sort(key=lambda p: p[metric], reverse=True)
+
+            # Take top N
+            for proc in eligible[: cfg.count]:
+                pid = proc["pid"]
+                if pid not in selected:
+                    selected[pid] = {**proc, "_categories": set()}
+                selected[pid]["_categories"].add(cat_name)
+
+        return list(selected.values())

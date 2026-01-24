@@ -483,3 +483,128 @@ def test_parse_memory_suffixes():
     assert collector._parse_memory("0B") == 0
     assert collector._parse_memory("1024K") == 1024 * 1024
     assert collector._parse_memory("2G") == 2 * 1024 * 1024 * 1024
+
+
+# Rogue selection tests
+
+
+def test_select_rogues_stuck_always_included():
+    """Stuck processes should always be included."""
+    config = Config()
+    collector = TopCollector(config)
+
+    processes = [
+        {
+            "pid": 1,
+            "command": "normal",
+            "cpu": 1.0,
+            "state": "sleeping",
+            "mem": 100,
+            "cmprs": 0,
+            "pageins": 0,
+            "csw": 0,
+            "sysbsd": 0,
+            "threads": 1,
+        },
+        {
+            "pid": 2,
+            "command": "stuck_proc",
+            "cpu": 0.0,
+            "state": "stuck",
+            "mem": 100,
+            "cmprs": 0,
+            "pageins": 0,
+            "csw": 0,
+            "sysbsd": 0,
+            "threads": 1,
+        },
+    ]
+
+    rogues = collector._select_rogues(processes)
+
+    stuck = [r for r in rogues if r["command"] == "stuck_proc"]
+    assert len(stuck) == 1
+    assert "stuck" in stuck[0]["_categories"]
+
+
+def test_select_rogues_top_n_per_category():
+    """Should select top N per category."""
+    config = Config()
+    config.rogue_selection.cpu.count = 2
+    collector = TopCollector(config)
+
+    processes = [
+        {
+            "pid": 1,
+            "command": "high_cpu",
+            "cpu": 90.0,
+            "state": "running",
+            "mem": 100,
+            "cmprs": 0,
+            "pageins": 0,
+            "csw": 0,
+            "sysbsd": 0,
+            "threads": 1,
+        },
+        {
+            "pid": 2,
+            "command": "med_cpu",
+            "cpu": 50.0,
+            "state": "running",
+            "mem": 100,
+            "cmprs": 0,
+            "pageins": 0,
+            "csw": 0,
+            "sysbsd": 0,
+            "threads": 1,
+        },
+        {
+            "pid": 3,
+            "command": "low_cpu",
+            "cpu": 10.0,
+            "state": "running",
+            "mem": 100,
+            "cmprs": 0,
+            "pageins": 0,
+            "csw": 0,
+            "sysbsd": 0,
+            "threads": 1,
+        },
+    ]
+
+    rogues = collector._select_rogues(processes)
+
+    # Should have top 2 by CPU
+    cpu_rogues = [r for r in rogues if "cpu" in r["_categories"]]
+    commands = {r["command"] for r in cpu_rogues}
+    assert "high_cpu" in commands
+    assert "med_cpu" in commands
+    assert "low_cpu" not in commands
+
+
+def test_select_rogues_deduplicates():
+    """Process in multiple categories should appear once."""
+    config = Config()
+    collector = TopCollector(config)
+
+    processes = [
+        {
+            "pid": 1,
+            "command": "multi",
+            "cpu": 90.0,
+            "state": "running",
+            "mem": 1000000000,
+            "cmprs": 0,
+            "pageins": 100,
+            "csw": 0,
+            "sysbsd": 0,
+            "threads": 1,
+        },
+    ]
+
+    rogues = collector._select_rogues(processes)
+
+    assert len(rogues) == 1
+    assert "cpu" in rogues[0]["_categories"]
+    assert "mem" in rogues[0]["_categories"]
+    assert "pageins" in rogues[0]["_categories"]
