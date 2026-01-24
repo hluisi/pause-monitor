@@ -308,11 +308,6 @@ async def test_daemon_stop_removes_pid_file(tmp_path: Path):
     with patch.object(Config, "pid_path", new_callable=lambda: property(lambda self: pid_file)):
         daemon = Daemon(config)
 
-        # Mock powermetrics
-        mock_powermetrics = AsyncMock()
-        mock_powermetrics.stop = AsyncMock()
-        daemon._powermetrics = mock_powermetrics
-
         await daemon.stop()
 
         assert not pid_file.exists()

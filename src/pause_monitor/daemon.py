@@ -177,8 +177,7 @@ class Daemon:
         # Start auto-prune task
         self._auto_prune_task = asyncio.create_task(self._auto_prune())
 
-        # Run main loop (powermetrics -> stress -> ring buffer -> tiers)
-        # This replaces the old sentinel.start() call
+        # Run main loop (TopCollector -> stress -> ring buffer -> tiers)
         await self._main_loop()
 
     async def stop(self) -> None:

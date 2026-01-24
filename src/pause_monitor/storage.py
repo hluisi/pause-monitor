@@ -34,7 +34,7 @@ CREATE TABLE IF NOT EXISTS events (
 CREATE INDEX IF NOT EXISTS idx_events_start ON events(start_timestamp);
 
 -- Event samples (captured during escalation events)
--- Tier 2: peaks only, Tier 3: every sample at 10Hz
+-- Tier 2: peaks only, Tier 3: every sample at 1Hz
 CREATE TABLE IF NOT EXISTS event_samples (
     id              INTEGER PRIMARY KEY,
     event_id        INTEGER NOT NULL REFERENCES events(id),

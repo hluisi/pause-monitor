@@ -1,7 +1,7 @@
 # src/pause_monitor/ringbuffer.py
 """Ring buffer for process samples.
 
-Stores 30 samples at 100ms resolution (3 seconds of history).
+Stores 30 samples at 1Hz resolution (30 seconds of history).
 On pause detection, buffer is frozen and included in forensics.
 """
 
