@@ -4,14 +4,14 @@
 import asyncio
 import json
 import tempfile
+from datetime import datetime
 from pathlib import Path
 
 import pytest
 
-from pause_monitor.collector import PowermetricsResult
+from pause_monitor.collector import ProcessSamples, ProcessScore
 from pause_monitor.ringbuffer import RingBuffer
 from pause_monitor.socket_server import SocketServer
-from pause_monitor.stress import StressBreakdown
 
 
 async def wait_until(condition, timeout=1.0, interval=0.01):
@@ -34,25 +34,37 @@ def short_tmp_path():
         yield Path(tmpdir)
 
 
-def make_test_metrics(**kwargs) -> PowermetricsResult:
-    """Create PowermetricsResult with sensible defaults for testing."""
+def make_test_process_score(**kwargs) -> ProcessScore:
+    """Create ProcessScore with sensible defaults for testing."""
     defaults = {
-        "elapsed_ns": 100_000_000,
-        "throttled": False,
-        "cpu_power": 5.0,
-        "gpu_pct": 10.0,
-        "gpu_power": 1.0,
-        "io_read_per_s": 1000.0,
-        "io_write_per_s": 500.0,
-        "wakeups_per_s": 50.0,
-        "pageins_per_s": 0.0,
-        "top_cpu_processes": [],
-        "top_pagein_processes": [],
-        "top_wakeup_processes": [],
-        "top_diskio_processes": [],
+        "pid": 1,
+        "command": "test",
+        "cpu": 50.0,
+        "state": "running",
+        "mem": 1000,
+        "cmprs": 0,
+        "pageins": 0,
+        "csw": 0,
+        "sysbsd": 0,
+        "threads": 1,
+        "score": 50,
+        "categories": frozenset({"cpu"}),
     }
     defaults.update(kwargs)
-    return PowermetricsResult(**defaults)
+    return ProcessScore(**defaults)
+
+
+def make_test_samples(**kwargs) -> ProcessSamples:
+    """Create ProcessSamples with sensible defaults for testing."""
+    defaults = {
+        "timestamp": datetime.now(),
+        "elapsed_ms": 1000,
+        "process_count": 100,
+        "max_score": 50,
+        "rogues": [],
+    }
+    defaults.update(kwargs)
+    return ProcessSamples(**defaults)
 
 
 @pytest.mark.asyncio
@@ -71,18 +83,17 @@ async def test_socket_server_starts_and_stops(short_tmp_path):
 
 
 @pytest.mark.asyncio
-@pytest.mark.skip(reason="Needs socket_server.py update for per-process scoring (Task 11)")
 async def test_socket_server_streams_initial_state_to_client(short_tmp_path):
     """SocketServer should send initial ring buffer state on connect."""
     socket_path = short_tmp_path / "test.sock"
     buffer = RingBuffer(max_samples=10)
 
-    # Add samples (Phase 1: push requires metrics)
-    metrics = make_test_metrics(wakeups_per_s=100.0)
-    stress = StressBreakdown(
-        load=10, memory=5, thermal=0, latency=2, io=0, gpu=15, wakeups=3, pageins=0
+    # Add samples using ProcessSamples
+    samples = make_test_samples(
+        max_score=75,
+        rogues=[make_test_process_score(pid=123, command="heavy", score=75)],
     )
-    buffer.push(metrics, stress, tier=1)
+    buffer.push(samples, tier=2)
 
     server = SocketServer(socket_path=socket_path, ring_buffer=buffer)
     await server.start()
@@ -99,8 +110,10 @@ async def test_socket_server_streams_initial_state_to_client(short_tmp_path):
         assert "samples" in message
         assert "tier" in message
         assert len(message["samples"]) == 1
-        assert message["samples"][0]["stress"]["load"] == 10
-        assert message["samples"][0]["stress"]["gpu"] == 15
+        assert message["samples"][0]["max_score"] == 75
+        assert len(message["samples"][0]["rogues"]) == 1
+        assert message["samples"][0]["rogues"][0]["pid"] == 123
+        assert message["samples"][0]["rogues"][0]["command"] == "heavy"
 
         writer.close()
         await writer.wait_closed()
@@ -110,7 +123,7 @@ async def test_socket_server_streams_initial_state_to_client(short_tmp_path):
 
 @pytest.mark.asyncio
 async def test_socket_server_broadcast_to_clients(short_tmp_path):
-    """SocketServer.broadcast() should push data to all connected clients."""
+    """SocketServer.broadcast() should push ProcessSamples data to all connected clients."""
     socket_path = short_tmp_path / "test.sock"
     buffer = RingBuffer(max_samples=10)
 
@@ -124,12 +137,16 @@ async def test_socket_server_broadcast_to_clients(short_tmp_path):
         # Read initial state (empty buffer)
         await asyncio.wait_for(reader.readline(), timeout=2.0)
 
-        # Broadcast a sample
-        metrics = make_test_metrics(gpu_pct=75.0)
-        stress = StressBreakdown(
-            load=20, memory=10, thermal=5, latency=0, io=3, gpu=18, wakeups=2, pageins=0
+        # Broadcast a sample with ProcessSamples
+        samples = make_test_samples(
+            max_score=80,
+            process_count=150,
+            elapsed_ms=1500,
+            rogues=[
+                make_test_process_score(pid=456, command="busy", score=80, cpu=90.0),
+            ],
         )
-        await server.broadcast(metrics, stress, tier=2)
+        await server.broadcast(samples, tier=2)
 
         # Read broadcast message
         data = await asyncio.wait_for(reader.readline(), timeout=2.0)
@@ -137,9 +154,13 @@ async def test_socket_server_broadcast_to_clients(short_tmp_path):
 
         assert message["type"] == "sample"
         assert message["tier"] == 2
-        assert message["stress"]["load"] == 20
-        assert message["stress"]["gpu"] == 18
-        assert message["metrics"]["gpu_pct"] == 75.0
+        assert message["max_score"] == 80
+        assert message["process_count"] == 150
+        assert message["elapsed_ms"] == 1500
+        assert len(message["rogues"]) == 1
+        assert message["rogues"][0]["pid"] == 456
+        assert message["rogues"][0]["command"] == "busy"
+        assert message["rogues"][0]["cpu"] == 90.0
 
         writer.close()
         await writer.wait_closed()
@@ -187,11 +208,8 @@ async def test_socket_server_broadcast_no_clients(short_tmp_path):
 
     try:
         # Should not raise when broadcasting with no clients
-        metrics = make_test_metrics()
-        stress = StressBreakdown(
-            load=10, memory=5, thermal=0, latency=0, io=0, gpu=0, wakeups=0, pageins=0
-        )
-        await server.broadcast(metrics, stress, tier=1)
+        samples = make_test_samples()
+        await server.broadcast(samples, tier=1)
     finally:
         await server.stop()
 
@@ -234,12 +252,9 @@ async def test_socket_server_multiple_clients(short_tmp_path):
         await asyncio.wait_for(reader1.readline(), timeout=2.0)
         await asyncio.wait_for(reader2.readline(), timeout=2.0)
 
-        # Broadcast
-        metrics = make_test_metrics()
-        stress = StressBreakdown(
-            load=15, memory=5, thermal=0, latency=0, io=0, gpu=0, wakeups=0, pageins=0
-        )
-        await server.broadcast(metrics, stress, tier=1)
+        # Broadcast with ProcessSamples
+        samples = make_test_samples(max_score=65)
+        await server.broadcast(samples, tier=1)
 
         # Both clients should receive
         data1 = await asyncio.wait_for(reader1.readline(), timeout=2.0)
@@ -248,8 +263,8 @@ async def test_socket_server_multiple_clients(short_tmp_path):
         msg1 = json.loads(data1.decode())
         msg2 = json.loads(data2.decode())
 
-        assert msg1["stress"]["load"] == 15
-        assert msg2["stress"]["load"] == 15
+        assert msg1["max_score"] == 65
+        assert msg2["max_score"] == 65
 
         writer1.close()
         writer2.close()

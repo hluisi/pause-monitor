@@ -2,7 +2,7 @@
 """Unix socket server for streaming ring buffer data to TUI.
 
 PUSH-BASED DESIGN (per Design Simplifications):
-- Main loop calls broadcast() after each powermetrics sample
+- Main loop calls broadcast() after each sample
 - No internal polling loop - data flows directly from daemon
 - Protocol: newline-delimited JSON messages
 """
@@ -12,15 +12,12 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from dataclasses import asdict
-from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from pause_monitor.collector import PowermetricsResult
+    from pause_monitor.collector import ProcessSamples
     from pause_monitor.ringbuffer import RingBuffer
-    from pause_monitor.stress import StressBreakdown
 
 log = logging.getLogger(__name__)
 
@@ -29,13 +26,13 @@ class SocketServer:
     """Unix domain socket server for real-time streaming to TUI.
 
     PUSH-BASED DESIGN (per Design Simplifications):
-    - Main loop calls broadcast() after each powermetrics sample
+    - Main loop calls broadcast() after each sample
     - No internal polling loop - data flows directly from daemon
     - Protocol: newline-delimited JSON messages
 
     Message Types:
     - initial_state: Sent on client connect with recent buffer samples
-    - sample: Sent via broadcast() with current metrics/stress/tier
+    - sample: Sent via broadcast() with current ProcessSamples and tier
     """
 
     def __init__(
@@ -101,51 +98,27 @@ class SocketServer:
 
         log.info("socket_server_stopped")
 
-    async def broadcast(
-        self,
-        metrics: PowermetricsResult,
-        stress: StressBreakdown,
-        tier: int,
-        *,
-        load_avg: float = 0.0,
-        mem_pressure: int = 0,
-    ) -> None:
-        """Push current sample to all connected clients.
+    async def broadcast(self, samples: ProcessSamples, tier: int) -> None:
+        """Broadcast sample to all connected TUI clients.
 
-        Called from main loop after each powermetrics sample.
+        Called from main loop after each sample.
         This is the push-based approach - no internal polling.
 
         Args:
-            metrics: Raw powermetrics data (Phase 1 format)
-            stress: Computed stress breakdown
+            samples: ProcessSamples with scored rogues
             tier: Current tier (1, 2, or 3)
-            load_avg: System load average (1 minute)
-            mem_pressure: Memory pressure percentage (0-100, higher = more free)
         """
         if not self._clients:
             return
 
-        # Build message with current sample data
         message = {
             "type": "sample",
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": samples.timestamp.isoformat(),
             "tier": tier,
-            "stress": asdict(stress),
-            "metrics": {
-                "elapsed_ns": metrics.elapsed_ns,
-                "throttled": metrics.throttled,
-                "cpu_power": metrics.cpu_power,
-                "gpu_pct": metrics.gpu_pct,
-                "gpu_power": metrics.gpu_power,
-                "io_read_per_s": metrics.io_read_per_s,
-                "io_write_per_s": metrics.io_write_per_s,
-                "wakeups_per_s": metrics.wakeups_per_s,
-                "pageins_per_s": metrics.pageins_per_s,
-                "top_cpu_processes": metrics.top_cpu_processes,
-                "top_pagein_processes": metrics.top_pagein_processes,
-                "load_avg": load_avg,
-                "mem_pressure": mem_pressure,
-            },
+            "elapsed_ms": samples.elapsed_ms,
+            "process_count": samples.process_count,
+            "max_score": samples.max_score,
+            "rogues": [p.to_dict() for p in samples.rogues],
             "sample_count": len(self.ring_buffer.samples),
         }
 
@@ -198,36 +171,25 @@ class SocketServer:
 
     async def _send_initial_state(self, writer: asyncio.StreamWriter) -> None:
         """Send current ring buffer state to a newly connected client."""
-        samples = self.ring_buffer.samples
-        latest = samples[-1] if samples else None
+        ring_samples = self.ring_buffer.samples
+        latest = ring_samples[-1] if ring_samples else None
 
         message = {
             "type": "initial_state",
             "samples": [
                 {
-                    "timestamp": s.timestamp.isoformat(),
-                    "stress": asdict(s.stress),
+                    "timestamp": s.samples.timestamp.isoformat(),
                     "tier": s.tier,
-                    # Include raw metrics from Phase 1 RingSample
-                    "metrics": {
-                        "elapsed_ns": s.metrics.elapsed_ns,
-                        "throttled": s.metrics.throttled,
-                        "cpu_power": s.metrics.cpu_power,
-                        "gpu_pct": s.metrics.gpu_pct,
-                        "gpu_power": s.metrics.gpu_power,
-                        "io_read_per_s": s.metrics.io_read_per_s,
-                        "io_write_per_s": s.metrics.io_write_per_s,
-                        "wakeups_per_s": s.metrics.wakeups_per_s,
-                        "pageins_per_s": s.metrics.pageins_per_s,
-                        "top_cpu_processes": s.metrics.top_cpu_processes,
-                        "top_pagein_processes": s.metrics.top_pagein_processes,
-                    },
+                    "elapsed_ms": s.samples.elapsed_ms,
+                    "process_count": s.samples.process_count,
+                    "max_score": s.samples.max_score,
+                    "rogues": [p.to_dict() for p in s.samples.rogues],
                 }
-                for s in samples[-30:]  # Last 3 seconds at 100ms
+                for s in ring_samples[-30:]  # Last 30 samples
             ],
             "tier": latest.tier if latest else 1,
-            "current_stress": asdict(latest.stress) if latest else None,
-            "sample_count": len(samples),
+            "max_score": latest.samples.max_score if latest else 0,
+            "sample_count": len(ring_samples),
         }
 
         data = json.dumps(message).encode() + b"\n"
