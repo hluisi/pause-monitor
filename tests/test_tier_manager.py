@@ -1,4 +1,4 @@
-"""Tests for TierManager - tiered stress monitoring."""
+"""Tests for TierManager - tiered score monitoring."""
 
 import time
 
@@ -12,31 +12,31 @@ def test_tier_manager_starts_at_tier1():
 
 
 def test_tier_manager_escalates_to_tier2():
-    """Stress >= 15 triggers escalation to Tier 2."""
+    """Score >= elevated_threshold triggers escalation to Tier 2."""
     manager = TierManager(elevated_threshold=15, critical_threshold=50)
 
-    action = manager.update(stress_total=20)
+    action = manager.update(score=20)
 
     assert manager.current_tier == 2
     assert action == "tier2_entry"
 
 
 def test_tier_manager_escalates_to_tier3():
-    """Stress >= 50 triggers escalation to Tier 3."""
+    """Score >= critical_threshold triggers escalation to Tier 3."""
     manager = TierManager(elevated_threshold=15, critical_threshold=50)
-    manager.update(stress_total=20)  # Enter tier 2 first
+    manager.update(score=20)  # Enter tier 2 first
 
-    action = manager.update(stress_total=55)
+    action = manager.update(score=55)
 
     assert manager.current_tier == 3
     assert action == "tier3_entry"
 
 
 def test_tier_manager_direct_escalation_to_tier3():
-    """Stress >= 50 triggers direct escalation from Tier 1 to Tier 3."""
+    """Score >= critical_threshold triggers direct escalation from Tier 1 to Tier 3."""
     manager = TierManager(elevated_threshold=15, critical_threshold=50)
 
-    action = manager.update(stress_total=55)
+    action = manager.update(score=55)
 
     assert manager.current_tier == 3
     assert action == "tier3_entry"
@@ -45,16 +45,16 @@ def test_tier_manager_direct_escalation_to_tier3():
 def test_tier_manager_deescalates_with_hysteresis():
     """Tier 2 requires 5 seconds below threshold to de-escalate."""
     manager = TierManager(elevated_threshold=15, critical_threshold=50)
-    manager.update(stress_total=20)  # Enter tier 2
+    manager.update(score=20)  # Enter tier 2
 
-    # Still in tier 2 even though stress dropped
-    action = manager.update(stress_total=10)
+    # Still in tier 2 even though score dropped
+    action = manager.update(score=10)
     assert manager.current_tier == 2
     assert action is None
 
     # Simulate time passing (manipulate internal state for testing)
     manager._tier2_low_since = time.monotonic() - 6.0
-    action = manager.update(stress_total=10)
+    action = manager.update(score=10)
 
     assert manager.current_tier == 1
     assert action == "tier2_exit"
@@ -63,84 +63,84 @@ def test_tier_manager_deescalates_with_hysteresis():
 def test_tier_manager_tier3_deescalates_with_hysteresis():
     """Tier 3 requires 5 seconds below threshold to de-escalate to Tier 2."""
     manager = TierManager(elevated_threshold=15, critical_threshold=50)
-    manager.update(stress_total=55)  # Enter tier 3
+    manager.update(score=55)  # Enter tier 3
 
-    # Still in tier 3 even though stress dropped
-    action = manager.update(stress_total=30)  # Below 50 but above 15
+    # Still in tier 3 even though score dropped
+    action = manager.update(score=30)  # Below 50 but above 15
     assert manager.current_tier == 3
     assert action is None
 
     # Simulate time passing
     manager._tier3_low_since = time.monotonic() - 6.0
-    action = manager.update(stress_total=30)
+    action = manager.update(score=30)
 
     assert manager.current_tier == 2
     assert action == "tier3_exit"
 
 
 def test_tier_manager_hysteresis_resets_on_spike():
-    """Hysteresis timer resets if stress spikes back up."""
+    """Hysteresis timer resets if score spikes back up."""
     manager = TierManager(elevated_threshold=15, critical_threshold=50)
-    manager.update(stress_total=20)  # Enter tier 2
+    manager.update(score=20)  # Enter tier 2
 
-    # Stress drops, start hysteresis
-    manager.update(stress_total=10)
+    # Score drops, start hysteresis
+    manager.update(score=10)
     assert manager._tier2_low_since is not None
 
-    # Stress spikes back up - hysteresis should reset
-    manager.update(stress_total=20)
+    # Score spikes back up - hysteresis should reset
+    manager.update(score=20)
     assert manager._tier2_low_since is None
     assert manager.current_tier == 2
 
 
 def test_tier_manager_peak_tracking():
-    """TierManager tracks peak stress during elevated state."""
+    """TierManager tracks peak score during elevated state."""
     manager = TierManager(elevated_threshold=15, critical_threshold=50)
-    manager.update(stress_total=20)
-    manager.update(stress_total=35)
-    manager.update(stress_total=25)
+    manager.update(score=20)
+    manager.update(score=35)
+    manager.update(score=25)
 
-    assert manager.peak_stress == 35
+    assert manager.peak_score == 35
 
 
 def test_tier_manager_peak_resets_on_deescalation():
-    """Peak stress resets when de-escalating to Tier 1."""
+    """Peak score resets when de-escalating to Tier 1."""
     manager = TierManager(elevated_threshold=15, critical_threshold=50)
-    manager.update(stress_total=30)  # Enter tier 2, peak=30
-    assert manager.peak_stress == 30
+    manager.update(score=30)  # Enter tier 2, peak=30
+    assert manager.peak_score == 30
 
     # Force de-escalation
     manager._tier2_low_since = time.monotonic() - 6.0
-    manager.update(stress_total=5)  # Exit to tier 1
+    manager.update(score=5)  # Exit to tier 1
 
     assert manager.current_tier == 1
-    assert manager.peak_stress == 0
+    assert manager.peak_score == 0
 
 
 def test_tier_manager_peak_returns_action_on_new_peak():
     """TierManager returns tier2_peak action when new peak is reached in Tier 2."""
     manager = TierManager(elevated_threshold=15, critical_threshold=50)
-    manager.update(stress_total=20)  # Entry
+    manager.update(score=20)  # Entry
 
-    action = manager.update(stress_total=30)  # New peak
+    action = manager.update(score=30)  # New peak
     assert action == "tier2_peak"
-    assert manager.peak_stress == 30
+    assert manager.peak_score == 30
 
-    action = manager.update(stress_total=25)  # Not a new peak
+    action = manager.update(score=25)  # Not a new peak
     assert action is None
 
 
 def test_tier_manager_escalates_at_exact_threshold():
-    """Stress exactly at threshold triggers escalation."""
+    """Score exactly at threshold triggers escalation."""
     manager = TierManager(elevated_threshold=15, critical_threshold=50)
 
     # Exactly at tier 2 threshold
-    action = manager.update(stress_total=15)
+    action = manager.update(score=15)
     assert manager.current_tier == 2
     assert action == "tier2_entry"
 
     # Exactly at tier 3 threshold
-    action = manager.update(stress_total=50)
+    action = manager.update(score=50)
     assert manager.current_tier == 3
     assert action == "tier3_entry"
 
@@ -167,3 +167,19 @@ def test_tier_manager_entry_time_accessors():
     manager._tier3_low_since = time.monotonic() - 10  # Force hysteresis
     manager.update(30)  # Below critical
     assert manager.tier3_entry_time is None  # Cleared on exit
+
+
+def test_tier_manager_default_thresholds():
+    """Default thresholds should be 35/65."""
+    tm = TierManager()
+    assert tm._elevated_threshold == 35
+    assert tm._critical_threshold == 65
+
+
+def test_tier_manager_peak_score_property():
+    """Should have peak_score property."""
+    tm = TierManager()
+    tm.update(40)  # Enter tier 2
+    tm.update(50)  # Higher score
+
+    assert tm.peak_score == 50
