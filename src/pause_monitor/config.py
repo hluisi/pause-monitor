@@ -68,10 +68,63 @@ class SentinelConfig:
 
 @dataclass
 class TiersConfig:
-    """Tier threshold configuration."""
+    """Tier threshold configuration for process scores."""
 
-    elevated_threshold: int = 15
-    critical_threshold: int = 50
+    elevated_threshold: int = 35
+    critical_threshold: int = 65
+
+
+@dataclass
+class ScoringWeights:
+    """Weights for per-process stressor scoring (must sum to 100, excluding threads)."""
+
+    cpu: int = 25
+    state: int = 20
+    pageins: int = 15
+    mem: int = 15
+    cmprs: int = 10
+    csw: int = 10
+    sysbsd: int = 5
+    threads: int = 0
+
+
+@dataclass
+class ScoringConfig:
+    """Scoring configuration."""
+
+    weights: ScoringWeights = field(default_factory=ScoringWeights)
+
+
+@dataclass
+class CategorySelection:
+    """Selection config for a single category."""
+
+    enabled: bool = True
+    count: int = 3
+    threshold: float = 0.0
+
+
+@dataclass
+class StateSelection:
+    """Selection config for state-based inclusion."""
+
+    enabled: bool = True
+    count: int = 0  # 0 = unlimited
+    states: list[str] = field(default_factory=lambda: ["stuck", "zombie"])
+
+
+@dataclass
+class RogueSelectionConfig:
+    """Configuration for rogue process selection."""
+
+    cpu: CategorySelection = field(default_factory=CategorySelection)
+    mem: CategorySelection = field(default_factory=CategorySelection)
+    cmprs: CategorySelection = field(default_factory=CategorySelection)
+    threads: CategorySelection = field(default_factory=CategorySelection)
+    csw: CategorySelection = field(default_factory=CategorySelection)
+    sysbsd: CategorySelection = field(default_factory=CategorySelection)
+    pageins: CategorySelection = field(default_factory=CategorySelection)
+    state: StateSelection = field(default_factory=StateSelection)
 
 
 @dataclass
@@ -84,6 +137,8 @@ class Config:
     suspects: SuspectsConfig = field(default_factory=SuspectsConfig)
     sentinel: SentinelConfig = field(default_factory=SentinelConfig)
     tiers: TiersConfig = field(default_factory=TiersConfig)
+    scoring: ScoringConfig = field(default_factory=ScoringConfig)
+    rogue_selection: RogueSelectionConfig = field(default_factory=RogueSelectionConfig)
     learning_mode: bool = False
 
     @property
@@ -179,6 +234,75 @@ class Config:
         tiers.add("elevated_threshold", self.tiers.elevated_threshold)
         tiers.add("critical_threshold", self.tiers.critical_threshold)
         doc.add("tiers", tiers)
+        doc.add(tomlkit.nl())
+
+        # Scoring section with nested weights
+        scoring = tomlkit.table()
+        weights = tomlkit.table()
+        weights.add("cpu", self.scoring.weights.cpu)
+        weights.add("state", self.scoring.weights.state)
+        weights.add("pageins", self.scoring.weights.pageins)
+        weights.add("mem", self.scoring.weights.mem)
+        weights.add("cmprs", self.scoring.weights.cmprs)
+        weights.add("csw", self.scoring.weights.csw)
+        weights.add("sysbsd", self.scoring.weights.sysbsd)
+        weights.add("threads", self.scoring.weights.threads)
+        scoring.add("weights", weights)
+        doc.add("scoring", scoring)
+        doc.add(tomlkit.nl())
+
+        # Rogue selection section with nested category configs
+        rogue = tomlkit.table()
+
+        cpu_sel = tomlkit.table()
+        cpu_sel.add("enabled", self.rogue_selection.cpu.enabled)
+        cpu_sel.add("count", self.rogue_selection.cpu.count)
+        cpu_sel.add("threshold", self.rogue_selection.cpu.threshold)
+        rogue.add("cpu", cpu_sel)
+
+        mem_sel = tomlkit.table()
+        mem_sel.add("enabled", self.rogue_selection.mem.enabled)
+        mem_sel.add("count", self.rogue_selection.mem.count)
+        mem_sel.add("threshold", self.rogue_selection.mem.threshold)
+        rogue.add("mem", mem_sel)
+
+        cmprs_sel = tomlkit.table()
+        cmprs_sel.add("enabled", self.rogue_selection.cmprs.enabled)
+        cmprs_sel.add("count", self.rogue_selection.cmprs.count)
+        cmprs_sel.add("threshold", self.rogue_selection.cmprs.threshold)
+        rogue.add("cmprs", cmprs_sel)
+
+        threads_sel = tomlkit.table()
+        threads_sel.add("enabled", self.rogue_selection.threads.enabled)
+        threads_sel.add("count", self.rogue_selection.threads.count)
+        threads_sel.add("threshold", self.rogue_selection.threads.threshold)
+        rogue.add("threads", threads_sel)
+
+        csw_sel = tomlkit.table()
+        csw_sel.add("enabled", self.rogue_selection.csw.enabled)
+        csw_sel.add("count", self.rogue_selection.csw.count)
+        csw_sel.add("threshold", self.rogue_selection.csw.threshold)
+        rogue.add("csw", csw_sel)
+
+        sysbsd_sel = tomlkit.table()
+        sysbsd_sel.add("enabled", self.rogue_selection.sysbsd.enabled)
+        sysbsd_sel.add("count", self.rogue_selection.sysbsd.count)
+        sysbsd_sel.add("threshold", self.rogue_selection.sysbsd.threshold)
+        rogue.add("sysbsd", sysbsd_sel)
+
+        pageins_sel = tomlkit.table()
+        pageins_sel.add("enabled", self.rogue_selection.pageins.enabled)
+        pageins_sel.add("count", self.rogue_selection.pageins.count)
+        pageins_sel.add("threshold", self.rogue_selection.pageins.threshold)
+        rogue.add("pageins", pageins_sel)
+
+        state_sel = tomlkit.table()
+        state_sel.add("enabled", self.rogue_selection.state.enabled)
+        state_sel.add("count", self.rogue_selection.state.count)
+        state_sel.add("states", self.rogue_selection.state.states)
+        rogue.add("state", state_sel)
+
+        doc.add("rogue_selection", rogue)
 
         path.write_text(tomlkit.dumps(doc))
 
@@ -199,6 +323,8 @@ class Config:
         suspects_data = data.get("suspects", {})
         sentinel_data = data.get("sentinel", {})
         tiers_data = data.get("tiers", {})
+        scoring_data = data.get("scoring", {})
+        rogue_data = data.get("rogue_selection", {})
 
         return cls(
             sampling=SamplingConfig(
@@ -243,8 +369,59 @@ class Config:
                 peak_tracking_seconds=sentinel_data.get("peak_tracking_seconds", 30),
             ),
             tiers=TiersConfig(
-                elevated_threshold=tiers_data.get("elevated_threshold", 15),
-                critical_threshold=tiers_data.get("critical_threshold", 50),
+                elevated_threshold=tiers_data.get("elevated_threshold", 35),
+                critical_threshold=tiers_data.get("critical_threshold", 65),
             ),
+            scoring=_load_scoring_config(scoring_data),
+            rogue_selection=_load_rogue_selection_config(rogue_data),
             learning_mode=data.get("learning_mode", False),
         )
+
+
+def _load_scoring_config(data: dict) -> ScoringConfig:
+    """Load scoring config from TOML data."""
+    weights_data = data.get("weights", {})
+    return ScoringConfig(
+        weights=ScoringWeights(
+            cpu=weights_data.get("cpu", 25),
+            state=weights_data.get("state", 20),
+            pageins=weights_data.get("pageins", 15),
+            mem=weights_data.get("mem", 15),
+            cmprs=weights_data.get("cmprs", 10),
+            csw=weights_data.get("csw", 10),
+            sysbsd=weights_data.get("sysbsd", 5),
+            threads=weights_data.get("threads", 0),
+        )
+    )
+
+
+def _load_category_selection(data: dict) -> CategorySelection:
+    """Load category selection from TOML data."""
+    return CategorySelection(
+        enabled=data.get("enabled", True),
+        count=data.get("count", 3),
+        threshold=data.get("threshold", 0.0),
+    )
+
+
+def _load_state_selection(data: dict) -> StateSelection:
+    """Load state selection from TOML data."""
+    return StateSelection(
+        enabled=data.get("enabled", True),
+        count=data.get("count", 0),
+        states=data.get("states", ["stuck", "zombie"]),
+    )
+
+
+def _load_rogue_selection_config(data: dict) -> RogueSelectionConfig:
+    """Load rogue selection config from TOML data."""
+    return RogueSelectionConfig(
+        cpu=_load_category_selection(data.get("cpu", {})),
+        mem=_load_category_selection(data.get("mem", {})),
+        cmprs=_load_category_selection(data.get("cmprs", {})),
+        threads=_load_category_selection(data.get("threads", {})),
+        csw=_load_category_selection(data.get("csw", {})),
+        sysbsd=_load_category_selection(data.get("sysbsd", {})),
+        pageins=_load_category_selection(data.get("pageins", {})),
+        state=_load_state_selection(data.get("state", {})),
+    )

@@ -128,8 +128,8 @@ def test_sentinel_config_defaults():
 def test_tiers_config_defaults():
     """TiersConfig has correct defaults."""
     config = TiersConfig()
-    assert config.elevated_threshold == 15
-    assert config.critical_threshold == 50
+    assert config.elevated_threshold == 35
+    assert config.critical_threshold == 65
 
 
 def test_config_loads_sentinel_section(tmp_path):
@@ -171,7 +171,7 @@ def test_full_config_includes_sentinel_and_tiers():
     assert hasattr(config, "sentinel")
     assert hasattr(config, "tiers")
     assert config.sentinel.fast_interval_ms == 100
-    assert config.tiers.elevated_threshold == 15
+    assert config.tiers.elevated_threshold == 35
 
 
 def test_config_loads_partial_sentinel_section(tmp_path):
@@ -229,3 +229,107 @@ def test_config_save_includes_new_sentinel_fields(tmp_path):
     content = config_path.read_text()
     assert "pause_threshold_ratio = 2.5" in content
     assert "peak_tracking_seconds = 45" in content
+
+
+def test_scoring_weights_default():
+    """Scoring weights should have correct defaults."""
+    config = Config()
+    assert config.scoring.weights.cpu == 25
+    assert config.scoring.weights.state == 20
+    assert config.scoring.weights.pageins == 15
+    assert config.scoring.weights.mem == 15
+    assert config.scoring.weights.cmprs == 10
+    assert config.scoring.weights.csw == 10
+    assert config.scoring.weights.sysbsd == 5
+    assert config.scoring.weights.threads == 0
+
+
+def test_rogue_selection_default():
+    """Rogue selection should have correct defaults."""
+    config = Config()
+    assert config.rogue_selection.cpu.enabled is True
+    assert config.rogue_selection.cpu.count == 3
+    assert config.rogue_selection.cpu.threshold == 0.0
+    assert config.rogue_selection.state.enabled is True
+    assert config.rogue_selection.state.states == ["stuck", "zombie"]
+
+
+def test_tier_thresholds_updated():
+    """Tier thresholds should be 35/65 for process scores."""
+    config = Config()
+    assert config.tiers.elevated_threshold == 35
+    assert config.tiers.critical_threshold == 65
+
+
+def test_config_save_includes_scoring_section(tmp_path):
+    """Config.save() writes scoring section with weights."""
+    config_path = tmp_path / "config.toml"
+    config = Config()
+    config.scoring.weights.cpu = 30
+    config.scoring.weights.state = 25
+    config.save(config_path)
+
+    content = config_path.read_text()
+    assert "[scoring.weights]" in content
+    assert "cpu = 30" in content
+    assert "state = 25" in content
+
+
+def test_config_loads_scoring_section(tmp_path):
+    """Config.load() reads scoring section from TOML."""
+    config_file = tmp_path / "config.toml"
+    config_file.write_text("""
+[scoring.weights]
+cpu = 30
+state = 25
+pageins = 20
+""")
+
+    config = Config.load(config_file)
+    assert config.scoring.weights.cpu == 30
+    assert config.scoring.weights.state == 25
+    assert config.scoring.weights.pageins == 20
+    # Defaults for unspecified weights
+    assert config.scoring.weights.mem == 15
+    assert config.scoring.weights.threads == 0
+
+
+def test_config_save_includes_rogue_selection(tmp_path):
+    """Config.save() writes rogue_selection section."""
+    config_path = tmp_path / "config.toml"
+    config = Config()
+    config.rogue_selection.cpu.count = 5
+    config.rogue_selection.state.states = ["stuck", "zombie", "uninterruptible"]
+    config.save(config_path)
+
+    content = config_path.read_text()
+    assert "[rogue_selection.cpu]" in content
+    assert "count = 5" in content
+    assert "[rogue_selection.state]" in content
+
+
+def test_config_loads_rogue_selection(tmp_path):
+    """Config.load() reads rogue_selection section from TOML."""
+    config_file = tmp_path / "config.toml"
+    config_file.write_text("""
+[rogue_selection.cpu]
+enabled = false
+count = 5
+threshold = 10.0
+
+[rogue_selection.state]
+enabled = true
+count = 2
+states = ["stuck"]
+""")
+
+    config = Config.load(config_file)
+    assert config.rogue_selection.cpu.enabled is False
+    assert config.rogue_selection.cpu.count == 5
+    assert config.rogue_selection.cpu.threshold == 10.0
+    assert config.rogue_selection.state.enabled is True
+    assert config.rogue_selection.state.count == 2
+    assert config.rogue_selection.state.states == ["stuck"]
+    # Defaults for unspecified categories
+    assert config.rogue_selection.mem.enabled is True
+    assert config.rogue_selection.mem.count == 3
