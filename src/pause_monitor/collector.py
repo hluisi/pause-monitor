@@ -520,3 +520,61 @@ class TopCollector:
                 selected[pid]["_categories"].add(cat_name)
 
         return list(selected.values())
+
+    def _normalize_state(self, state: str) -> float:
+        """Normalize state to 0-1 scale."""
+        if state == "stuck":
+            return 1.0
+        elif state == "zombie":
+            return 0.8
+        elif state == "halted":
+            return 0.6
+        elif state == "stopped":
+            return 0.4
+        else:
+            return 0.0
+
+    def _score_process(self, proc: dict) -> ProcessScore:
+        """Compute stressor score using config weights."""
+        weights = self.config.scoring.weights
+
+        # Normalize each metric to 0-1 scale
+        normalized = {
+            "cpu": min(1.0, proc["cpu"] / 100.0),
+            "state": self._normalize_state(proc["state"]),
+            "pageins": min(1.0, proc["pageins"] / 1000.0),
+            "mem": min(1.0, proc["mem"] / (8 * 1024**3)),  # 8GB
+            "cmprs": min(1.0, proc["cmprs"] / (1 * 1024**3)),  # 1GB
+            "csw": min(1.0, proc["csw"] / 100000.0),  # 100k
+            "sysbsd": min(1.0, proc["sysbsd"] / 100000.0),  # 100k
+            "threads": min(1.0, proc["threads"] / 1000.0),  # 1000
+        }
+
+        # Weighted sum
+        total = (
+            normalized["cpu"] * weights.cpu
+            + normalized["state"] * weights.state
+            + normalized["pageins"] * weights.pageins
+            + normalized["mem"] * weights.mem
+            + normalized["cmprs"] * weights.cmprs
+            + normalized["csw"] * weights.csw
+            + normalized["sysbsd"] * weights.sysbsd
+            + normalized["threads"] * weights.threads
+        )
+
+        score = min(100, int(total))
+
+        return ProcessScore(
+            pid=proc["pid"],
+            command=proc["command"],
+            cpu=proc["cpu"],
+            state=proc["state"],
+            mem=proc["mem"],
+            cmprs=proc["cmprs"],
+            pageins=proc["pageins"],
+            csw=proc["csw"],
+            sysbsd=proc["sysbsd"],
+            threads=proc["threads"],
+            score=score,
+            categories=frozenset(proc["_categories"]),
+        )

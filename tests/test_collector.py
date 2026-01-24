@@ -701,3 +701,155 @@ def test_select_rogues_threshold_filters():
     assert len(rogues) == 1
     assert rogues[0]["command"] == "high_cpu"
     assert "cpu" in rogues[0]["_categories"]
+
+
+# Process scoring tests
+
+
+def test_score_process_cpu_heavy():
+    """High CPU should result in high score."""
+    config = Config()
+    collector = TopCollector(config)
+
+    proc = {
+        "pid": 1,
+        "command": "cpu_hog",
+        "cpu": 100.0,
+        "state": "running",
+        "mem": 0,
+        "cmprs": 0,
+        "pageins": 0,
+        "csw": 0,
+        "sysbsd": 0,
+        "threads": 1,
+        "_categories": {"cpu"},
+    }
+
+    scored = collector._score_process(proc)
+
+    assert scored.score >= 20  # CPU weight is 25, 100% CPU gives exactly 25
+
+
+def test_score_process_stuck():
+    """Stuck state should add significant score."""
+    config = Config()
+    collector = TopCollector(config)
+
+    proc = {
+        "pid": 1,
+        "command": "stuck",
+        "cpu": 0.0,
+        "state": "stuck",
+        "mem": 0,
+        "cmprs": 0,
+        "pageins": 0,
+        "csw": 0,
+        "sysbsd": 0,
+        "threads": 1,
+        "_categories": {"stuck"},
+    }
+
+    scored = collector._score_process(proc)
+
+    assert scored.score >= 15  # State weight is 20, stuck gives exactly 20
+
+
+def test_score_process_categories_preserved():
+    """Categories should be preserved in ProcessScore."""
+    config = Config()
+    collector = TopCollector(config)
+
+    proc = {
+        "pid": 1,
+        "command": "test",
+        "cpu": 50.0,
+        "state": "running",
+        "mem": 1000000000,
+        "cmprs": 0,
+        "pageins": 0,
+        "csw": 0,
+        "sysbsd": 0,
+        "threads": 1,
+        "_categories": {"cpu", "mem"},
+    }
+
+    scored = collector._score_process(proc)
+
+    assert scored.categories == frozenset({"cpu", "mem"})
+
+
+def test_score_process_all_factors():
+    """All factors should contribute to score."""
+    config = Config()
+    collector = TopCollector(config)
+
+    # High values for all factors
+    proc = {
+        "pid": 1,
+        "command": "stress_all",
+        "cpu": 100.0,
+        "state": "stuck",
+        "mem": 8 * 1024**3,  # 8GB (max normalization)
+        "cmprs": 1 * 1024**3,  # 1GB (max normalization)
+        "pageins": 1000,  # max normalization
+        "csw": 100000,  # max normalization
+        "sysbsd": 100000,  # max normalization
+        "threads": 1000,  # max normalization
+        "_categories": {"cpu", "stuck", "mem"},
+    }
+
+    scored = collector._score_process(proc)
+
+    # With all factors maxed, should be at or near 100
+    assert scored.score >= 90
+
+
+def test_score_process_returns_process_score():
+    """Should return a ProcessScore dataclass with correct fields."""
+    config = Config()
+    collector = TopCollector(config)
+
+    proc = {
+        "pid": 42,
+        "command": "myproc",
+        "cpu": 25.0,
+        "state": "sleeping",
+        "mem": 1024**2,  # 1MB
+        "cmprs": 512,
+        "pageins": 5,
+        "csw": 100,
+        "sysbsd": 50,
+        "threads": 4,
+        "_categories": {"cpu"},
+    }
+
+    scored = collector._score_process(proc)
+
+    assert isinstance(scored, ProcessScore)
+    assert scored.pid == 42
+    assert scored.command == "myproc"
+    assert scored.cpu == 25.0
+    assert scored.state == "sleeping"
+    assert scored.mem == 1024**2
+    assert scored.cmprs == 512
+    assert scored.pageins == 5
+    assert scored.csw == 100
+    assert scored.sysbsd == 50
+    assert scored.threads == 4
+    assert isinstance(scored.score, int)
+    assert 0 <= scored.score <= 100
+
+
+def test_normalize_state_values():
+    """State normalization should assign correct weights."""
+    config = Config()
+    collector = TopCollector(config)
+
+    # Test all state values
+    assert collector._normalize_state("stuck") == 1.0
+    assert collector._normalize_state("zombie") == 0.8
+    assert collector._normalize_state("halted") == 0.6
+    assert collector._normalize_state("stopped") == 0.4
+    assert collector._normalize_state("running") == 0.0
+    assert collector._normalize_state("sleeping") == 0.0
+    assert collector._normalize_state("unknown") == 0.0
