@@ -403,11 +403,11 @@ class Daemon:
 
         # Send notifications for tier changes
         if action == TierAction.TIER2_ENTRY:
-            self.notifier.elevated_entered(self.tier_manager.peak_stress)
+            self.notifier.elevated_entered(self.tier_manager.peak_score)
         elif action == TierAction.TIER3_ENTRY:
-            # Critical stress notification
+            # Critical score notification
             self.notifier.critical_stress(
-                self.tier_manager.peak_stress,
+                self.tier_manager.peak_score,
                 0.0,  # Just entered, no duration yet
             )
 
