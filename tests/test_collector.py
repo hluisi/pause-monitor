@@ -11,9 +11,11 @@ from pause_monitor.collector import (
     ProcessSamples,
     ProcessScore,
     StreamStatus,
+    TopCollector,
     get_core_count,
     parse_powermetrics_sample,
 )
+from pause_monitor.config import Config
 
 SAMPLE_PLIST = {
     "timestamp": datetime.now(),
@@ -440,3 +442,44 @@ def test_process_samples_json_roundtrip():
     assert restored.max_score == 75
     assert len(restored.rogues) == 1
     assert restored.rogues[0].command == "test"
+
+
+# TopCollector tests
+
+SAMPLE_TOP_OUTPUT = """
+Processes: 500 total, 3 running, 497 sleeping, 4000 threads
+2026/01/23 12:00:00
+Load Avg: 2.00, 1.50, 1.00
+
+PID    COMMAND          %CPU STATE    MEM    CMPRS  #TH    CSW        SYSBSD     PAGEINS
+7229   chrome           47.1 running  339M   10M    38     1134810    3961273    68
+409    WindowServer     27.7 running  1473M  0B     26     84562346   103373638  3427
+0      kernel_task      18.1 stuck    43M    0B     870    793476910  0          0
+620    zombie_proc      0.0  zombie   0B     0B     0      0          0          0
+"""
+
+
+def test_parse_top_output():
+    """Should parse top output into process dicts."""
+    collector = TopCollector(Config())
+    processes = collector._parse_top_output(SAMPLE_TOP_OUTPUT)
+
+    assert len(processes) == 4
+
+    chrome = next(p for p in processes if p["command"] == "chrome")
+    assert chrome["pid"] == 7229
+    assert chrome["cpu"] == 47.1
+    assert chrome["state"] == "running"
+    assert chrome["mem"] == 339 * 1024 * 1024  # 339M in bytes
+    assert chrome["pageins"] == 68
+
+
+def test_parse_memory_suffixes():
+    """Should handle M, K, G, B suffixes."""
+    collector = TopCollector(Config())
+    assert collector._parse_memory("339M") == 339 * 1024 * 1024
+    assert collector._parse_memory("1473M") == 1473 * 1024 * 1024
+    assert collector._parse_memory("43M") == 43 * 1024 * 1024
+    assert collector._parse_memory("0B") == 0
+    assert collector._parse_memory("1024K") == 1024 * 1024
+    assert collector._parse_memory("2G") == 2 * 1024 * 1024 * 1024

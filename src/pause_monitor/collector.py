@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import plistlib
+import re
 from asyncio.subprocess import Process
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
@@ -12,6 +13,8 @@ from enum import Enum
 from typing import TYPE_CHECKING
 
 import structlog
+
+from pause_monitor.config import Config
 
 if TYPE_CHECKING:
     pass
@@ -395,3 +398,67 @@ class PowermetricsStream:
 
                 result = parse_powermetrics_sample(plist_data)
                 yield result
+
+
+class TopCollector:
+    """Collects process data via top command at 1Hz."""
+
+    def __init__(self, config: Config):
+        self.config = config
+
+    def _parse_memory(self, value: str) -> int:
+        """Parse memory string like '339M', '1024K', '2G', '0B' to bytes."""
+        value = value.strip().rstrip("+-")  # Remove +/- indicators
+        if not value or value == "0":
+            return 0
+
+        match = re.match(r"(\d+(?:\.\d+)?)\s*([BKMG])?", value, re.IGNORECASE)
+        if not match:
+            return 0
+
+        num = float(match.group(1))
+        suffix = (match.group(2) or "B").upper()
+
+        multipliers = {"B": 1, "K": 1024, "M": 1024**2, "G": 1024**3}
+        return int(num * multipliers.get(suffix, 1))
+
+    def _parse_top_output(self, raw: str) -> list[dict]:
+        """Parse top text output into raw process dicts."""
+        lines = raw.strip().split("\n")
+        processes = []
+
+        # Find header line
+        header_idx = None
+        for i, line in enumerate(lines):
+            if line.strip().startswith("PID"):
+                header_idx = i
+                break
+
+        if header_idx is None:
+            return []
+
+        # Parse data lines after header
+        for line in lines[header_idx + 1 :]:
+            parts = line.split()
+            if len(parts) < 10:
+                continue
+
+            try:
+                processes.append(
+                    {
+                        "pid": int(parts[0]),
+                        "command": parts[1],
+                        "cpu": float(parts[2]),
+                        "state": parts[3],
+                        "mem": self._parse_memory(parts[4]),
+                        "cmprs": self._parse_memory(parts[5]),
+                        "threads": int(parts[6].split("/")[0]),  # Handle "870/16" format
+                        "csw": int(parts[7].rstrip("+")),
+                        "sysbsd": int(parts[8].rstrip("+")),
+                        "pageins": int(parts[9]),
+                    }
+                )
+            except (ValueError, IndexError):
+                continue
+
+        return processes
