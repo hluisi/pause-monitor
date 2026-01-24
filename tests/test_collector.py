@@ -608,3 +608,96 @@ def test_select_rogues_deduplicates():
     assert "cpu" in rogues[0]["_categories"]
     assert "mem" in rogues[0]["_categories"]
     assert "pageins" in rogues[0]["_categories"]
+
+
+def test_select_rogues_zombie_state_included():
+    """Zombie processes should be included via state selection."""
+    config = Config()
+    # Ensure state selection is enabled with zombie
+    config.rogue_selection.state.enabled = True
+    config.rogue_selection.state.states = ["zombie"]
+    collector = TopCollector(config)
+
+    processes = [
+        {
+            "pid": 1,
+            "command": "normal",
+            "cpu": 1.0,
+            "state": "sleeping",
+            "mem": 100,
+            "cmprs": 0,
+            "pageins": 0,
+            "csw": 0,
+            "sysbsd": 0,
+            "threads": 1,
+        },
+        {
+            "pid": 2,
+            "command": "zombie_proc",
+            "cpu": 0.0,
+            "state": "zombie",
+            "mem": 0,
+            "cmprs": 0,
+            "pageins": 0,
+            "csw": 0,
+            "sysbsd": 0,
+            "threads": 0,
+        },
+    ]
+
+    rogues = collector._select_rogues(processes)
+
+    zombie = [r for r in rogues if r["command"] == "zombie_proc"]
+    assert len(zombie) == 1
+    assert "state" in zombie[0]["_categories"]
+
+
+def test_select_rogues_threshold_filters():
+    """Processes below threshold should not be selected."""
+    config = Config()
+    config.rogue_selection.cpu.enabled = True
+    config.rogue_selection.cpu.count = 5
+    config.rogue_selection.cpu.threshold = 50.0  # Only include CPU > 50%
+    # Disable other categories to isolate test
+    config.rogue_selection.mem.enabled = False
+    config.rogue_selection.cmprs.enabled = False
+    config.rogue_selection.threads.enabled = False
+    config.rogue_selection.csw.enabled = False
+    config.rogue_selection.sysbsd.enabled = False
+    config.rogue_selection.pageins.enabled = False
+    config.rogue_selection.state.enabled = False
+    collector = TopCollector(config)
+
+    processes = [
+        {
+            "pid": 1,
+            "command": "high_cpu",
+            "cpu": 80.0,
+            "state": "running",
+            "mem": 100,
+            "cmprs": 0,
+            "pageins": 0,
+            "csw": 0,
+            "sysbsd": 0,
+            "threads": 1,
+        },
+        {
+            "pid": 2,
+            "command": "low_cpu",
+            "cpu": 30.0,
+            "state": "running",
+            "mem": 100,
+            "cmprs": 0,
+            "pageins": 0,
+            "csw": 0,
+            "sysbsd": 0,
+            "threads": 1,
+        },
+    ]
+
+    rogues = collector._select_rogues(processes)
+
+    # Only high_cpu should be selected (above threshold)
+    assert len(rogues) == 1
+    assert rogues[0]["command"] == "high_cpu"
+    assert "cpu" in rogues[0]["_categories"]

@@ -110,7 +110,7 @@ class StateSelection:
 
     enabled: bool = True
     count: int = 0  # 0 = unlimited
-    states: list[str] = field(default_factory=lambda: ["stuck", "zombie"])
+    states: list[str] = field(default_factory=lambda: ["zombie"])
 
 
 @dataclass
@@ -409,7 +409,7 @@ def _load_state_selection(data: dict) -> StateSelection:
     return StateSelection(
         enabled=data.get("enabled", True),
         count=data.get("count", 0),
-        states=data.get("states", ["stuck", "zombie"]),
+        states=data.get("states", ["zombie"]),
     )
 
 

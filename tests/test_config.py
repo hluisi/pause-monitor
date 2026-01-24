@@ -251,7 +251,7 @@ def test_rogue_selection_default():
     assert config.rogue_selection.cpu.count == 3
     assert config.rogue_selection.cpu.threshold == 0.0
     assert config.rogue_selection.state.enabled is True
-    assert config.rogue_selection.state.states == ["stuck", "zombie"]
+    assert config.rogue_selection.state.states == ["zombie"]
 
 
 def test_tier_thresholds_updated():
