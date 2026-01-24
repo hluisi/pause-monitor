@@ -656,3 +656,145 @@ def test_get_events_returns_peak_stress(tmp_path):
     assert event_by_id.peak_tier == 2
 
     conn.close()
+
+
+# --- Schema v7: JSON Blob Storage Tests ---
+
+
+def test_schema_version_7(initialized_db: Path):
+    """Schema version should be 7."""
+    from pause_monitor.storage import get_connection
+
+    conn = get_connection(initialized_db)
+    version = get_schema_version(conn)
+    conn.close()
+    assert version == 7
+
+
+def test_insert_process_sample_json(initialized_db: Path):
+    """Process sample should be stored as JSON."""
+    from pause_monitor.collector import ProcessSamples, ProcessScore
+    from pause_monitor.storage import (
+        get_connection,
+        get_process_samples,
+        insert_process_sample,
+    )
+
+    conn = get_connection(initialized_db)
+
+    event_id = create_event(conn, datetime.now())
+
+    samples = ProcessSamples(
+        timestamp=datetime.now(),
+        elapsed_ms=1050,
+        process_count=500,
+        max_score=75,
+        rogues=[
+            ProcessScore(
+                pid=1,
+                command="test",
+                cpu=80.0,
+                state="running",
+                mem=1000,
+                cmprs=0,
+                pageins=0,
+                csw=10,
+                sysbsd=5,
+                threads=2,
+                score=75,
+                categories=frozenset({"cpu"}),
+            ),
+        ],
+    )
+
+    insert_process_sample(conn, event_id, tier=2, samples=samples)
+
+    retrieved = get_process_samples(conn, event_id)
+    conn.close()
+
+    assert len(retrieved) == 1
+    assert retrieved[0].data.max_score == 75
+    assert retrieved[0].data.rogues[0].command == "test"
+
+
+def test_process_sample_record_dataclass():
+    """ProcessSampleRecord has correct fields."""
+    from pause_monitor.collector import ProcessSamples
+    from pause_monitor.storage import ProcessSampleRecord
+
+    samples = ProcessSamples(
+        timestamp=datetime.now(),
+        elapsed_ms=500,
+        process_count=100,
+        max_score=50,
+        rogues=[],
+    )
+    record = ProcessSampleRecord(
+        id=1,
+        event_id=10,
+        tier=2,
+        data=samples,
+    )
+    assert record.id == 1
+    assert record.event_id == 10
+    assert record.tier == 2
+    assert record.data.max_score == 50
+
+
+def test_get_process_samples_empty(initialized_db: Path):
+    """get_process_samples returns empty list when no samples exist."""
+    from pause_monitor.storage import get_connection, get_process_samples
+
+    conn = get_connection(initialized_db)
+    event_id = create_event(conn, datetime.now())
+
+    samples = get_process_samples(conn, event_id)
+    conn.close()
+
+    assert samples == []
+
+
+def test_insert_multiple_process_samples(initialized_db: Path):
+    """Multiple process samples can be inserted and retrieved."""
+    from pause_monitor.collector import ProcessSamples, ProcessScore
+    from pause_monitor.storage import (
+        get_connection,
+        get_process_samples,
+        insert_process_sample,
+    )
+
+    conn = get_connection(initialized_db)
+    event_id = create_event(conn, datetime.now())
+
+    for i in range(3):
+        samples = ProcessSamples(
+            timestamp=datetime.now(),
+            elapsed_ms=100 * (i + 1),
+            process_count=100 + i,
+            max_score=50 + i * 10,
+            rogues=[
+                ProcessScore(
+                    pid=i + 1,
+                    command=f"proc{i}",
+                    cpu=float(i * 10),
+                    state="running",
+                    mem=1000,
+                    cmprs=0,
+                    pageins=0,
+                    csw=10,
+                    sysbsd=5,
+                    threads=2,
+                    score=50 + i * 10,
+                    categories=frozenset({"cpu"}),
+                ),
+            ],
+        )
+        insert_process_sample(conn, event_id, tier=2, samples=samples)
+
+    retrieved = get_process_samples(conn, event_id)
+    conn.close()
+
+    assert len(retrieved) == 3
+    assert retrieved[0].data.elapsed_ms == 100
+    assert retrieved[1].data.elapsed_ms == 200
+    assert retrieved[2].data.elapsed_ms == 300

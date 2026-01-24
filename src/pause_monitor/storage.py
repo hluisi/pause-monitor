@@ -9,11 +9,12 @@ from pathlib import Path
 
 import structlog
 
+from pause_monitor.collector import ProcessSamples
 from pause_monitor.stress import StressBreakdown
 
 log = structlog.get_logger()
 
-SCHEMA_VERSION = 6  # Redesigned events + event_samples for tier-based saving
+SCHEMA_VERSION = 7  # Added JSON blob storage for process samples
 
 # Valid event status values
 VALID_EVENT_STATUSES = frozenset({"unreviewed", "reviewed", "pinned", "dismissed"})
@@ -114,6 +115,18 @@ CREATE TABLE IF NOT EXISTS process_samples (
     energy_impact   REAL,
     is_suspect      INTEGER DEFAULT 0
 );
+
+-- New v7: Process sample records with JSON blob storage
+-- Stores ProcessSamples (scored processes) as a single JSON blob per tier/event
+CREATE TABLE IF NOT EXISTS process_sample_records (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_id        INTEGER NOT NULL,
+    tier            INTEGER NOT NULL,
+    data            TEXT NOT NULL,
+    FOREIGN KEY (event_id) REFERENCES events(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_process_sample_records_event ON process_sample_records(event_id);
 """
 
 
@@ -306,6 +319,16 @@ class EventSample:
     top_wakeup_procs: list[dict]
     top_diskio_procs: list[dict]
 
+    id: int | None = None
+
+
+@dataclass
+class ProcessSampleRecord:
+    """Process sample record with JSON blob storage (v7)."""
+
+    event_id: int
+    tier: int
+    data: ProcessSamples
     id: int | None = None
 
 
@@ -502,6 +525,57 @@ def get_event_samples(conn: sqlite3.Connection, event_id: int) -> list[EventSamp
     ]
 
 
+def insert_process_sample(
+    conn: sqlite3.Connection, event_id: int, tier: int, samples: ProcessSamples
+) -> int:
+    """Insert process sample as JSON blob.
+
+    Args:
+        conn: Database connection
+        event_id: The event ID to associate with
+        tier: Tier level (2=peak save, 3=continuous save)
+        samples: ProcessSamples to serialize and store
+
+    Returns:
+        The ID of the inserted record
+    """
+    cursor = conn.execute(
+        "INSERT INTO process_sample_records (event_id, tier, data) VALUES (?, ?, ?)",
+        (event_id, tier, samples.to_json()),
+    )
+    conn.commit()
+    result = cursor.lastrowid
+    assert result is not None
+    return result
+
+
+def get_process_samples(conn: sqlite3.Connection, event_id: int) -> list[ProcessSampleRecord]:
+    """Retrieve and deserialize process samples for an event.
+
+    Args:
+        conn: Database connection
+        event_id: The event ID to get samples for
+
+    Returns:
+        List of ProcessSampleRecord with deserialized data
+    """
+    rows = conn.execute(
+        """SELECT id, event_id, tier, data
+        FROM process_sample_records WHERE event_id = ? ORDER BY id""",
+        (event_id,),
+    ).fetchall()
+
+    return [
+        ProcessSampleRecord(
+            id=row[0],
+            event_id=row[1],
+            tier=row[2],
+            data=ProcessSamples.from_json(row[3]),
+        )
+        for row in rows
+    ]
+
+
 def update_event_status(
     conn: sqlite3.Connection,
     event_id: int,
@@ -577,6 +651,9 @@ def prune_old_data(
 
     # Delete event samples first (foreign key)
     conn.execute(f"DELETE FROM event_samples WHERE event_id IN ({placeholders})", ids)
+
+    # Delete process sample records (v7 JSON blob storage)
+    conn.execute(f"DELETE FROM process_sample_records WHERE event_id IN ({placeholders})", ids)
 
     # Delete events
     cursor = conn.execute(f"DELETE FROM events WHERE id IN ({placeholders})", ids)
