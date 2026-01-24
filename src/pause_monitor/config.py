@@ -76,7 +76,7 @@ class TiersConfig:
 
 @dataclass
 class ScoringWeights:
-    """Weights for per-process stressor scoring (must sum to 100, excluding threads)."""
+    """Weights for per-process stressor scoring (default weights sum to 100, excluding threads)."""
 
     cpu: int = 25
     state: int = 20
