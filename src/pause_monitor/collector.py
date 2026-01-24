@@ -612,15 +612,26 @@ class TopCollector:
             "pid,command,cpu,state,mem,cmprs,threads,csw,sysbsd,pageins",
         ]
 
+        log.debug("top_started", cmd=cmd)
+
         proc = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
 
-        stdout, stderr = await proc.communicate()
+        try:
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=10.0)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+            log.warning("top_timeout", timeout=10.0)
+            raise RuntimeError("top command timed out")
 
         if proc.returncode != 0:
-            raise RuntimeError(f"top failed: {stderr.decode()}")
+            stderr_text = stderr.decode(errors="replace")
+            log.warning("top_failed", returncode=proc.returncode, stderr=stderr_text)
+            raise RuntimeError(f"top failed: {stderr_text}")
 
-        return stdout.decode()
+        log.debug("top_completed", output_bytes=len(stdout))
+        return stdout.decode(errors="replace")
