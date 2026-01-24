@@ -3,6 +3,8 @@
 
 from datetime import datetime
 
+import pytest
+
 from pause_monitor.collector import ProcessSamples
 from pause_monitor.ringbuffer import BufferContents, RingBuffer, RingSample
 
@@ -24,15 +26,22 @@ class TestRingSample:
     """Tests for RingSample dataclass."""
 
     def test_creation(self):
-        """RingSample stores timestamp, samples, and tier."""
+        """RingSample stores samples and tier."""
         samples = make_test_samples(max_score=50)
         ring_sample = RingSample(
-            timestamp=datetime.now(),
             samples=samples,
             tier=2,
         )
         assert ring_sample.tier == 2
         assert ring_sample.samples.max_score == 50
+
+    def test_timestamp_accessed_via_samples(self):
+        """Timestamp is accessed via samples.timestamp, not duplicated."""
+        ts = datetime.now()
+        samples = make_test_samples(timestamp=ts, max_score=50)
+        ring_sample = RingSample(samples=samples, tier=2)
+        # Access timestamp through samples, not RingSample
+        assert ring_sample.samples.timestamp == ts
 
     def test_preserves_process_data(self):
         """RingSample preserves ProcessSamples data for forensics."""
@@ -42,7 +51,6 @@ class TestRingSample:
             max_score=75,
         )
         ring_sample = RingSample(
-            timestamp=datetime.now(),
             samples=samples,
             tier=3,
         )
@@ -55,16 +63,24 @@ class TestBufferContents:
     """Tests for BufferContents dataclass."""
 
     def test_creation(self):
-        """BufferContents holds a list of RingSamples."""
+        """BufferContents holds a tuple of RingSamples."""
         samples = make_test_samples()
-        ring_sample = RingSample(timestamp=datetime.now(), samples=samples, tier=1)
-        contents = BufferContents(samples=[ring_sample])
+        ring_sample = RingSample(samples=samples, tier=1)
+        contents = BufferContents(samples=(ring_sample,))
         assert len(contents.samples) == 1
 
     def test_empty(self):
         """BufferContents can be empty."""
-        contents = BufferContents(samples=[])
+        contents = BufferContents(samples=())
         assert len(contents.samples) == 0
+
+    def test_is_frozen(self):
+        """BufferContents is frozen and cannot be mutated."""
+        samples = make_test_samples()
+        ring_sample = RingSample(samples=samples, tier=1)
+        contents = BufferContents(samples=(ring_sample,))
+        with pytest.raises(AttributeError):
+            contents.samples = ()  # type: ignore[misc]
 
 
 class TestRingBuffer:
@@ -94,15 +110,16 @@ class TestRingBuffer:
         """push() evicts oldest when buffer is full."""
         buffer = RingBuffer(max_samples=3)
 
-        buffer.push(make_test_samples(max_score=10), tier=1)
-        first_time = buffer.samples[0].timestamp
+        first_samples = make_test_samples(max_score=10)
+        buffer.push(first_samples, tier=1)
+        first_time = buffer.samples[0].samples.timestamp
 
         buffer.push(make_test_samples(max_score=20), tier=1)
         buffer.push(make_test_samples(max_score=30), tier=1)
         buffer.push(make_test_samples(max_score=40), tier=1)  # Evicts first
 
         assert len(buffer.samples) == 3
-        assert buffer.samples[0].timestamp != first_time
+        assert buffer.samples[0].samples.timestamp != first_time
         assert buffer.samples[0].samples.max_score == 20
 
     def test_samples_returns_copy(self):
@@ -159,12 +176,49 @@ class TestRingBuffer:
         assert buffer.samples[1].tier == 2
         assert buffer.samples[2].tier == 3
 
-    def test_adds_timestamp(self):
-        """push() adds a timestamp to each sample."""
+    def test_timestamp_from_process_samples(self):
+        """Timestamp comes from ProcessSamples, not RingBuffer."""
+        ts = datetime.now()
         buffer = RingBuffer(max_samples=10)
-        before = datetime.now()
-        buffer.push(make_test_samples(), tier=1)
-        after = datetime.now()
+        buffer.push(make_test_samples(timestamp=ts), tier=1)
 
         sample = buffer.samples[0]
-        assert before <= sample.timestamp <= after
+        # Timestamp accessed via samples.timestamp
+        assert sample.samples.timestamp == ts
+
+    def test_len(self):
+        """__len__ returns number of samples."""
+        buffer = RingBuffer(max_samples=10)
+        assert len(buffer) == 0
+
+        buffer.push(make_test_samples(), tier=1)
+        assert len(buffer) == 1
+
+        buffer.push(make_test_samples(), tier=2)
+        buffer.push(make_test_samples(), tier=3)
+        assert len(buffer) == 3
+
+    def test_is_empty(self):
+        """is_empty returns True when buffer has no samples."""
+        buffer = RingBuffer(max_samples=10)
+        assert buffer.is_empty is True
+
+        buffer.push(make_test_samples(), tier=1)
+        assert buffer.is_empty is False
+
+    def test_clear(self):
+        """clear() empties the buffer."""
+        buffer = RingBuffer(max_samples=10)
+        buffer.push(make_test_samples(), tier=1)
+        buffer.push(make_test_samples(), tier=2)
+        assert len(buffer) == 2
+
+        buffer.clear()
+        assert len(buffer) == 0
+        assert buffer.is_empty is True
+
+    def test_clear_empty_buffer(self):
+        """clear() on empty buffer is a no-op."""
+        buffer = RingBuffer(max_samples=10)
+        buffer.clear()  # Should not raise
+        assert buffer.is_empty is True

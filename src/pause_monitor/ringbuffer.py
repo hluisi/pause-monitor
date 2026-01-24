@@ -7,25 +7,26 @@ On pause detection, buffer is frozen and included in forensics.
 
 from collections import deque
 from dataclasses import dataclass
-from datetime import datetime
 
 from pause_monitor.collector import ProcessSamples
 
 
 @dataclass
 class RingSample:
-    """Single sample in the ring buffer."""
+    """Single sample in the ring buffer.
 
-    timestamp: datetime
+    Timestamp is accessed via samples.timestamp (not duplicated here).
+    """
+
     samples: ProcessSamples
     tier: int
 
 
-@dataclass
+@dataclass(frozen=True)
 class BufferContents:
     """Immutable snapshot for forensics."""
 
-    samples: list[RingSample]
+    samples: tuple[RingSample, ...]
 
 
 class RingBuffer:
@@ -37,6 +38,15 @@ class RingBuffer:
     def __init__(self, max_samples: int = 30) -> None:
         self._samples: deque[RingSample] = deque(maxlen=max_samples)
 
+    def __len__(self) -> int:
+        """Return number of samples in buffer."""
+        return len(self._samples)
+
+    @property
+    def is_empty(self) -> bool:
+        """Return True if buffer has no samples."""
+        return len(self._samples) == 0
+
     @property
     def samples(self) -> list[RingSample]:
         """Read-only access to samples (returns a copy)."""
@@ -46,12 +56,15 @@ class RingBuffer:
         """Add a sample to the buffer."""
         self._samples.append(
             RingSample(
-                timestamp=datetime.now(),
                 samples=samples,
                 tier=tier,
             )
         )
 
+    def clear(self) -> None:
+        """Empty the buffer."""
+        self._samples.clear()
+
     def freeze(self) -> BufferContents:
         """Return immutable copy of buffer contents."""
-        return BufferContents(samples=list(self._samples))
+        return BufferContents(samples=tuple(self._samples))
