@@ -3,221 +3,168 @@
 
 from datetime import datetime
 
-from pause_monitor.collector import PowermetricsResult
-from pause_monitor.ringbuffer import RingSample
-from pause_monitor.stress import StressBreakdown
+from pause_monitor.collector import ProcessSamples
+from pause_monitor.ringbuffer import BufferContents, RingBuffer, RingSample
 
 
-def make_test_metrics(**kwargs) -> PowermetricsResult:
-    """Create PowermetricsResult with sensible defaults for testing."""
+def make_test_samples(**kwargs) -> ProcessSamples:
+    """Create ProcessSamples with sensible defaults for testing."""
     defaults = {
-        "elapsed_ns": 100_000_000,
-        "throttled": False,
-        "cpu_power": 5.0,
-        "gpu_pct": 10.0,
-        "gpu_power": 1.0,
-        "io_read_per_s": 1000.0,
-        "io_write_per_s": 500.0,
-        "wakeups_per_s": 50.0,
-        "pageins_per_s": 0.0,
-        "top_cpu_processes": [],
-        "top_pagein_processes": [],
-        "top_wakeup_processes": [],
-        "top_diskio_processes": [],
+        "timestamp": datetime.now(),
+        "elapsed_ms": 100,
+        "process_count": 50,
+        "max_score": 25,
+        "rogues": [],
     }
     defaults.update(kwargs)
-    return PowermetricsResult(**defaults)
+    return ProcessSamples(**defaults)
 
 
-def test_ring_sample_creation():
-    """RingSample stores timestamp, metrics, stress breakdown, and tier."""
-    metrics = make_test_metrics()
-    stress = StressBreakdown(load=10, memory=5, thermal=0, latency=0, io=0, gpu=0, wakeups=0)
-    sample = RingSample(
-        timestamp=datetime.now(),
-        metrics=metrics,
-        stress=stress,
-        tier=1,
-    )
-    assert sample.tier == 1
-    assert sample.stress.total == 15
-    assert sample.metrics.elapsed_ns == 100_000_000
+class TestRingSample:
+    """Tests for RingSample dataclass."""
+
+    def test_creation(self):
+        """RingSample stores timestamp, samples, and tier."""
+        samples = make_test_samples(max_score=50)
+        ring_sample = RingSample(
+            timestamp=datetime.now(),
+            samples=samples,
+            tier=2,
+        )
+        assert ring_sample.tier == 2
+        assert ring_sample.samples.max_score == 50
+
+    def test_preserves_process_data(self):
+        """RingSample preserves ProcessSamples data for forensics."""
+        samples = make_test_samples(
+            elapsed_ms=150,
+            process_count=100,
+            max_score=75,
+        )
+        ring_sample = RingSample(
+            timestamp=datetime.now(),
+            samples=samples,
+            tier=3,
+        )
+        assert ring_sample.samples.elapsed_ms == 150
+        assert ring_sample.samples.process_count == 100
+        assert ring_sample.samples.max_score == 75
 
 
-def test_ring_sample_stores_raw_metrics():
-    """RingSample preserves raw metrics for forensic analysis."""
-    metrics = make_test_metrics(
-        elapsed_ns=150_000_000,
-        throttled=True,
-        gpu_pct=80.0,
-        wakeups_per_s=500.0,
-        io_read_per_s=50_000_000.0,
-        top_cpu_processes=[{"name": "culprit", "pid": 1, "cpu_ms_per_s": 800.0}],
-    )
-    stress = StressBreakdown(
-        load=20, memory=10, thermal=10, latency=5, io=8, gpu=15, wakeups=5, pageins=0
-    )
+class TestBufferContents:
+    """Tests for BufferContents dataclass."""
 
-    sample = RingSample(
-        timestamp=datetime.now(),
-        metrics=metrics,
-        stress=stress,
-        tier=2,
-    )
+    def test_creation(self):
+        """BufferContents holds a list of RingSamples."""
+        samples = make_test_samples()
+        ring_sample = RingSample(timestamp=datetime.now(), samples=samples, tier=1)
+        contents = BufferContents(samples=[ring_sample])
+        assert len(contents.samples) == 1
 
-    # Can access raw metrics for forensics
-    assert sample.metrics.wakeups_per_s == 500.0
-    assert sample.metrics.io_read_per_s == 50_000_000.0
-    assert sample.metrics.top_cpu_processes[0]["name"] == "culprit"
+    def test_empty(self):
+        """BufferContents can be empty."""
+        contents = BufferContents(samples=[])
+        assert len(contents.samples) == 0
 
 
-def test_process_info_creation():
-    """ProcessInfo stores process details."""
-    from pause_monitor.ringbuffer import ProcessInfo
+class TestRingBuffer:
+    """Tests for RingBuffer class."""
 
-    info = ProcessInfo(pid=1234, name="Chrome", cpu_pct=45.5, memory_mb=2048.0)
-    assert info.pid == 1234
-    assert info.name == "Chrome"
-    assert info.cpu_pct == 45.5
-    assert info.memory_mb == 2048.0
+    def test_default_max_samples(self):
+        """Default max_samples is 30."""
+        buffer = RingBuffer()
+        # Fill beyond default capacity
+        for i in range(35):
+            buffer.push(make_test_samples(max_score=i), tier=1)
+        assert len(buffer.samples) == 30
+        # Oldest were evicted, so first score should be 5 (35-30)
+        assert buffer.samples[0].samples.max_score == 5
 
+    def test_push_stores_samples(self):
+        """push() stores ProcessSamples in buffer."""
+        buffer = RingBuffer(max_samples=10)
+        samples = make_test_samples(max_score=42)
+        buffer.push(samples, tier=1)
 
-def test_process_snapshot_creation():
-    """ProcessSnapshot stores top processes with trigger reason."""
-    from pause_monitor.ringbuffer import ProcessInfo, ProcessSnapshot
+        assert len(buffer.samples) == 1
+        assert buffer.samples[0].samples.max_score == 42
+        assert buffer.samples[0].tier == 1
 
-    by_cpu = [ProcessInfo(pid=1, name="Proc1", cpu_pct=50.0, memory_mb=100.0)]
-    by_memory = [ProcessInfo(pid=2, name="Proc2", cpu_pct=10.0, memory_mb=2000.0)]
+    def test_push_evicts_oldest(self):
+        """push() evicts oldest when buffer is full."""
+        buffer = RingBuffer(max_samples=3)
 
-    snapshot = ProcessSnapshot(
-        timestamp=datetime.now(),
-        trigger="tier2_entry",
-        by_cpu=by_cpu,
-        by_memory=by_memory,
-    )
-    assert snapshot.trigger == "tier2_entry"
-    assert len(snapshot.by_cpu) == 1
-    assert len(snapshot.by_memory) == 1
+        buffer.push(make_test_samples(max_score=10), tier=1)
+        first_time = buffer.samples[0].timestamp
 
+        buffer.push(make_test_samples(max_score=20), tier=1)
+        buffer.push(make_test_samples(max_score=30), tier=1)
+        buffer.push(make_test_samples(max_score=40), tier=1)  # Evicts first
 
-def test_ring_buffer_push():
-    """RingBuffer stores samples up to max size."""
-    from pause_monitor.ringbuffer import RingBuffer
+        assert len(buffer.samples) == 3
+        assert buffer.samples[0].timestamp != first_time
+        assert buffer.samples[0].samples.max_score == 20
 
-    buffer = RingBuffer(max_samples=3)
-    metrics = make_test_metrics()
-    stress = StressBreakdown(load=0, memory=0, thermal=0, latency=0, io=0, gpu=0, wakeups=0)
+    def test_samples_returns_copy(self):
+        """samples property returns a copy, not the original."""
+        buffer = RingBuffer(max_samples=10)
+        buffer.push(make_test_samples(), tier=1)
 
-    buffer.push(metrics, stress, tier=1)
-    buffer.push(metrics, stress, tier=1)
-    buffer.push(metrics, stress, tier=1)
+        samples1 = buffer.samples
+        samples2 = buffer.samples
 
-    assert len(buffer.samples) == 3
+        assert samples1 is not samples2  # Different list objects
+        assert samples1 == samples2  # But equal content
 
+        # Modifying the returned list doesn't affect buffer
+        samples1.clear()
+        assert len(buffer.samples) == 1
 
-def test_ring_buffer_evicts_oldest():
-    """RingBuffer evicts oldest when full."""
-    from pause_monitor.ringbuffer import RingBuffer
+    def test_freeze_returns_immutable_snapshot(self):
+        """freeze() returns BufferContents with copy of samples."""
+        buffer = RingBuffer(max_samples=10)
+        buffer.push(make_test_samples(max_score=50), tier=1)
 
-    buffer = RingBuffer(max_samples=3)
-    metrics = make_test_metrics()
-    stress = StressBreakdown(load=0, memory=0, thermal=0, latency=0, io=0, gpu=0, wakeups=0)
+        frozen = buffer.freeze()
 
-    buffer.push(metrics, stress, tier=1)  # Will be evicted
-    first_time = buffer.samples[0].timestamp
+        # Modifying original doesn't affect frozen
+        buffer.push(make_test_samples(max_score=60), tier=2)
+        assert len(frozen.samples) == 1
+        assert len(buffer.samples) == 2
 
-    buffer.push(metrics, stress, tier=1)
-    buffer.push(metrics, stress, tier=1)
-    buffer.push(metrics, stress, tier=1)  # Evicts first
+    def test_freeze_empty_buffer(self):
+        """freeze() works on empty buffer."""
+        buffer = RingBuffer(max_samples=10)
+        frozen = buffer.freeze()
+        assert len(frozen.samples) == 0
 
-    assert len(buffer.samples) == 3
-    assert buffer.samples[0].timestamp != first_time
+    def test_size_one_buffer(self):
+        """RingBuffer with max_samples=1 only keeps last sample."""
+        buffer = RingBuffer(max_samples=1)
+        buffer.push(make_test_samples(max_score=10), tier=1)
+        buffer.push(make_test_samples(max_score=20), tier=2)
 
+        assert len(buffer.samples) == 1
+        assert buffer.samples[0].tier == 2
+        assert buffer.samples[0].samples.max_score == 20
 
-def test_ring_buffer_snapshot_processes():
-    """RingBuffer captures process snapshots."""
-    from pause_monitor.ringbuffer import RingBuffer
+    def test_stores_tier(self):
+        """push() records the tier with each sample."""
+        buffer = RingBuffer(max_samples=10)
+        buffer.push(make_test_samples(), tier=1)
+        buffer.push(make_test_samples(), tier=2)
+        buffer.push(make_test_samples(), tier=3)
 
-    buffer = RingBuffer(max_samples=300)
+        assert buffer.samples[0].tier == 1
+        assert buffer.samples[1].tier == 2
+        assert buffer.samples[2].tier == 3
 
-    buffer.snapshot_processes(trigger="tier2_entry")
+    def test_adds_timestamp(self):
+        """push() adds a timestamp to each sample."""
+        buffer = RingBuffer(max_samples=10)
+        before = datetime.now()
+        buffer.push(make_test_samples(), tier=1)
+        after = datetime.now()
 
-    assert len(buffer.snapshots) == 1
-    assert buffer.snapshots[0].trigger == "tier2_entry"
-
-
-def test_ring_buffer_freeze():
-    """freeze() returns immutable copy of buffer contents."""
-    from pause_monitor.ringbuffer import RingBuffer
-
-    buffer = RingBuffer(max_samples=300)
-    metrics = make_test_metrics()
-    stress = StressBreakdown(load=10, memory=5, thermal=0, latency=0, io=0, gpu=0, wakeups=0)
-    buffer.push(metrics, stress, tier=1)
-    buffer.snapshot_processes(trigger="test")
-
-    frozen = buffer.freeze()
-
-    # Modifying original doesn't affect frozen
-    buffer.push(metrics, stress, tier=2)
-    assert len(frozen.samples) == 1
-    assert len(buffer.samples) == 2
-
-
-def test_ring_buffer_clear_snapshots():
-    """clear_snapshots() removes process snapshots but keeps samples."""
-    from pause_monitor.ringbuffer import RingBuffer
-
-    buffer = RingBuffer(max_samples=300)
-    metrics = make_test_metrics()
-    stress = StressBreakdown(load=0, memory=0, thermal=0, latency=0, io=0, gpu=0, wakeups=0)
-    buffer.push(metrics, stress, tier=1)
-    buffer.snapshot_processes(trigger="test")
-
-    buffer.clear_snapshots()
-
-    assert len(buffer.samples) == 1
-    assert len(buffer.snapshots) == 0
-
-
-def test_ring_buffer_freeze_empty():
-    """freeze() works on empty buffer."""
-    from pause_monitor.ringbuffer import RingBuffer
-
-    buffer = RingBuffer(max_samples=10)
-    frozen = buffer.freeze()
-    assert len(frozen.samples) == 0
-    assert len(frozen.snapshots) == 0
-
-
-def test_ring_buffer_size_one():
-    """RingBuffer with max_samples=1 only keeps last sample."""
-    from pause_monitor.ringbuffer import RingBuffer
-
-    buffer = RingBuffer(max_samples=1)
-    metrics = make_test_metrics()
-    stress = StressBreakdown(load=0, memory=0, thermal=0, latency=0, io=0, gpu=0, wakeups=0)
-    buffer.push(metrics, stress, tier=1)
-    buffer.push(metrics, stress, tier=2)
-    assert len(buffer.samples) == 1
-    assert buffer.samples[0].tier == 2
-
-
-def test_ring_buffer_samples_returns_copy():
-    """samples property returns a copy, not the original."""
-    from pause_monitor.ringbuffer import RingBuffer
-
-    buffer = RingBuffer(max_samples=10)
-    metrics = make_test_metrics()
-    stress = StressBreakdown(load=0, memory=0, thermal=0, latency=0, io=0, gpu=0, wakeups=0)
-    buffer.push(metrics, stress, tier=1)
-
-    samples1 = buffer.samples
-    samples2 = buffer.samples
-
-    assert samples1 is not samples2  # Different list objects
-    assert samples1 == samples2  # But equal content
-
-    # Modifying the returned list doesn't affect buffer
-    samples1.clear()
-    assert len(buffer.samples) == 1
+        sample = buffer.samples[0]
+        assert before <= sample.timestamp <= after
