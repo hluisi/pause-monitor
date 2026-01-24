@@ -5,6 +5,7 @@ import json
 import os
 import plistlib
 import re
+import time
 from asyncio.subprocess import Process
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
@@ -578,3 +579,48 @@ class TopCollector:
             score=score,
             categories=frozenset(proc["_categories"]),
         )
+
+    async def collect(self) -> ProcessSamples:
+        """Run top, parse output, select rogues, compute scores."""
+        start = time.monotonic()
+
+        raw = await self._run_top()
+        all_processes = self._parse_top_output(raw)
+        rogues = self._select_rogues(all_processes)
+        scored = [self._score_process(p) for p in rogues]
+
+        elapsed_ms = int((time.monotonic() - start) * 1000)
+        max_score = max((p.score for p in scored), default=0)
+
+        return ProcessSamples(
+            timestamp=datetime.now(),
+            elapsed_ms=elapsed_ms,
+            process_count=len(all_processes),
+            max_score=max_score,
+            rogues=scored,
+        )
+
+    async def _run_top(self) -> str:
+        """Run top command and return output."""
+        cmd = [
+            "top",
+            "-l",
+            "2",  # 2 samples (need delta for accurate CPU %)
+            "-s",
+            "1",  # 1 second interval
+            "-stats",
+            "pid,command,cpu,state,mem,cmprs,threads,csw,sysbsd,pageins",
+        ]
+
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+
+        stdout, stderr = await proc.communicate()
+
+        if proc.returncode != 0:
+            raise RuntimeError(f"top failed: {stderr.decode()}")
+
+        return stdout.decode()

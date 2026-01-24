@@ -853,3 +853,67 @@ def test_normalize_state_values():
     assert collector._normalize_state("running") == 0.0
     assert collector._normalize_state("sleeping") == 0.0
     assert collector._normalize_state("unknown") == 0.0
+
+
+# TopCollector.collect() tests
+
+
+@pytest.mark.asyncio
+async def test_collector_collect(monkeypatch):
+    """Collect should run top and return ProcessSamples."""
+    config = Config()
+    collector = TopCollector(config)
+
+    # Mock _run_top to return sample output
+    async def mock_run_top():
+        return SAMPLE_TOP_OUTPUT
+
+    monkeypatch.setattr(collector, "_run_top", mock_run_top)
+
+    samples = await collector.collect()
+
+    assert isinstance(samples, ProcessSamples)
+    assert samples.process_count == 4
+    assert samples.max_score > 0
+    assert len(samples.rogues) > 0
+    assert samples.elapsed_ms >= 0
+
+
+@pytest.mark.asyncio
+async def test_collector_collect_empty_output(monkeypatch):
+    """Collect should handle empty top output gracefully."""
+    config = Config()
+    collector = TopCollector(config)
+
+    # Mock _run_top to return empty output
+    async def mock_run_top():
+        return ""
+
+    monkeypatch.setattr(collector, "_run_top", mock_run_top)
+
+    samples = await collector.collect()
+
+    assert isinstance(samples, ProcessSamples)
+    assert samples.process_count == 0
+    assert samples.max_score == 0
+    assert len(samples.rogues) == 0
+
+
+@pytest.mark.asyncio
+async def test_run_top_command():
+    """_run_top should execute top command and return output."""
+    config = Config()
+    collector = TopCollector(config)
+
+    # Run the actual command (integration-ish test)
+    # Skip if not on macOS or if top behaves differently
+    import platform
+
+    if platform.system() != "Darwin":
+        pytest.skip("top command test only runs on macOS")
+
+    output = await collector._run_top()
+
+    # Should have some output with PID header
+    assert "PID" in output
+    assert len(output) > 0
