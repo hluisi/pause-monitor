@@ -7,7 +7,7 @@ from typing import Any
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Container, Horizontal, Vertical, VerticalScroll
+from textual.containers import Container, Vertical, VerticalScroll
 from textual.css.query import NoMatches
 from textual.screen import Screen
 from textual.widgets import DataTable, Footer, Header, Label, Static
@@ -19,7 +19,7 @@ log = logging.getLogger(__name__)
 
 
 class StressGauge(Static):
-    """Visual stress level gauge."""
+    """Visual stress level gauge showing max process score."""
 
     DEFAULT_CSS = """
     StressGauge {
@@ -43,25 +43,25 @@ class StressGauge(Static):
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
-        self._stress = 0
+        self._score = 0
         self._connected = False
 
     def on_mount(self) -> None:
         """Show initial disconnected state."""
         self.set_disconnected()
 
-    def update_stress(self, stress: int) -> None:
-        """Update the displayed stress value."""
-        self._stress = stress
+    def update_score(self, score: int) -> None:
+        """Update gauge with max process score."""
+        self._score = score
         self._connected = True
         self.remove_class("disconnected")
-        self.update(f"Stress: {stress:3d}/100 {'█' * (stress // 5)}{'░' * (20 - stress // 5)}")
+        self.update(f"Score: {score:3d}/100 {'█' * (score // 5)}{'░' * (20 - score // 5)}")
 
         # Update styling based on level
         self.remove_class("elevated", "critical")
-        if stress >= 60:
+        if score >= 60:
             self.add_class("critical")
-        elif stress >= 30:
+        elif score >= 30:
             self.add_class("elevated")
 
     def set_disconnected(self) -> None:
@@ -69,43 +69,47 @@ class StressGauge(Static):
         self._connected = False
         self.remove_class("elevated", "critical")
         self.add_class("disconnected")
-        self.update("Stress: ---/100  (not connected)")
+        self.update("Score: ---/100  (not connected)")
 
 
-class MetricsPanel(Static):
-    """Panel showing current system metrics."""
+class SampleInfoPanel(Static):
+    """Panel showing current sample info (tier, process count, etc.)."""
 
     DEFAULT_CSS = """
-    MetricsPanel {
+    SampleInfoPanel {
         height: auto;
-        min-height: 6;
+        min-height: 4;
         border: solid $primary;
         padding: 1;
     }
 
-    MetricsPanel.disconnected {
+    SampleInfoPanel.disconnected {
         border: solid $error;
     }
     """
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
-        self._metrics: dict[str, Any] = {}
+        self._tier = 1
+        self._process_count = 0
+        self._sample_count = 0
 
     def on_mount(self) -> None:
         """Show initial disconnected state."""
         self.set_disconnected()
 
-    def update_metrics(self, metrics: dict[str, Any]) -> None:
-        """Update displayed metrics."""
-        self._metrics = metrics
+    def update_info(self, tier: int, process_count: int, sample_count: int) -> None:
+        """Update displayed sample info."""
+        self._tier = tier
+        self._process_count = process_count
+        self._sample_count = sample_count
         self.remove_class("disconnected")
+
+        tier_labels = {1: "Normal", 2: "Elevated", 3: "Critical"}
         lines = [
-            f"Power: {metrics.get('cpu_power', 0):.1f} W",
-            f"Load: {metrics.get('load_avg', 0):.2f}",
-            f"Mem Pressure: {metrics.get('mem_pressure', 0)}%",
-            f"Pageins/s: {metrics.get('pageins_per_s', 0):.1f}",
-            f"Throttled: {'Yes' if metrics.get('throttled') else 'No'}",
+            f"Tier: {tier} ({tier_labels.get(tier, 'Unknown')})",
+            f"Processes: {process_count}",
+            f"Samples: {sample_count}",
         ]
         self.update("\n".join(lines))
 
@@ -116,7 +120,7 @@ class MetricsPanel(Static):
 
 
 class ProcessesPanel(Static):
-    """Panel showing top CPU and pagein consuming processes."""
+    """Panel showing top rogue processes by score."""
 
     DEFAULT_CSS = """
     ProcessesPanel {
@@ -129,101 +133,65 @@ class ProcessesPanel(Static):
         border: solid $error;
     }
 
-    ProcessesPanel Horizontal {
-        height: 100%;
-    }
-
     ProcessesPanel DataTable {
-        width: 1fr;
+        width: 100%;
         height: 100%;
     }
     """
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
-        self._cpu_table: DataTable | None = None
-        self._pagein_table: DataTable | None = None
-        # Cache processes to prevent flickering (name -> (last_seen, value))
-        self._cpu_cache: dict[str, tuple[float, float]] = {}
-        self._pagein_cache: dict[str, tuple[float, float]] = {}
-        self._cache_ttl = 3.0  # Seconds to keep processes visible
+        self._table: DataTable | None = None
 
     def compose(self) -> ComposeResult:
-        """Create side-by-side process tables."""
-        with Horizontal():
-            yield DataTable(id="cpu-processes")
-            yield DataTable(id="pagein-processes")
+        """Create rogue process table."""
+        yield DataTable(id="rogue-processes")
 
     def on_mount(self) -> None:
-        """Set up tables with columns."""
-        self._cpu_table = self.query_one("#cpu-processes", DataTable)
-        self._pagein_table = self.query_one("#pagein-processes", DataTable)
+        """Set up table with columns."""
+        self._table = self.query_one("#rogue-processes", DataTable)
 
-        # Configure CPU table
-        self._cpu_table.add_columns("Top CPU", "ms/s")
-        self._cpu_table.show_header = True
-        self._cpu_table.cursor_type = "none"
-
-        # Configure Pagein table
-        self._pagein_table.add_columns("Top Pageins", "/s")
-        self._pagein_table.show_header = True
-        self._pagein_table.cursor_type = "none"
+        # Configure table: Command, Score, CPU%, Mem, Pageins, State
+        self._table.add_columns("Command", "Score", "CPU%", "Mem", "Pageins", "State")
+        self._table.show_header = True
+        self._table.cursor_type = "none"
 
         self.set_disconnected()
 
-    def update_processes(
-        self,
-        cpu_processes: list[dict],
-        pagein_processes: list[dict],
-    ) -> None:
-        """Update displayed processes with caching to prevent flickering."""
-        import time
-
+    def update_rogues(self, rogues: list[dict]) -> None:
+        """Update with rogue process list."""
         self.remove_class("disconnected")
-        now = time.monotonic()
 
-        # Update CPU cache with new data
-        for proc in cpu_processes:
-            name = proc.get("name", "?")
-            cpu_ms = proc.get("cpu_ms_per_s", 0)
-            self._cpu_cache[name] = (now, cpu_ms)
+        if self._table:
+            self._table.clear()
 
-        # Update pagein cache with new data
-        for proc in pagein_processes:
-            name = proc.get("name", "?")
-            pageins = proc.get("pageins_per_s", 0)
-            self._pagein_cache[name] = (now, pageins)
+            for p in rogues[:10]:  # Show top 10
+                self._table.add_row(
+                    p.get("command", "?")[:20],
+                    str(p.get("score", 0)),
+                    f"{p.get('cpu', 0):.1f}%",
+                    self._format_bytes(p.get("mem", 0)),
+                    str(p.get("pageins", 0)),
+                    p.get("state", "?")[:8],
+                )
 
-        # Expire old entries
-        self._cpu_cache = {k: v for k, v in self._cpu_cache.items() if now - v[0] < self._cache_ttl}
-        self._pagein_cache = {
-            k: v for k, v in self._pagein_cache.items() if now - v[0] < self._cache_ttl
-        }
-
-        # Display top 5 from cache, sorted by value
-        if self._cpu_table:
-            self._cpu_table.clear()
-            sorted_cpu = sorted(self._cpu_cache.items(), key=lambda x: x[1][1], reverse=True)[:5]
-            for name, (_, cpu_ms) in sorted_cpu:
-                self._cpu_table.add_row(name[:20], f"{cpu_ms:.0f}")
-
-        if self._pagein_table:
-            self._pagein_table.clear()
-            sorted_pageins = sorted(
-                self._pagein_cache.items(), key=lambda x: x[1][1], reverse=True
-            )[:5]
-            for name, (_, pageins) in sorted_pageins:
-                self._pagein_table.add_row(name[:20], f"{pageins:.1f}")
+    def _format_bytes(self, bytes_val: int) -> str:
+        """Format bytes as human-readable string."""
+        if bytes_val < 1024:
+            return f"{bytes_val}B"
+        elif bytes_val < 1024 * 1024:
+            return f"{bytes_val / 1024:.1f}K"
+        elif bytes_val < 1024 * 1024 * 1024:
+            return f"{bytes_val / (1024 * 1024):.1f}M"
+        else:
+            return f"{bytes_val / (1024 * 1024 * 1024):.1f}G"
 
     def set_disconnected(self) -> None:
         """Show disconnected state."""
         self.add_class("disconnected")
-        if self._cpu_table:
-            self._cpu_table.clear()
-            self._cpu_table.add_row("(not connected)", "---")
-        if self._pagein_table:
-            self._pagein_table.clear()
-            self._pagein_table.add_row("(not connected)", "---")
+        if self._table:
+            self._table.clear()
+            self._table.add_row("(not connected)", "---", "---", "---", "---", "---")
 
 
 class EventsTable(DataTable):
@@ -532,30 +500,25 @@ class PauseMonitorApp(App):
         grid-gutter: 1;
     }
 
-    /* Row 1: stress gauge spans full width */
+    /* Row 1: score gauge spans full width */
     #stress-gauge {
         column-span: 2;
     }
 
-    /* Row 2: metrics (left) + breakdown (right) */
-    #metrics {
+    /* Row 2: sample info (left) + events (right) */
+    #sample-info {
         height: auto;
-        min-height: 6;
-    }
-
-    #breakdown {
-        border: solid $primary;
-        padding: 1;
-        height: auto;
-        min-height: 6;
-    }
-
-    /* Row 3: processes (left) + events (right) */
-    #processes {
-        height: 1fr;
+        min-height: 4;
     }
 
     #events {
+        height: auto;
+        min-height: 8;
+    }
+
+    /* Row 3: processes spans full width */
+    #processes {
+        column-span: 2;
         height: 1fr;
     }
     """
@@ -689,12 +652,7 @@ class PauseMonitorApp(App):
             pass
 
         try:
-            self.query_one("#metrics", MetricsPanel).set_disconnected()
-        except Exception:
-            pass
-
-        try:
-            self.query_one("#breakdown", Static).update("(not connected)")
+            self.query_one("#sample-info", SampleInfoPanel).set_disconnected()
         except Exception:
             pass
 
@@ -707,94 +665,57 @@ class PauseMonitorApp(App):
         """Handle real-time data from daemon socket."""
         msg_type = data.get("type", "sample")
 
-        # Extract stress data based on message type
+        # Extract max_score based on message type
         if msg_type == "initial_state":
-            stress_data = data.get("current_stress")
+            max_score = data.get("max_score", 0)
+            tier = data.get("tier", 1)
+            sample_count = data.get("sample_count", 0)
+            # For initial_state, get rogues from the last sample if available
+            samples = data.get("samples", [])
+            rogues = samples[-1].get("rogues", []) if samples else []
+            process_count = samples[-1].get("process_count", 0) if samples else 0
         else:  # sample message
-            stress_data = data.get("stress")
+            max_score = data.get("max_score", 0)
+            tier = data.get("tier", 1)
+            sample_count = data.get("sample_count", 0)
+            rogues = data.get("rogues", [])
+            process_count = data.get("process_count", 0)
 
-        if not stress_data:
-            return
-
-        # Get total stress (may be explicit or computed)
-        total = stress_data.get("total", 0)
-        if total == 0:
-            # Compute total from components
-            total = sum(
-                stress_data.get(k, 0)
-                for k in ["load", "memory", "thermal", "latency", "io", "gpu", "wakeups", "pageins"]
-            )
-
-        tier = data.get("tier", 1)
-
-        # Update stress gauge
+        # Update score gauge
         try:
             stress_gauge = self.query_one("#stress-gauge", StressGauge)
-            stress_gauge.update_stress(total)
+            stress_gauge.update_score(max_score)
         except NoMatches:
             pass  # Widget not mounted yet
         except Exception:
-            log.exception("Failed to update stress gauge")
+            log.exception("Failed to update score gauge")
 
-        # Update stress breakdown
+        # Update sample info panel
         try:
-            breakdown = self.query_one("#breakdown", Static)
-            breakdown.update(
-                f"Load: {stress_data.get('load', 0):3d}  "
-                f"Memory: {stress_data.get('memory', 0):3d}  "
-                f"GPU: {stress_data.get('gpu', 0):3d}\n"
-                f"Thermal: {stress_data.get('thermal', 0):3d}  "
-                f"Latency: {stress_data.get('latency', 0):3d}  "
-                f"Wakeups: {stress_data.get('wakeups', 0):3d}\n"
-                f"I/O: {stress_data.get('io', 0):3d}  "
-                f"Pageins: {stress_data.get('pageins', 0):3d}  "
-                f"Tier: {tier}"
-            )
+            sample_info = self.query_one("#sample-info", SampleInfoPanel)
+            sample_info.update_info(tier, process_count, sample_count)
         except NoMatches:
             pass  # Widget not mounted yet
         except Exception:
-            log.exception("Failed to update stress breakdown")
+            log.exception("Failed to update sample info panel")
 
-        # Update metrics panel and processes panel if we have metrics data
-        metrics = data.get("metrics")
-        if metrics:
-            try:
-                metrics_panel = self.query_one("#metrics", MetricsPanel)
-                metrics_panel.update_metrics(
-                    {
-                        "cpu_power": metrics.get("cpu_power", 0),
-                        "load_avg": metrics.get("load_avg", 0),
-                        "mem_pressure": metrics.get("mem_pressure", 0),
-                        "pageins_per_s": metrics.get("pageins_per_s", 0),
-                        "throttled": metrics.get("throttled", False),
-                    }
-                )
-            except NoMatches:
-                pass  # Widget not mounted yet
-            except Exception:
-                log.exception("Failed to update metrics panel")
-
-            # Update processes panel
-            try:
-                processes_panel = self.query_one("#processes", ProcessesPanel)
-                processes_panel.update_processes(
-                    cpu_processes=metrics.get("top_cpu_processes", []),
-                    pagein_processes=metrics.get("top_pagein_processes", []),
-                )
-            except NoMatches:
-                pass  # Widget not mounted yet
-            except Exception:
-                log.exception("Failed to update processes panel")
+        # Update processes panel with rogues
+        try:
+            processes_panel = self.query_one("#processes", ProcessesPanel)
+            processes_panel.update_rogues(rogues)
+        except NoMatches:
+            pass  # Widget not mounted yet
+        except Exception:
+            log.exception("Failed to update processes panel")
 
     def compose(self) -> ComposeResult:
         """Create the TUI layout."""
         yield Header()
 
         yield StressGauge(id="stress-gauge")
-        yield MetricsPanel(id="metrics")
-        yield Static("Stress Breakdown", id="breakdown")
-        yield ProcessesPanel(id="processes")
+        yield SampleInfoPanel(id="sample-info")
         yield EventsTable(id="events")
+        yield ProcessesPanel(id="processes")
 
         yield Footer()
 

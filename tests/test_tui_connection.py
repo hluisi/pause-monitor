@@ -45,23 +45,13 @@ async def test_tui_connects_via_socket_when_daemon_running(short_tmp_path: Path)
         _patch_socket_path(stack, short_tmp_path)
         socket_path = short_tmp_path / "daemon.sock"
 
-        # Create a mock server that sends initial state
+        # Create a mock server that sends initial state (new format)
         async def handle_client(reader, writer):
             msg = {
                 "type": "initial_state",
                 "samples": [],
                 "tier": 1,
-                "current_stress": {
-                    "load": 5,
-                    "memory": 10,
-                    "thermal": 0,
-                    "latency": 0,
-                    "io": 0,
-                    "gpu": 0,
-                    "wakeups": 0,
-                    "pageins": 0,
-                    "total": 15,
-                },
+                "max_score": 15,
                 "sample_count": 0,
             }
             writer.write((json.dumps(msg) + "\n").encode())
@@ -128,8 +118,8 @@ def test_tui_set_disconnected_updates_subtitle():
     assert "disconnected" in app.sub_title.lower()
 
 
-def test_tui_handle_socket_data_updates_stress():
-    """TUI should update widgets with socket data."""
+def test_tui_handle_socket_data_updates_score():
+    """TUI should update widgets with socket data (new ProcessSamples format)."""
     from pause_monitor.tui.app import PauseMonitorApp
 
     config = Config()
@@ -137,66 +127,62 @@ def test_tui_handle_socket_data_updates_stress():
 
     # Create mock widgets
     mock_gauge = MagicMock()
-    mock_breakdown = MagicMock()
-    mock_metrics = MagicMock()
+    mock_sample_info = MagicMock()
     mock_processes = MagicMock()
 
     # Patch query_one to return our mocks
     def mock_query_one(selector, widget_type=None):
         if selector == "#stress-gauge":
             return mock_gauge
-        elif selector == "#breakdown":
-            return mock_breakdown
-        elif selector == "#metrics":
-            return mock_metrics
+        elif selector == "#sample-info":
+            return mock_sample_info
         elif selector == "#processes":
             return mock_processes
         raise ValueError(f"Unknown selector: {selector}")
 
     app.query_one = mock_query_one
 
-    # Test data from socket
+    # Test data from socket (new format with rogues)
     data = {
         "type": "sample",
+        "timestamp": "2026-01-24T12:00:00",
         "tier": 2,
-        "stress": {
-            "load": 10,
-            "memory": 20,
-            "thermal": 5,
-            "latency": 0,
-            "io": 3,
-            "gpu": 8,
-            "wakeups": 2,
-            "pageins": 5,
-            "total": 53,
-        },
-        "metrics": {
-            "cpu_power": 25.5,
-            "pageins_per_s": 100.0,
-            "throttled": False,
-            "top_cpu_processes": [
-                {"name": "test_proc", "pid": 123, "cpu_ms_per_s": 500.0},
-            ],
-            "top_pagein_processes": [
-                {"name": "swap_proc", "pid": 456, "pageins_per_s": 50.0},
-            ],
-        },
+        "elapsed_ms": 50,
+        "process_count": 500,
+        "max_score": 75,
+        "rogues": [
+            {
+                "pid": 123,
+                "command": "test_proc",
+                "cpu": 50.0,
+                "state": "running",
+                "mem": 1000000,
+                "cmprs": 0,
+                "pageins": 10,
+                "csw": 100,
+                "sysbsd": 50,
+                "threads": 4,
+                "score": 75,
+                "categories": ["cpu"],
+            },
+        ],
+        "sample_count": 15,
     }
 
     app._handle_socket_data(data)
 
-    # Verify stress gauge was updated
-    mock_gauge.update_stress.assert_called_once_with(53)
+    # Verify score gauge was updated with max_score
+    mock_gauge.update_score.assert_called_once_with(75)
 
-    # Verify processes panel was updated
-    mock_processes.update_processes.assert_called_once_with(
-        cpu_processes=[{"name": "test_proc", "pid": 123, "cpu_ms_per_s": 500.0}],
-        pagein_processes=[{"name": "swap_proc", "pid": 456, "pageins_per_s": 50.0}],
-    )
+    # Verify sample info panel was updated
+    mock_sample_info.update_info.assert_called_once_with(2, 500, 15)
+
+    # Verify processes panel was updated with rogues
+    mock_processes.update_rogues.assert_called_once_with(data["rogues"])
 
 
 def test_tui_handle_initial_state():
-    """TUI should handle initial_state message from daemon."""
+    """TUI should handle initial_state message from daemon (new format)."""
     from pause_monitor.tui.app import PauseMonitorApp
 
     config = Config()
@@ -204,43 +190,60 @@ def test_tui_handle_initial_state():
 
     # Create mock widgets
     mock_gauge = MagicMock()
-    mock_breakdown = MagicMock()
-    mock_metrics = MagicMock()
+    mock_sample_info = MagicMock()
     mock_processes = MagicMock()
 
     def mock_query_one(selector, widget_type=None):
         if selector == "#stress-gauge":
             return mock_gauge
-        elif selector == "#breakdown":
-            return mock_breakdown
-        elif selector == "#metrics":
-            return mock_metrics
+        elif selector == "#sample-info":
+            return mock_sample_info
         elif selector == "#processes":
             return mock_processes
         raise ValueError(f"Unknown selector: {selector}")
 
     app.query_one = mock_query_one
 
-    # Initial state message
+    # Initial state message (new format)
     data = {
         "type": "initial_state",
-        "samples": [],
+        "samples": [
+            {
+                "timestamp": "2026-01-24T12:00:00",
+                "tier": 1,
+                "elapsed_ms": 45,
+                "process_count": 400,
+                "max_score": 25,
+                "rogues": [
+                    {
+                        "pid": 1,
+                        "command": "init",
+                        "cpu": 0.1,
+                        "state": "idle",
+                        "mem": 1000,
+                        "cmprs": 0,
+                        "pageins": 0,
+                        "csw": 1,
+                        "sysbsd": 0,
+                        "threads": 1,
+                        "score": 25,
+                        "categories": [],
+                    },
+                ],
+            },
+        ],
         "tier": 1,
-        "current_stress": {
-            "load": 5,
-            "memory": 10,
-            "thermal": 0,
-            "latency": 0,
-            "io": 0,
-            "gpu": 0,
-            "wakeups": 0,
-            "pageins": 0,
-            "total": 15,
-        },
-        "sample_count": 0,
+        "max_score": 25,
+        "sample_count": 1,
     }
 
     app._handle_socket_data(data)
 
-    # Verify stress gauge was updated with total
-    mock_gauge.update_stress.assert_called_once_with(15)
+    # Verify score gauge was updated with max_score
+    mock_gauge.update_score.assert_called_once_with(25)
+
+    # Verify sample info panel was updated
+    mock_sample_info.update_info.assert_called_once_with(1, 400, 1)
+
+    # Verify processes panel was updated with rogues from last sample
+    mock_processes.update_rogues.assert_called_once_with(data["samples"][-1]["rogues"])
