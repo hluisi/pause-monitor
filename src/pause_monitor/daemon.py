@@ -10,7 +10,7 @@ from datetime import datetime
 
 import structlog
 
-from pause_monitor.collector import PowermetricsResult, PowermetricsStream, get_core_count
+from pause_monitor.collector import ProcessSamples, TopCollector
 from pause_monitor.config import Config
 from pause_monitor.forensics import (
     ForensicsCapture,
@@ -22,16 +22,10 @@ from pause_monitor.sentinel import TierAction, TierManager
 from pause_monitor.sleepwake import was_recently_asleep
 from pause_monitor.socket_server import SocketServer
 from pause_monitor.storage import (
-    EventSample,
     create_event,
     finalize_event,
     init_database,
-    insert_event_sample,
     prune_old_data,
-)
-from pause_monitor.stress import (
-    StressBreakdown,
-    get_memory_pressure_fast,
 )
 
 log = structlog.get_logger()
@@ -45,15 +39,15 @@ class DaemonState:
     sample_count: int = 0
     event_count: int = 0
     last_sample_time: datetime | None = None
-    current_stress: int = 0
+    current_score: int = 0
     elevated_since: datetime | None = None
     critical_since: datetime | None = None
 
-    def update_sample(self, stress: int, timestamp: datetime) -> None:
+    def update_sample(self, score: int) -> None:
         """Update state after a sample."""
         self.sample_count += 1
-        self.current_stress = stress
-        self.last_sample_time = timestamp
+        self.current_score = score
+        self.last_sample_time = datetime.now()
 
     def enter_elevated(self) -> None:
         """Mark entering elevated state."""
@@ -96,10 +90,12 @@ class Daemon:
         self.state = DaemonState()
 
         self.notifier = Notifier(config.alerts)
-        self.core_count = get_core_count()
 
-        # Initialize ring buffer: ring_buffer_seconds * 10 samples (10Hz fast loop)
-        max_samples = config.sentinel.ring_buffer_seconds * 10
+        # TopCollector for per-process sampling at 1Hz
+        self.collector = TopCollector(config)
+
+        # Initialize ring buffer: ring_buffer_seconds samples (1Hz loop)
+        max_samples = config.sentinel.ring_buffer_seconds
         self.ring_buffer = RingBuffer(max_samples=max_samples)
 
         # Tier management
@@ -111,31 +107,16 @@ class Daemon:
         # Event tracking (tier-based saving)
         self._current_event_id: int | None = None  # Active event ID (tier 2+)
         self._current_peak_tier: int = 1  # Highest tier reached in current event
-        self._current_peak_stress: int = 0  # Peak stress in current event
+        self._current_peak_score: int = 0  # Peak score in current event
 
-        # Legacy peak tracking (for notifications)
+        # Entry time tracking (for notifications)
         self._tier2_entry_time: float | None = None
-        self._tier2_peak_stress: int = 0
-        self._tier2_peak_breakdown: StressBreakdown | None = None
-        self._tier2_peak_process: str | None = None
-        self._tier2_peak_pagein_process: str | None = None
-
-        # Peak tracking timer
-        self._last_peak_check: float = 0.0
-
-        # Latest powermetrics result (for peak tracking process extraction)
-        self._latest_pm_result: PowermetricsResult | None = None
-
-        # Latest system metrics (updated during stress calculation, used for TUI broadcast)
-        self._latest_load_avg: float = 0.0
-        self._latest_mem_pressure: int = 0
 
         # Will be initialized on start
         self._conn: sqlite3.Connection | None = None
         self._caffeinate_proc: asyncio.subprocess.Process | None = None
         self._shutdown_event = asyncio.Event()
         self._auto_prune_task: asyncio.Task | None = None
-        self._powermetrics: PowermetricsStream | None = None
         self._socket_server: SocketServer | None = None
 
     async def _init_database(self) -> None:
@@ -231,10 +212,6 @@ class Daemon:
         """Handle shutdown signals."""
         log.info("signal_received", signal=sig.name)
         self._shutdown_event.set()
-
-        # Terminate powermetrics to unblock the read loop
-        if self._powermetrics:
-            self._powermetrics.terminate()  # Already dead
 
     async def _start_caffeinate(self) -> None:
         """Start caffeinate to prevent App Nap."""
@@ -343,26 +320,25 @@ class Daemon:
         # Write ring buffer data
         capture.write_ring_buffer(contents)
 
-        # Find peak sample for metadata
+        # Find peak sample for metadata (by max_score)
         peak_sample = (
-            max(contents.samples, key=lambda s: s.stress.total) if contents.samples else None
+            max(contents.samples, key=lambda s: s.samples.max_score) if contents.samples else None
         )
-        peak_stress = peak_sample.stress.total if peak_sample else 0
+        peak_score = peak_sample.samples.max_score if peak_sample else 0
 
-        # Extract top process names from peak sample for metadata
+        # Extract top process names from peak sample's rogues
         culprit_names = []
-        if peak_sample and peak_sample.metrics:
-            # Get names from top CPU processes
-            for proc in peak_sample.metrics.top_cpu_processes[:5]:
-                if proc.get("name") and proc["name"] not in culprit_names:
-                    culprit_names.append(proc["name"])
+        if peak_sample and peak_sample.samples.rogues:
+            for rogue in peak_sample.samples.rogues[:5]:
+                if rogue.command and rogue.command not in culprit_names:
+                    culprit_names.append(rogue.command)
 
         # Write metadata
         capture.write_metadata(
             {
                 "timestamp": timestamp.isoformat(),
                 "duration": duration,
-                "peak_stress": peak_stress,
+                "peak_score": peak_score,
                 "culprits": culprit_names,
                 "sample_count": len(contents.samples),
                 "tier": self.tier_manager.current_tier,
@@ -411,96 +387,71 @@ class Daemon:
                 0.0,  # Just entered, no duration yet
             )
 
-    def _save_event_sample(
-        self, metrics: PowermetricsResult, stress: StressBreakdown, tier: int
-    ) -> None:
+    def _save_event_sample(self, samples: ProcessSamples, tier: int) -> None:
         """Save a sample to the current event.
 
         Args:
-            metrics: Current PowermetricsResult
-            stress: Current stress breakdown
+            samples: Current ProcessSamples with rogues
             tier: Current tier (2 or 3)
+
+        Note: Event sample storage requires schema update (Task 13).
+        For now, samples are captured in the ring buffer for forensics.
         """
         if self._current_event_id is None or self._conn is None:
             return
 
-        sample = EventSample(
+        # TODO: Update EventSample schema to store ProcessSamples data
+        # For now, rogues are available in ring buffer for forensics
+        log.debug(
+            "event_sample_captured",
             event_id=self._current_event_id,
-            timestamp=datetime.now(),
             tier=tier,
-            elapsed_ns=metrics.elapsed_ns,
-            throttled=metrics.throttled,
-            cpu_power=metrics.cpu_power,
-            gpu_pct=metrics.gpu_pct,
-            gpu_power=metrics.gpu_power,
-            io_read_per_s=metrics.io_read_per_s,
-            io_write_per_s=metrics.io_write_per_s,
-            wakeups_per_s=metrics.wakeups_per_s,
-            pageins_per_s=metrics.pageins_per_s,
-            stress=stress,
-            top_cpu_procs=metrics.top_cpu_processes,
-            top_pagein_procs=metrics.top_pagein_processes,
-            top_wakeup_procs=metrics.top_wakeup_processes,
-            top_diskio_procs=metrics.top_diskio_processes,
+            max_score=samples.max_score,
+            rogue_count=len(samples.rogues),
         )
-        insert_event_sample(self._conn, sample)
 
-    async def _handle_tier_action(
-        self, action: TierAction, stress: StressBreakdown, metrics: PowermetricsResult | None = None
-    ) -> None:
+    async def _handle_tier_action(self, action: TierAction, samples: ProcessSamples) -> None:
         """Handle tier transition actions.
 
         Requires: _init_database() must have been called (self._conn must be set).
+
+        Args:
+            action: The tier action to handle
+            samples: Current ProcessSamples with rogues and max_score
         """
+        score = samples.max_score
+
         if action == TierAction.TIER2_ENTRY:
             # Create new event on first escalation from tier 1
             self._current_event_id = create_event(self._conn, datetime.now())
             self._current_peak_tier = 2
-            self._current_peak_stress = stress.total
+            self._current_peak_score = score
             self._tier2_entry_time = time.monotonic()
-            self._tier2_peak_stress = stress.total
-            self._tier2_peak_breakdown = stress
 
             # Save entry sample
-            if metrics:
-                self._save_event_sample(metrics, stress, tier=2)
+            self._save_event_sample(samples, tier=2)
 
             log.info(
                 "tier2_entered",
                 event_id=self._current_event_id,
-                stress=stress.total,
-                load=stress.load,
-                memory=stress.memory,
-                thermal=stress.thermal,
-                latency=stress.latency,
-                io=stress.io,
-                gpu=stress.gpu,
-                wakeups=stress.wakeups,
-                pageins=stress.pageins,
+                score=score,
+                rogue_count=len(samples.rogues),
+                top_rogue=samples.rogues[0].command if samples.rogues else None,
             )
 
         elif action == TierAction.TIER2_PEAK:
-            self._tier2_peak_stress = stress.total
-            self._tier2_peak_breakdown = stress
-            if stress.total > self._current_peak_stress:
-                self._current_peak_stress = stress.total
+            if score > self._current_peak_score:
+                self._current_peak_score = score
 
             # Save peak sample
-            if metrics:
-                self._save_event_sample(metrics, stress, tier=2)
+            self._save_event_sample(samples, tier=2)
 
             log.info(
                 "tier2_new_peak",
                 event_id=self._current_event_id,
-                stress=stress.total,
-                load=stress.load,
-                memory=stress.memory,
-                thermal=stress.thermal,
-                latency=stress.latency,
-                io=stress.io,
-                gpu=stress.gpu,
-                wakeups=stress.wakeups,
-                pageins=stress.pageins,
+                score=score,
+                rogue_count=len(samples.rogues),
+                top_rogue=samples.rogues[0].command if samples.rogues else None,
             )
 
         elif action == TierAction.TIER2_EXIT:
@@ -510,7 +461,7 @@ class Daemon:
                     self._conn,
                     self._current_event_id,
                     end_timestamp=datetime.now(),
-                    peak_stress=self._current_peak_stress,
+                    peak_stress=self._current_peak_score,  # Field name kept for compatibility
                     peak_tier=self._current_peak_tier,
                 )
                 self.state.event_count += 1
@@ -522,18 +473,15 @@ class Daemon:
                     "tier2_exited",
                     event_id=self._current_event_id,
                     duration=duration,
-                    peak_stress=self._current_peak_stress,
+                    peak_score=self._current_peak_score,
                     peak_tier=self._current_peak_tier,
                 )
 
             # Reset event tracking
             self._current_event_id = None
             self._current_peak_tier = 1
-            self._current_peak_stress = 0
+            self._current_peak_score = 0
             self._tier2_entry_time = None
-            self._tier2_peak_stress = 0
-            self._tier2_peak_breakdown = None
-            self._tier2_peak_process = None
 
         elif action == TierAction.TIER3_ENTRY:
             # If entering tier 3 directly from tier 1, create event first
@@ -542,305 +490,127 @@ class Daemon:
                 self._tier2_entry_time = time.monotonic()
 
             self._current_peak_tier = 3
-            if stress.total > self._current_peak_stress:
-                self._current_peak_stress = stress.total
+            if score > self._current_peak_score:
+                self._current_peak_score = score
 
             # Save entry sample
-            if metrics:
-                self._save_event_sample(metrics, stress, tier=3)
+            self._save_event_sample(samples, tier=3)
 
             log.warning(
                 "tier3_entered",
                 event_id=self._current_event_id,
-                stress=stress.total,
-                load=stress.load,
-                memory=stress.memory,
-                thermal=stress.thermal,
-                latency=stress.latency,
-                io=stress.io,
-                gpu=stress.gpu,
-                wakeups=stress.wakeups,
-                pageins=stress.pageins,
+                score=score,
+                rogue_count=len(samples.rogues),
+                top_rogue=samples.rogues[0].command if samples.rogues else None,
             )
 
         elif action == TierAction.TIER3_EXIT:
             # De-escalating to tier 2 - event continues
-            self._tier2_peak_stress = stress.total
-            self._tier2_peak_breakdown = stress
-            log.info("tier3_exited", event_id=self._current_event_id, stress=stress.total)
+            log.info("tier3_exited", event_id=self._current_event_id, score=score)
 
-    def _maybe_update_peak(self, stress: StressBreakdown) -> None:
-        """Update peak stress if interval has passed and stress is higher.
-
-        This ensures long elevated/critical periods capture the worst moment
-        before the ring buffer rolls over.
-
-        Args:
-            stress: Current stress breakdown
-        """
-        now = time.time()
-        interval = self.config.sentinel.peak_tracking_seconds
-
-        # Only check periodically
-        if now - self._last_peak_check < interval:
-            return
-
-        self._last_peak_check = now
-
-        # Update if current stress is higher
-        if stress.total > self._tier2_peak_stress:
-            self._tier2_peak_stress = stress.total
-            self._tier2_peak_breakdown = stress
-            # Get top CPU process from latest powermetrics data
-            if self._latest_pm_result and self._latest_pm_result.top_cpu_processes:
-                self._tier2_peak_process = self._latest_pm_result.top_cpu_processes[0]["name"]
-            # Also track top pagein process if any (more likely cause of pauses)
-            if self._latest_pm_result and self._latest_pm_result.top_pagein_processes:
-                top_pagein = self._latest_pm_result.top_pagein_processes[0]
-                self._tier2_peak_pagein_process = top_pagein["name"]
-            self.ring_buffer.snapshot_processes(trigger="peak_update")
-            log.info("peak_updated", stress=stress.total)
-
-    async def _handle_pause(self, actual_interval: float, expected_interval: float) -> None:
+    async def _handle_pause(self, elapsed_ms: int, expected_ms: int) -> None:
         """Handle detected pause - run full forensics.
 
         A pause is when our loop was delayed >threshold (system was frozen).
 
         Args:
-            actual_interval: How long the loop actually took
-            expected_interval: How long it should have taken
+            elapsed_ms: How long the sample actually took (ms)
+            expected_ms: How long it should have taken (ms)
         """
+        # Convert to seconds for compatibility
+        elapsed_sec = elapsed_ms / 1000.0
+
         # Check if we just woke from sleep (not a real pause)
-        if was_recently_asleep(within_seconds=actual_interval):
-            log.info("pause_was_sleep_wake", actual=actual_interval)
+        if was_recently_asleep(within_seconds=elapsed_sec):
+            log.info("pause_was_sleep_wake", elapsed_ms=elapsed_ms)
             return
 
         # Check minimum duration threshold
-        if actual_interval < self.config.alerts.pause_min_duration:
+        if elapsed_sec < self.config.alerts.pause_min_duration:
             log.debug(
                 "pause_below_threshold",
-                duration=actual_interval,
+                elapsed_ms=elapsed_ms,
                 min_duration=self.config.alerts.pause_min_duration,
             )
             return
 
         log.warning(
             "pause_detected",
-            actual=actual_interval,
-            expected=expected_interval,
-            ratio=actual_interval / expected_interval,
+            elapsed_ms=elapsed_ms,
+            expected_ms=expected_ms,
+            ratio=elapsed_ms / expected_ms if expected_ms > 0 else 0,
         )
 
         # Freeze ring buffer (immutable snapshot)
         contents = self.ring_buffer.freeze()
 
         # Run forensics in background
-        await self._run_forensics(contents, duration=actual_interval)
-
-    def _calculate_stress(
-        self, pm_result: PowermetricsResult, latency_ratio: float
-    ) -> StressBreakdown:
-        """Calculate stress breakdown from powermetrics data.
-
-        Args:
-            pm_result: Parsed powermetrics sample
-            latency_ratio: Actual interval / expected interval (1.0 = on time)
-
-        Returns:
-            StressBreakdown with all 8 factors (including pageins - critical for pause detection)
-        """
-        # Get system metrics
-        load_avg = os.getloadavg()[0]
-        mem_pressure = get_memory_pressure_fast()
-
-        # Store for TUI broadcast
-        self._latest_load_avg = load_avg
-        self._latest_mem_pressure = mem_pressure
-
-        # Load stress (0-30 points)
-        load_ratio = load_avg / self.core_count if self.core_count > 0 else 0
-        if load_ratio < 1.0:
-            load = 0
-        elif load_ratio < 2.0:
-            load = int((load_ratio - 1.0) * 15)  # 0-15 for 1x-2x
-        else:
-            load = int(min(30, 15 + (load_ratio - 2.0) * 7.5))  # 15-30 for 2x+
-
-        # Memory stress (0-30 points)
-        # mem_pressure is "memory free" (0-100, higher = more available)
-        # Low free memory = high stress, high free memory = low stress
-        mem_used_pct = 100 - mem_pressure  # Convert to "used" perspective
-        if mem_used_pct < 70:
-            memory = 0  # Under 70% used = no stress
-        elif mem_used_pct < 85:
-            memory = int((mem_used_pct - 70) * 1.0)  # 0-15 for 70-85% used
-        else:
-            memory = int(min(30, 15 + (mem_used_pct - 85) * 1.0))  # 15-30 for 85%+ used
-
-        # Thermal stress (0-10 points)
-        thermal = 10 if pm_result.throttled else 0
-
-        # Latency stress (0-20 points) - uses config threshold
-        pause_threshold = self.config.sentinel.pause_threshold_ratio
-        if latency_ratio <= 1.2:
-            latency = 0
-        elif pause_threshold > 1.2 and latency_ratio <= pause_threshold:
-            # Scale from 0-10 between 1.2x and threshold
-            # Guard: pause_threshold must be > 1.2 to avoid division by zero
-            latency = int((latency_ratio - 1.2) / (pause_threshold - 1.2) * 10)
-        else:
-            # 10-20 for ratios above threshold
-            latency = int(min(20, 10 + (latency_ratio - pause_threshold) * 5))
-
-        # GPU stress (0-20 points)
-        gpu = 0
-        if pm_result.gpu_pct is not None:
-            if pm_result.gpu_pct > 80:
-                gpu = int(min(20, (pm_result.gpu_pct - 80) * 1.0))  # 0-20 for 80-100%
-            elif pm_result.gpu_pct > 50:
-                gpu = int((pm_result.gpu_pct - 50) * 0.33)  # 0-10 for 50-80%
-
-        # Wakeups stress (0-10 points)
-        wakeups = 0
-        if pm_result.wakeups_per_s > 100:
-            wakeups = int(min(10, (pm_result.wakeups_per_s - 100) / 40))  # 100-500 -> 0-10
-
-        # I/O stress (0-10 points)
-        # Scale: 0-10 MB/s = 0, 10-100 MB/s = 0-10 points
-        # Per Data Dictionary: use io_read_per_s + io_write_per_s
-        io = 0
-        io_mb_per_sec = (pm_result.io_read_per_s + pm_result.io_write_per_s) / (1024 * 1024)
-        if io_mb_per_sec > 10:
-            io = int(min(10, (io_mb_per_sec - 10) / 9))  # 10-100 MB/s -> 0-10
-
-        # Pageins stress (0-30 points) - CRITICAL for pause detection
-        # Scale: 0-10 pageins/s = 0, 10-100 = 0-15, 100+ = 15-30
-        # This is the #1 indicator of user-visible pauses
-        pageins = 0
-        if pm_result.pageins_per_s > 10:
-            if pm_result.pageins_per_s < 100:
-                pageins = int((pm_result.pageins_per_s - 10) / 6)  # 10-100 -> 0-15
-            else:
-                pageins = int(min(30, 15 + (pm_result.pageins_per_s - 100) / 20))  # 100+ -> 15-30
-
-        return StressBreakdown(
-            load=load,
-            memory=memory,
-            thermal=thermal,
-            latency=latency,
-            io=io,
-            gpu=gpu,
-            wakeups=wakeups,
-            pageins=pageins,
-        )
+        await self._run_forensics(contents, duration=elapsed_sec)
 
     async def _main_loop(self) -> None:
-        """Main loop: process powermetrics samples at 10Hz.
+        """Main 1Hz loop collecting process samples.
 
-        Each sample:
-        1. Measure latency (pause detection)
-        2. Calculate stress from powermetrics data
-        3. Push to ring buffer
-        4. Update tier manager
-        5. Handle tier transitions
-        6. Periodic peak tracking
+        Each iteration:
+        1. Collect samples via TopCollector
+        2. Push to ring buffer
+        3. Update tier manager with max_score
+        4. Handle tier transitions
+        5. Check for pause (elapsed_ms > threshold)
+        6. Broadcast to socket for TUI
 
-        If powermetrics crashes, restart it after 1 second.
+        The loop runs until shutdown event is set.
         """
-        expected_interval = self.config.sentinel.fast_interval_ms / 1000.0
+        # Expected interval is 1000ms (1Hz)
+        expected_ms = 1000
         pause_threshold = self.config.sentinel.pause_threshold_ratio
 
         while not self._shutdown_event.is_set():
-            # (Re)create powermetrics stream if not already set (allows mocking)
-            if self._powermetrics is None:
-                self._powermetrics = PowermetricsStream(
-                    interval_ms=self.config.sentinel.fast_interval_ms
-                )
-
             try:
-                await self._powermetrics.start()
-                # Don't set last_sample_time until after first sample arrives
-                # to avoid counting startup time as latency
-                last_sample_time: float | None = None
-                is_first_sample = True
+                # Collect samples (this takes ~1 second due to top -l 2)
+                samples = await self.collector.collect()
 
-                async for pm_result in self._powermetrics.read_samples():
-                    if self._shutdown_event.is_set():
-                        break
+                if self._shutdown_event.is_set():
+                    break
 
-                    # Measure actual interval for latency/pause detection
-                    now = time.monotonic()
-                    if is_first_sample:
-                        # First sample - no latency measurement possible
-                        actual_interval = expected_interval  # Assume on-time
-                        latency_ratio = 1.0
-                        is_first_sample = False
-                    else:
-                        actual_interval = now - last_sample_time
-                        latency_ratio = actual_interval / expected_interval
-                    last_sample_time = now
+                # Get current tier for the sample
+                tier = self.tier_manager.current_tier
 
-                    # Store latest powermetrics result for peak tracking
-                    self._latest_pm_result = pm_result
+                # Push to ring buffer
+                self.ring_buffer.push(samples, tier)
 
-                    # Calculate stress from powermetrics data
-                    stress = self._calculate_stress(pm_result, latency_ratio)
+                # Update tier manager with max score
+                action = self.tier_manager.update(samples.max_score)
+                if action:
+                    await self._handle_tier_action(action, samples)
 
-                    # Get current tier for the sample
-                    current_tier = self.tier_manager.current_tier
+                # Tier 3 continuous saving (every sample)
+                tier = self.tier_manager.current_tier
+                if tier == 3 and action != TierAction.TIER3_ENTRY:
+                    # TIER3_ENTRY already saves, avoid duplicate
+                    self._save_event_sample(samples, tier=3)
 
-                    # Push to ring buffer (Phase 1: includes raw metrics for forensics)
-                    self.ring_buffer.push(pm_result, stress, tier=current_tier)
+                # Check for pause (elapsed_ms much larger than expected)
+                if samples.elapsed_ms > expected_ms * pause_threshold:
+                    await self._handle_pause(samples.elapsed_ms, expected_ms)
 
-                    # Push to socket for TUI (push-based streaming)
-                    if self._socket_server and self._socket_server.has_clients:
-                        await self._socket_server.broadcast(
-                            pm_result,
-                            stress,
-                            current_tier,
-                            load_avg=self._latest_load_avg,
-                            mem_pressure=self._latest_mem_pressure,
-                        )
+                # Broadcast to TUI clients
+                if self._socket_server and self._socket_server.has_clients:
+                    await self._socket_server.broadcast(samples, tier)
 
-                    # Update tier manager and handle transitions
-                    action = self.tier_manager.update(stress.total)
-                    if action:
-                        await self._handle_tier_action(action, stress, metrics=pm_result)
-
-                    # Tier 3 continuous saving: save every sample at 10Hz for forensics
-                    current_tier = self.tier_manager.current_tier
-                    if current_tier == 3 and action != TierAction.TIER3_ENTRY:
-                        # TIER3_ENTRY already saves the entry sample, avoid duplicate
-                        self._save_event_sample(pm_result, stress, tier=3)
-
-                    # Periodic peak tracking during elevated/critical
-                    if current_tier >= 2:
-                        self._maybe_update_peak(stress)
-
-                    # Check for pause (latency > threshold)
-                    if latency_ratio > pause_threshold:
-                        await self._handle_pause(actual_interval, expected_interval)
-
-                    self.state.sample_count += 1
-
-                # Generator ended normally - in production powermetrics runs forever,
-                # so this only happens in tests with mocked streams.
-                break
+                # Update daemon state
+                self.state.update_sample(samples.max_score)
 
             except asyncio.CancelledError:
                 log.info("main_loop_cancelled")
                 break
             except Exception as e:
-                log.error("powermetrics_crashed", error=str(e))
-                # Wait 1 second before restart, but exit immediately if shutdown
+                log.error("sample_failed", error=str(e))
+                # Wait briefly before retry, but exit immediately if shutdown
                 try:
                     await asyncio.wait_for(self._shutdown_event.wait(), timeout=1.0)
-                    break  # Shutdown requested during wait
+                    break
                 except asyncio.TimeoutError:
-                    pass  # Timeout expired, continue with restart
-            finally:
-                if self._powermetrics:
-                    await self._powermetrics.stop()
+                    pass  # Continue with next sample
 
 
 async def run_daemon(config: Config | None = None) -> None:

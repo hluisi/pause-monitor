@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from pause_monitor.collector import ProcessSamples, ProcessScore, TopCollector
 from pause_monitor.config import Config
 from pause_monitor.daemon import Daemon, DaemonState
 from pause_monitor.ringbuffer import RingBuffer
@@ -99,17 +100,17 @@ def test_daemon_state_initial():
     assert state.running is False
     assert state.sample_count == 0
     assert state.last_sample_time is None
-    assert state.current_stress == 0
+    assert state.current_score == 0
 
 
 def test_daemon_state_update_sample():
     """DaemonState updates on new sample."""
     state = DaemonState()
 
-    state.update_sample(stress=25, timestamp=datetime.now())
+    state.update_sample(score=25)
 
     assert state.sample_count == 1
-    assert state.current_stress == 25
+    assert state.current_score == 25
     assert state.last_sample_time is not None
 
 
@@ -134,7 +135,7 @@ def test_daemon_init_creates_components():
     assert daemon.notifier is not None
     assert daemon.tier_manager is not None
     assert daemon.ring_buffer is not None
-    assert daemon.core_count > 0
+    assert daemon.collector is not None
 
 
 @pytest.mark.asyncio
@@ -499,15 +500,15 @@ async def test_daemon_handles_pause_with_forensics(patched_config_paths):
     with patch("pause_monitor.daemon.was_recently_asleep", return_value=None):
         with patch.object(daemon, "_run_forensics", new_callable=AsyncMock) as mock_forensics:
             await daemon._handle_pause(
-                actual_interval=2.5,
-                expected_interval=0.1,
+                elapsed_ms=2500,  # 2.5 seconds in ms
+                expected_ms=100,
             )
 
             # Verify forensics was called
             mock_forensics.assert_called_once()
             # First arg should be the frozen buffer contents
             call_args = mock_forensics.call_args
-            assert call_args.kwargs.get("duration") == 2.5
+            assert call_args.kwargs.get("duration") == 2.5  # Converted to seconds
 
 
 @pytest.mark.asyncio
@@ -555,66 +556,56 @@ async def test_daemon_handles_tier2_exit_writes_bookmark(patched_config_paths):
     daemon = Daemon(config)
     await daemon._init_database()
 
-    # Trigger tier2 entry to capture entry time in daemon
-    entry_stress = StressBreakdown(
-        load=10, memory=8, thermal=5, latency=3, io=2, gpu=5, wakeups=2, pageins=0
+    # Trigger tier2 entry with ProcessSamples
+    entry_samples = ProcessSamples(
+        timestamp=datetime.now(),
+        elapsed_ms=1000,
+        process_count=100,
+        max_score=35,
+        rogues=[
+            ProcessScore(
+                pid=123,
+                command="test_proc",
+                cpu=50.0,
+                state="running",
+                mem=1024 * 1024 * 100,
+                cmprs=0,
+                pageins=10,
+                csw=500,
+                sysbsd=200,
+                threads=5,
+                score=35,
+                categories=frozenset(["cpu"]),
+            )
+        ],
     )
-    await daemon._handle_tier_action(TierAction.TIER2_ENTRY, entry_stress)
+    await daemon._handle_tier_action(TierAction.TIER2_ENTRY, entry_samples)
 
     # Simulate time passing by manipulating daemon's entry time
     daemon._tier2_entry_time = time.monotonic() - 60  # Simulate 60s ago
 
-    # Handle tier2_exit
-    exit_stress = StressBreakdown(
-        load=5, memory=3, thermal=0, latency=0, io=0, gpu=2, wakeups=1, pageins=0
+    # Handle tier2_exit with lower score samples
+    exit_samples = ProcessSamples(
+        timestamp=datetime.now(),
+        elapsed_ms=1000,
+        process_count=100,
+        max_score=15,
+        rogues=[],
     )
-    await daemon._handle_tier_action(TierAction.TIER2_EXIT, exit_stress)
+    await daemon._handle_tier_action(TierAction.TIER2_EXIT, exit_samples)
 
-    # Verify event was written with peak_stress and peak_tier
+    # Verify event was written with peak_stress (now peak_score) and peak_tier
     events = get_events(daemon._conn, limit=1)
     assert len(events) == 1
-    assert events[0].peak_stress == 35  # Peak from entry stress total
+    assert events[0].peak_stress == 35  # Peak from entry sample
     assert events[0].peak_tier == 2
     assert events[0].end_timestamp is not None  # Event was finalized
     # Entry time should be cleared after exit
     assert daemon._tier2_entry_time is None
 
 
-def test_daemon_calculate_stress_all_factors(patched_config_paths):
-    from pause_monitor.collector import PowermetricsResult
-
-    config = Config()
-    daemon = Daemon(config)
-
-    # Phase 1 updated PowermetricsResult - uses Data Dictionary fields
-    pm_result = PowermetricsResult(
-        elapsed_ns=100_000_000,
-        throttled=True,
-        cpu_power=15.0,
-        gpu_pct=90.0,
-        gpu_power=8.0,
-        io_read_per_s=30_000_000.0,  # 30 MB/s read
-        io_write_per_s=20_000_000.0,  # 20 MB/s write = 50 MB/s total
-        wakeups_per_s=300.0,
-        pageins_per_s=50.0,  # Some swap activity
-        top_cpu_processes=[{"name": "test", "pid": 123, "cpu_ms_per_s": 500.0}],
-        top_pagein_processes=[{"name": "swapper", "pid": 456, "pageins_per_s": 50.0}],
-        top_wakeup_processes=[{"name": "test", "pid": 123, "wakeups_per_s": 300.0}],
-        top_diskio_processes=[{"name": "test", "pid": 123, "diskio_per_s": 50_000_000.0}],
-    )
-
-    stress = daemon._calculate_stress(pm_result, latency_ratio=1.5)
-
-    # Verify all factors are calculated
-    assert stress.load >= 0  # Based on system load
-    assert stress.memory >= 0
-    assert stress.thermal == 10  # throttled = 10 points
-    assert stress.latency > 0  # latency_ratio 1.5 should contribute
-    assert stress.gpu > 0  # 90% GPU
-    assert stress.wakeups > 0  # 300 wakeups/sec
-    assert stress.io > 0  # 50 MB/s should contribute
-    assert stress.pageins > 0  # 50 pageins/sec should contribute
-    assert stress.total > 0  # Total should be sum of all 8 factors
+# Note: _calculate_stress was removed in Task 10 - stress scoring is now per-process
+# via TopCollector. See test_daemon_main_loop_updates_tier_manager for scoring tests.
 
 
 @pytest.mark.skip(reason="Needs daemon.py update for per-process scoring (Task 10)")
@@ -702,28 +693,8 @@ def test_daemon_updates_peak_after_interval(patched_config_paths):
     assert daemon._tier2_peak_breakdown == new_stress
 
 
-def test_daemon_does_not_update_peak_before_interval(patched_config_paths):
-    """Daemon should not update peak before peak_tracking_seconds."""
-    config = Config()
-    config.sentinel.peak_tracking_seconds = 30
-
-    daemon = Daemon(config)
-
-    # Simulate being in tier 2 via TierManager (single source of truth)
-    daemon.tier_manager.update(50)  # Enter tier 2 with high stress
-    daemon.tier_manager._tier2_entry_time = time.monotonic() - 60  # Simulate 60s ago
-    daemon._tier2_peak_stress = 50
-    daemon._last_peak_check = time.time() - 10  # Only 10 seconds ago
-
-    # New stress is lower
-    new_stress = StressBreakdown(
-        load=5, memory=5, thermal=0, latency=0, io=0, gpu=5, wakeups=0, pageins=0
-    )
-
-    # Should not update peak (not enough time passed)
-    daemon._maybe_update_peak(new_stress)
-
-    assert daemon._tier2_peak_stress == 50  # Unchanged
+# Note: _maybe_update_peak was removed in Task 10 - peak tracking is now handled
+# by TierManager.peak_score directly. See test_tier_manager.py for peak tracking tests.
 
 
 @pytest.mark.skip(reason="Needs daemon.py update for per-process scoring (Task 10)")
@@ -835,3 +806,220 @@ async def test_daemon_socket_available_after_start(patched_config_short_paths, m
 
     await daemon.stop()
     assert not config.socket_path.exists(), "Socket file should be cleaned up after stop"
+
+
+# === Task 10: TopCollector Integration Tests ===
+
+
+def test_daemon_uses_top_collector(patched_config_paths):
+    """Daemon should use TopCollector instead of PowermetricsStream."""
+    config = Config()
+    daemon = Daemon(config)
+
+    assert hasattr(daemon, "collector")
+    assert isinstance(daemon.collector, TopCollector)
+
+
+@pytest.mark.asyncio
+async def test_daemon_main_loop_collects_samples(patched_config_paths, monkeypatch):
+    """Main loop should collect and process samples via TopCollector."""
+    from pause_monitor.storage import init_database
+
+    config = Config()
+    daemon = Daemon(config)
+
+    # Initialize database to prevent NoneType errors
+    init_database(config.db_path)
+    daemon._conn = sqlite3.connect(config.db_path)
+
+    # Track samples pushed to ring buffer
+    pushed_samples = []
+    original_push = daemon.ring_buffer.push
+
+    def track_push(samples, tier):
+        pushed_samples.append((samples, tier))
+        return original_push(samples, tier)
+
+    monkeypatch.setattr(daemon.ring_buffer, "push", track_push)
+
+    # Create mock samples
+    mock_samples = [
+        ProcessSamples(
+            timestamp=datetime.now(),
+            elapsed_ms=1000,
+            process_count=100,
+            max_score=25,
+            rogues=[
+                ProcessScore(
+                    pid=123,
+                    command="test_proc",
+                    cpu=50.0,
+                    state="running",
+                    mem=1024 * 1024 * 100,
+                    cmprs=0,
+                    pageins=10,
+                    csw=500,
+                    sysbsd=200,
+                    threads=5,
+                    score=25,
+                    categories=frozenset(["cpu"]),
+                )
+            ],
+        ),
+        ProcessSamples(
+            timestamp=datetime.now(),
+            elapsed_ms=1000,
+            process_count=100,
+            max_score=45,
+            rogues=[
+                ProcessScore(
+                    pid=456,
+                    command="heavy_proc",
+                    cpu=80.0,
+                    state="running",
+                    mem=1024 * 1024 * 500,
+                    cmprs=1024 * 1024 * 50,
+                    pageins=100,
+                    csw=5000,
+                    sysbsd=2000,
+                    threads=20,
+                    score=45,
+                    categories=frozenset(["cpu", "mem"]),
+                )
+            ],
+        ),
+    ]
+
+    # Mock collector.collect() to return samples then stop
+    call_count = 0
+
+    async def mock_collect():
+        nonlocal call_count
+        call_count += 1
+        if call_count > len(mock_samples):
+            daemon._shutdown_event.set()
+            # Return empty sample when shutting down
+            return ProcessSamples(
+                timestamp=datetime.now(),
+                elapsed_ms=1000,
+                process_count=0,
+                max_score=0,
+                rogues=[],
+            )
+        return mock_samples[call_count - 1]
+
+    monkeypatch.setattr(daemon.collector, "collect", mock_collect)
+
+    # Run main loop (will exit after samples exhausted due to shutdown)
+    await daemon._main_loop()
+
+    # Should have pushed 2 samples (the 3rd triggers shutdown)
+    assert len(pushed_samples) == 2
+    assert pushed_samples[0][0].max_score == 25
+    assert pushed_samples[1][0].max_score == 45
+
+
+@pytest.mark.asyncio
+async def test_daemon_main_loop_updates_tier_manager(patched_config_paths, monkeypatch):
+    """Main loop should update TierManager with max_score."""
+    from pause_monitor.storage import init_database
+
+    config = Config()
+    daemon = Daemon(config)
+
+    init_database(config.db_path)
+    daemon._conn = sqlite3.connect(config.db_path)
+
+    # Create a sample with high score that should trigger tier 2
+    high_score_sample = ProcessSamples(
+        timestamp=datetime.now(),
+        elapsed_ms=1000,
+        process_count=100,
+        max_score=50,  # Above default elevated_threshold (35)
+        rogues=[
+            ProcessScore(
+                pid=123,
+                command="heavy_proc",
+                cpu=90.0,
+                state="running",
+                mem=1024**3,
+                cmprs=0,
+                pageins=500,
+                csw=10000,
+                sysbsd=5000,
+                threads=50,
+                score=50,
+                categories=frozenset(["cpu", "pageins"]),
+            )
+        ],
+    )
+
+    call_count = 0
+
+    async def mock_collect():
+        nonlocal call_count
+        call_count += 1
+        if call_count > 1:
+            daemon._shutdown_event.set()
+        return high_score_sample
+
+    monkeypatch.setattr(daemon.collector, "collect", mock_collect)
+
+    # Run main loop
+    await daemon._main_loop()
+
+    # TierManager should have been updated with the score
+    assert daemon.tier_manager.peak_score == 50
+    # Should have entered tier 2 (elevated)
+    assert daemon.tier_manager.current_tier == 2
+
+
+@pytest.mark.asyncio
+async def test_daemon_main_loop_handles_pause_detection(patched_config_paths, monkeypatch):
+    """Main loop should detect pauses from elapsed_ms."""
+    from pause_monitor.storage import init_database
+
+    config = Config()
+    config.alerts.pause_min_duration = 0.1  # Lower threshold for testing
+    daemon = Daemon(config)
+
+    init_database(config.db_path)
+    daemon._conn = sqlite3.connect(config.db_path)
+
+    # Track pause handler calls
+    pause_calls = []
+
+    async def mock_handle_pause(elapsed_ms, expected_ms):
+        pause_calls.append((elapsed_ms, expected_ms))
+
+    monkeypatch.setattr(daemon, "_handle_pause", mock_handle_pause)
+
+    # Create a sample with long elapsed_ms indicating a pause
+    # pause_threshold_ratio default is 2.0, expected is 1000ms
+    # So 3000ms elapsed should trigger pause detection
+    pause_sample = ProcessSamples(
+        timestamp=datetime.now(),
+        elapsed_ms=3000,  # 3x expected = definitely a pause
+        process_count=100,
+        max_score=20,
+        rogues=[],
+    )
+
+    call_count = 0
+
+    async def mock_collect():
+        nonlocal call_count
+        call_count += 1
+        if call_count > 1:
+            daemon._shutdown_event.set()
+        return pause_sample
+
+    monkeypatch.setattr(daemon.collector, "collect", mock_collect)
+
+    # Run main loop
+    await daemon._main_loop()
+
+    # Should have called pause handler
+    assert len(pause_calls) == 1
+    assert pause_calls[0][0] == 3000  # elapsed_ms
+    assert pause_calls[0][1] == 1000  # expected_ms
