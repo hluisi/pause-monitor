@@ -377,7 +377,9 @@ def test_forensics_capture_ring_buffer_with_multiple_rogues(tmp_path):
 
 def test_identify_culprits_from_buffer():
     """identify_culprits returns top rogues by score."""
-    rogue = make_process_score(command="Chrome", score=30, categories=frozenset({"cpu", "mem"}))
+    rogue = make_process_score(
+        pid=100, command="Chrome", score=30, categories=frozenset({"cpu", "mem"})
+    )
     samples = make_process_samples(rogues=[rogue])
     ring_sample = RingSample(samples=samples, tier=2)
     contents = BufferContents(samples=(ring_sample,))
@@ -385,6 +387,7 @@ def test_identify_culprits_from_buffer():
     culprits = identify_culprits(contents)
 
     assert len(culprits) == 1
+    assert culprits[0]["pid"] == 100
     assert culprits[0]["command"] == "Chrome"
     assert culprits[0]["score"] == 30
     assert set(culprits[0]["categories"]) == {"cpu", "mem"}
@@ -393,8 +396,8 @@ def test_identify_culprits_from_buffer():
 def test_identify_culprits_multiple_processes():
     """identify_culprits returns multiple processes sorted by score."""
     rogues = [
-        make_process_score(command="python", score=30),
-        make_process_score(command="Chrome", score=15),
+        make_process_score(pid=100, command="python", score=30),
+        make_process_score(pid=200, command="Chrome", score=15),
     ]
     samples = make_process_samples(rogues=rogues)
     ring_sample = RingSample(samples=samples, tier=2)
@@ -404,8 +407,10 @@ def test_identify_culprits_multiple_processes():
 
     # Should have both processes, sorted by score (python=30 > Chrome=15)
     assert len(culprits) == 2
+    assert culprits[0]["pid"] == 100
     assert culprits[0]["command"] == "python"
     assert culprits[0]["score"] == 30
+    assert culprits[1]["pid"] == 200
     assert culprits[1]["command"] == "Chrome"
     assert culprits[1]["score"] == 15
 
@@ -426,18 +431,18 @@ def test_identify_culprits_uses_peak_values():
     the peak score should be used.
     """
     now = datetime.now()
-    # Same process with different scores across samples
+    # Same process (same PID) with different scores across samples
     samples = [
         make_process_samples(
-            rogues=[make_process_score(command="Safari", score=20)],
+            rogues=[make_process_score(pid=300, command="Safari", score=20)],
             timestamp=now - timedelta(seconds=2),
         ),
         make_process_samples(
-            rogues=[make_process_score(command="Safari", score=35)],  # Peak
+            rogues=[make_process_score(pid=300, command="Safari", score=35)],  # Peak
             timestamp=now - timedelta(seconds=1),
         ),
         make_process_samples(
-            rogues=[make_process_score(command="Safari", score=10)],
+            rogues=[make_process_score(pid=300, command="Safari", score=10)],
             timestamp=now,
         ),
     ]
@@ -448,13 +453,14 @@ def test_identify_culprits_uses_peak_values():
 
     # Should use peak score of 35
     assert len(culprits) == 1
+    assert culprits[0]["pid"] == 300
     assert culprits[0]["command"] == "Safari"
     assert culprits[0]["score"] == 35
 
 
 def test_identify_culprits_limits_to_top_5():
     """identify_culprits returns at most 5 culprits."""
-    rogues = [make_process_score(command=f"proc{i}", score=100 - i) for i in range(10)]
+    rogues = [make_process_score(pid=i, command=f"proc{i}", score=100 - i) for i in range(10)]
     samples = make_process_samples(rogues=rogues)
     ring_sample = RingSample(samples=samples, tier=2)
     contents = BufferContents(samples=(ring_sample,))
@@ -463,7 +469,9 @@ def test_identify_culprits_limits_to_top_5():
 
     assert len(culprits) == 5
     # Should be top 5 by score
+    assert culprits[0]["pid"] == 0
     assert culprits[0]["command"] == "proc0"
+    assert culprits[4]["pid"] == 4
     assert culprits[4]["command"] == "proc4"
 
 
@@ -476,3 +484,69 @@ def test_identify_culprits_no_rogues():
     culprits = identify_culprits(contents)
 
     assert culprits == []
+
+
+def test_identify_culprits_differentiates_by_pid():
+    """identify_culprits treats processes with same command but different PIDs as separate.
+
+    Two Chrome processes with different PIDs should appear as separate entries,
+    not be merged together.
+    """
+    rogues = [
+        make_process_score(pid=1001, command="Chrome", score=40),
+        make_process_score(pid=1002, command="Chrome", score=25),
+    ]
+    samples = make_process_samples(rogues=rogues)
+    ring_sample = RingSample(samples=samples, tier=2)
+    contents = BufferContents(samples=(ring_sample,))
+
+    culprits = identify_culprits(contents)
+
+    # Should have both Chrome processes as separate entries
+    assert len(culprits) == 2
+    # Sorted by score descending
+    assert culprits[0]["pid"] == 1001
+    assert culprits[0]["command"] == "Chrome"
+    assert culprits[0]["score"] == 40
+    assert culprits[1]["pid"] == 1002
+    assert culprits[1]["command"] == "Chrome"
+    assert culprits[1]["score"] == 25
+
+
+def test_identify_culprits_peak_by_pid_not_command():
+    """Peak scoring is per-PID, not per-command.
+
+    If two Chrome processes exist, each should have its own peak score tracked.
+    """
+    now = datetime.now()
+    samples = [
+        make_process_samples(
+            rogues=[
+                make_process_score(pid=1001, command="Chrome", score=30),
+                make_process_score(pid=1002, command="Chrome", score=20),
+            ],
+            timestamp=now - timedelta(seconds=1),
+        ),
+        make_process_samples(
+            rogues=[
+                make_process_score(pid=1001, command="Chrome", score=25),  # Lower than peak
+                make_process_score(pid=1002, command="Chrome", score=35),  # New peak for 1002
+            ],
+            timestamp=now,
+        ),
+    ]
+    ring_samples = tuple(RingSample(samples=s, tier=2) for s in samples)
+    contents = BufferContents(samples=ring_samples)
+
+    culprits = identify_culprits(contents)
+
+    # Should have two separate Chrome entries with their respective peaks
+    assert len(culprits) == 2
+    # pid=1002 has higher peak (35), so it should be first
+    assert culprits[0]["pid"] == 1002
+    assert culprits[0]["command"] == "Chrome"
+    assert culprits[0]["score"] == 35
+    # pid=1001 has peak of 30
+    assert culprits[1]["pid"] == 1001
+    assert culprits[1]["command"] == "Chrome"
+    assert culprits[1]["score"] == 30

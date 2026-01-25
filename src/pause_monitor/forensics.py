@@ -96,21 +96,24 @@ def identify_culprits(contents: "BufferContents") -> list[dict]:
         contents: Frozen ring buffer contents with samples
 
     Returns:
-        List of {"command": str, "score": int, "categories": [str]}
-        sorted by score descending, limited to top 5
+        List of {"pid": int, "command": str, "score": int, "categories": [str]}
+        sorted by score descending, limited to top 5.
+        Processes are keyed by PID, so two processes with the same command
+        but different PIDs are treated as separate entries.
     """
     if not contents.samples:
         return []
 
-    # Track max score per process (keyed by command name)
+    # Track max score per process (keyed by PID)
     # Processes can appear in multiple samples; we want peak score
-    peak_scores: dict[str, dict] = {}
+    peak_scores: dict[int, dict] = {}
 
     for sample in contents.samples:
         for rogue in sample.samples.rogues:
-            existing = peak_scores.get(rogue.command)
+            existing = peak_scores.get(rogue.pid)
             if existing is None or rogue.score > existing["score"]:
-                peak_scores[rogue.command] = {
+                peak_scores[rogue.pid] = {
+                    "pid": rogue.pid,
                     "command": rogue.command,
                     "score": rogue.score,
                     "categories": list(rogue.categories),
