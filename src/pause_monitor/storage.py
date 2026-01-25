@@ -1,6 +1,5 @@
 """SQLite storage layer for pause-monitor."""
 
-import json
 import sqlite3
 import time
 from dataclasses import dataclass
@@ -10,7 +9,6 @@ from pathlib import Path
 import structlog
 
 from pause_monitor.collector import ProcessSamples
-from pause_monitor.stress import StressBreakdown
 
 log = structlog.get_logger()
 
@@ -171,114 +169,6 @@ def get_schema_version(conn: sqlite3.Connection) -> int:
 
 
 @dataclass
-class Sample:
-    """Single metrics sample - matches Data Dictionary exactly."""
-
-    timestamp: datetime
-    interval: float  # elapsed_ns / 1e9
-
-    # System metrics (not from powermetrics)
-    load_avg: float | None  # os.getloadavg()[0]
-    mem_pressure: int | None  # sysctl kern.memorystatus_level (0-100)
-
-    # From PowermetricsResult
-    throttled: bool | None
-    cpu_power: float | None
-    gpu_pct: float | None
-    gpu_power: float | None
-    io_read_per_s: float | None
-    io_write_per_s: float | None
-    wakeups_per_s: float | None
-    pageins_per_s: float | None  # CRITICAL for pause detection
-
-    # Computed stress breakdown (includes stress_pageins)
-    stress: StressBreakdown
-
-
-def insert_sample(conn: sqlite3.Connection, sample: Sample) -> int:
-    """Insert a sample and return its ID."""
-    cursor = conn.execute(
-        """
-        INSERT INTO samples (
-            timestamp, interval, load_avg, mem_pressure,
-            throttled, cpu_power, gpu_pct, gpu_power,
-            io_read_per_s, io_write_per_s, wakeups_per_s, pageins_per_s,
-            stress_total, stress_load, stress_memory, stress_thermal,
-            stress_latency, stress_io, stress_gpu, stress_wakeups, stress_pageins
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            sample.timestamp.timestamp(),
-            sample.interval,
-            sample.load_avg,
-            sample.mem_pressure,
-            int(sample.throttled) if sample.throttled is not None else None,
-            sample.cpu_power,
-            sample.gpu_pct,
-            sample.gpu_power,
-            sample.io_read_per_s,
-            sample.io_write_per_s,
-            sample.wakeups_per_s,
-            sample.pageins_per_s,
-            sample.stress.total,
-            sample.stress.load,
-            sample.stress.memory,
-            sample.stress.thermal,
-            sample.stress.latency,
-            sample.stress.io,
-            sample.stress.gpu,
-            sample.stress.wakeups,
-            sample.stress.pageins,
-        ),
-    )
-    conn.commit()
-    return cursor.lastrowid
-
-
-def get_recent_samples(conn: sqlite3.Connection, limit: int = 100) -> list[Sample]:
-    """Get most recent samples."""
-    rows = conn.execute(
-        """
-        SELECT timestamp, interval, load_avg, mem_pressure,
-               throttled, cpu_power, gpu_pct, gpu_power,
-               io_read_per_s, io_write_per_s, wakeups_per_s, pageins_per_s,
-               stress_total, stress_load, stress_memory, stress_thermal,
-               stress_latency, stress_io, stress_gpu, stress_wakeups, stress_pageins
-        FROM samples ORDER BY timestamp DESC LIMIT ?
-        """,
-        (limit,),
-    ).fetchall()
-
-    return [
-        Sample(
-            timestamp=datetime.fromtimestamp(row[0]),
-            interval=row[1],
-            load_avg=row[2],
-            mem_pressure=row[3],
-            throttled=bool(row[4]) if row[4] is not None else None,
-            cpu_power=row[5],
-            gpu_pct=row[6],
-            gpu_power=row[7],
-            io_read_per_s=row[8],
-            io_write_per_s=row[9],
-            wakeups_per_s=row[10],
-            pageins_per_s=row[11],
-            stress=StressBreakdown(
-                load=row[13] or 0,
-                memory=row[14] or 0,
-                thermal=row[15] or 0,
-                latency=row[16] or 0,
-                io=row[17] or 0,
-                gpu=row[18] or 0,
-                wakeups=row[19] or 0,
-                pageins=row[20] or 0,
-            ),
-        )
-        for row in rows
-    ]
-
-
-@dataclass
 class Event:
     """Escalation event (tier 1 → elevated → tier 1 episode)."""
 
@@ -288,37 +178,6 @@ class Event:
     peak_tier: int | None = None  # Highest tier reached (2 or 3)
     status: str = "unreviewed"
     notes: str | None = None
-    id: int | None = None
-
-
-@dataclass
-class EventSample:
-    """Sample captured during an escalation event."""
-
-    event_id: int
-    timestamp: datetime
-    tier: int  # 2=peak save, 3=continuous save
-
-    # Metrics from PowermetricsResult
-    elapsed_ns: int
-    throttled: bool
-    cpu_power: float | None
-    gpu_pct: float | None
-    gpu_power: float | None
-    io_read_per_s: float
-    io_write_per_s: float
-    wakeups_per_s: float
-    pageins_per_s: float
-
-    # Stress breakdown
-    stress: StressBreakdown
-
-    # Top 5 processes (already parsed from JSON)
-    top_cpu_procs: list[dict]
-    top_pagein_procs: list[dict]
-    top_wakeup_procs: list[dict]
-    top_diskio_procs: list[dict]
-
     id: int | None = None
 
 
@@ -358,51 +217,6 @@ def finalize_event(
         (end_timestamp.timestamp(), peak_stress, peak_tier, event_id),
     )
     conn.commit()
-
-
-def insert_event_sample(conn: sqlite3.Connection, sample: EventSample) -> int:
-    """Insert an event sample and return its ID."""
-    cursor = conn.execute(
-        """
-        INSERT INTO event_samples (
-            event_id, timestamp, tier,
-            elapsed_ns, throttled, cpu_power, gpu_pct, gpu_power,
-            io_read_per_s, io_write_per_s, wakeups_per_s, pageins_per_s,
-            stress_total, stress_load, stress_memory, stress_thermal,
-            stress_latency, stress_io, stress_gpu, stress_wakeups, stress_pageins,
-            top_cpu_procs, top_pagein_procs, top_wakeup_procs, top_diskio_procs
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            sample.event_id,
-            sample.timestamp.timestamp(),
-            sample.tier,
-            sample.elapsed_ns,
-            int(sample.throttled),
-            sample.cpu_power,
-            sample.gpu_pct,
-            sample.gpu_power,
-            sample.io_read_per_s,
-            sample.io_write_per_s,
-            sample.wakeups_per_s,
-            sample.pageins_per_s,
-            sample.stress.total,
-            sample.stress.load,
-            sample.stress.memory,
-            sample.stress.thermal,
-            sample.stress.latency,
-            sample.stress.io,
-            sample.stress.gpu,
-            sample.stress.wakeups,
-            sample.stress.pageins,
-            json.dumps(sample.top_cpu_procs),
-            json.dumps(sample.top_pagein_procs),
-            json.dumps(sample.top_wakeup_procs),
-            json.dumps(sample.top_diskio_procs),
-        ),
-    )
-    conn.commit()
-    return cursor.lastrowid
 
 
 def get_events(
@@ -474,55 +288,6 @@ def get_event_by_id(conn: sqlite3.Connection, event_id: int) -> Event | None:
         status=row[5] or "unreviewed",
         notes=row[6],
     )
-
-
-def get_event_samples(conn: sqlite3.Connection, event_id: int) -> list[EventSample]:
-    """Get all samples for an event."""
-    rows = conn.execute(
-        """
-        SELECT id, event_id, timestamp, tier,
-               elapsed_ns, throttled, cpu_power, gpu_pct, gpu_power,
-               io_read_per_s, io_write_per_s, wakeups_per_s, pageins_per_s,
-               stress_total, stress_load, stress_memory, stress_thermal,
-               stress_latency, stress_io, stress_gpu, stress_wakeups, stress_pageins,
-               top_cpu_procs, top_pagein_procs, top_wakeup_procs, top_diskio_procs
-        FROM event_samples WHERE event_id = ? ORDER BY timestamp
-        """,
-        (event_id,),
-    ).fetchall()
-
-    return [
-        EventSample(
-            id=row[0],
-            event_id=row[1],
-            timestamp=datetime.fromtimestamp(row[2]),
-            tier=row[3],
-            elapsed_ns=row[4] or 0,
-            throttled=bool(row[5]),
-            cpu_power=row[6],
-            gpu_pct=row[7],
-            gpu_power=row[8],
-            io_read_per_s=row[9] or 0.0,
-            io_write_per_s=row[10] or 0.0,
-            wakeups_per_s=row[11] or 0.0,
-            pageins_per_s=row[12] or 0.0,
-            stress=StressBreakdown(
-                load=row[14] or 0,
-                memory=row[15] or 0,
-                thermal=row[16] or 0,
-                latency=row[17] or 0,
-                io=row[18] or 0,
-                gpu=row[19] or 0,
-                wakeups=row[20] or 0,
-                pageins=row[21] or 0,
-            ),
-            top_cpu_procs=json.loads(row[22]) if row[22] else [],
-            top_pagein_procs=json.loads(row[23]) if row[23] else [],
-            top_wakeup_procs=json.loads(row[24]) if row[24] else [],
-            top_diskio_procs=json.loads(row[25]) if row[25] else [],
-        )
-        for row in rows
-    ]
 
 
 def insert_process_sample(

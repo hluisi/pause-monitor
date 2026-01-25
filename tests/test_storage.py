@@ -8,13 +8,11 @@ import pytest
 
 from pause_monitor.storage import (
     SCHEMA_VERSION,
-    Sample,
     create_event,
     finalize_event,
     get_schema_version,
     init_database,
 )
-from pause_monitor.stress import StressBreakdown
 
 
 def create_test_event(
@@ -42,29 +40,6 @@ def create_test_event(
     if status != "unreviewed":
         update_event_status(conn, event_id, status)
     return event_id
-
-
-def make_test_sample(**kwargs) -> Sample:
-    """Create Sample with sensible defaults for testing."""
-    defaults = {
-        "timestamp": datetime.now(),
-        "interval": 0.1,
-        "load_avg": 1.0,
-        "mem_pressure": 50,
-        "throttled": False,
-        "cpu_power": 5.0,
-        "gpu_pct": 10.0,
-        "gpu_power": 1.0,
-        "io_read_per_s": 1000.0,
-        "io_write_per_s": 500.0,
-        "wakeups_per_s": 50.0,
-        "pageins_per_s": 0.0,
-        "stress": StressBreakdown(
-            load=0, memory=0, thermal=0, latency=0, io=0, gpu=0, wakeups=0, pageins=0
-        ),
-    }
-    defaults.update(kwargs)
-    return Sample(**defaults)
 
 
 def test_init_database_creates_file(tmp_path: Path):
@@ -112,93 +87,6 @@ def test_init_database_sets_schema_version(tmp_path: Path):
     version = get_schema_version(conn)
     conn.close()
     assert version == SCHEMA_VERSION
-
-
-def test_sample_dataclass_fields():
-    """Sample has correct fields matching Data Dictionary."""
-    sample = make_test_sample(
-        interval=5.0,
-        load_avg=1.5,
-        mem_pressure=45,
-        throttled=False,
-        cpu_power=5.2,
-        gpu_pct=10.0,
-        gpu_power=1.5,
-        io_read_per_s=1024.0,
-        io_write_per_s=512.0,
-        wakeups_per_s=150.0,
-        pageins_per_s=0.0,
-        stress=StressBreakdown(
-            load=10, memory=5, thermal=0, latency=0, io=0, gpu=0, wakeups=0, pageins=0
-        ),
-    )
-    assert sample.io_read_per_s == 1024.0
-    assert sample.wakeups_per_s == 150.0
-    assert sample.pageins_per_s == 0.0
-    assert sample.mem_pressure == 45
-    assert sample.stress.total == 15
-
-    # Removed fields don't exist
-    assert not hasattr(sample, "io_read")
-    assert not hasattr(sample, "io_write")
-    assert not hasattr(sample, "net_sent")
-    assert not hasattr(sample, "net_recv")
-    assert not hasattr(sample, "cpu_pct")
-    assert not hasattr(sample, "cpu_freq")
-    assert not hasattr(sample, "cpu_temp")
-    assert not hasattr(sample, "mem_available")
-    assert not hasattr(sample, "swap_used")
-
-
-def test_insert_sample(initialized_db: Path, sample_stress):
-    """insert_sample stores sample in database."""
-    from pause_monitor.storage import insert_sample
-
-    sample = make_test_sample(
-        interval=5.0,
-        load_avg=1.5,
-        mem_pressure=50,
-        throttled=False,
-        cpu_power=5.0,
-        gpu_pct=10.0,
-        gpu_power=1.0,
-        io_read_per_s=1000.0,
-        io_write_per_s=500.0,
-        wakeups_per_s=50.0,
-        pageins_per_s=0.0,
-        stress=sample_stress,
-    )
-
-    conn = sqlite3.connect(initialized_db)
-    sample_id = insert_sample(conn, sample)
-    conn.close()
-
-    assert sample_id > 0
-
-
-def test_get_recent_samples(initialized_db: Path, sample_stress):
-    """get_recent_samples returns samples in reverse chronological order."""
-    from pause_monitor.storage import get_recent_samples, insert_sample
-
-    conn = sqlite3.connect(initialized_db)
-
-    for i in range(5):
-        sample = make_test_sample(
-            timestamp=datetime.fromtimestamp(1000000 + i * 5),
-            interval=5.0,
-            load_avg=1.0 + i * 0.1,  # Varying load for verification
-            mem_pressure=50,
-            stress=sample_stress,
-        )
-        insert_sample(conn, sample)
-
-    samples = get_recent_samples(conn, limit=3)
-    conn.close()
-
-    assert len(samples) == 3
-    # Most recent has highest load_avg (1.4)
-    assert samples[0].load_avg == pytest.approx(1.4, rel=0.01)
-    assert samples[2].load_avg == pytest.approx(1.2, rel=0.01)
 
 
 def test_event_dataclass():
@@ -345,59 +233,6 @@ def test_prune_only_deletes_prunable_events(initialized_db: Path):
 
     assert events_deleted == 2
     assert count == 2  # unreviewed and pinned remain
-
-
-def test_prune_deletes_event_samples_with_events(initialized_db: Path):
-    """prune_old_data deletes event_samples linked to pruned events."""
-    import time
-
-    from pause_monitor.storage import EventSample, insert_event_sample, prune_old_data
-    from pause_monitor.stress import StressBreakdown
-
-    conn = sqlite3.connect(initialized_db)
-
-    # Insert old event (100 days ago) with reviewed status (prunable)
-    old_time = datetime.fromtimestamp(time.time() - 100 * 86400)
-    event_id = create_test_event(conn, start_time=old_time, status="reviewed")
-
-    # Insert an event sample linked to the event
-    stress = StressBreakdown(load=10, memory=5, thermal=0, latency=0, io=0, gpu=0, wakeups=0)
-    sample = EventSample(
-        event_id=event_id,
-        timestamp=old_time,
-        tier=2,
-        elapsed_ns=100_000_000,
-        throttled=False,
-        cpu_power=5.0,
-        gpu_pct=10.0,
-        gpu_power=1.0,
-        io_read_per_s=1000.0,
-        io_write_per_s=500.0,
-        wakeups_per_s=50.0,
-        pageins_per_s=0.0,
-        stress=stress,
-        top_cpu_procs=[],
-        top_pagein_procs=[],
-        top_wakeup_procs=[],
-        top_diskio_procs=[],
-    )
-    insert_event_sample(conn, sample)
-
-    # Verify event sample exists
-    sample_count_before = conn.execute("SELECT COUNT(*) FROM event_samples").fetchone()[0]
-    assert sample_count_before == 1
-
-    # Prune
-    events_deleted = prune_old_data(conn, events_days=90)
-
-    # Verify event sample was deleted along with event
-    sample_count_after = conn.execute("SELECT COUNT(*) FROM event_samples").fetchone()[0]
-    event_count = conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
-    conn.close()
-
-    assert events_deleted == 1
-    assert sample_count_after == 0
-    assert event_count == 0
 
 
 def test_prune_with_nothing_to_delete(initialized_db: Path):
@@ -590,33 +425,6 @@ def test_get_events_returns_status(initialized_db: Path):
     assert len(events) == 1
     assert events[0].status == "pinned"
     assert events[0].notes == "Test note"
-
-
-# --- Status-Aware Pruning Tests ---
-
-
-def test_insert_sample_with_gpu_and_wakeups(initialized_db: Path):
-    """Samples store and retrieve GPU and wakeups stress correctly."""
-    from pause_monitor.storage import get_recent_samples, insert_sample
-
-    stress = StressBreakdown(
-        load=10, memory=5, thermal=0, latency=0, io=0, gpu=15, wakeups=12, pageins=0
-    )
-    sample = make_test_sample(
-        interval=1.0,
-        load_avg=2.0,
-        stress=stress,
-    )
-
-    conn = sqlite3.connect(initialized_db)
-    insert_sample(conn, sample)
-    samples = get_recent_samples(conn, limit=1)
-    conn.close()
-
-    assert samples[0].stress.gpu == 15
-    assert samples[0].stress.wakeups == 12
-    # Verify total includes gpu, wakeups, and pageins
-    assert samples[0].stress.total == 10 + 5 + 0 + 0 + 0 + 15 + 12 + 0
 
 
 def test_event_stores_peak_stress(initialized_db: Path):
