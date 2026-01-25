@@ -202,13 +202,14 @@ class TestEventsCommand:
             result = runner.invoke(main, ["events", "show", str(event_id)])
 
         assert result.exit_code == 0
-        # Verify ProcessSamples data is displayed
+        # Verify ProcessSamples data is displayed with timestamp
         assert "Samples captured: 1" in result.output
+        assert "14:30:01" in result.output  # timestamp
         assert "Tier 3" in result.output
         assert "Max Score: 75" in result.output
-        # Verify rogue processes are shown
-        assert "bad_process: 75" in result.output
-        assert "another_hog: 60" in result.output
+        # Verify rogue processes are shown with categories
+        assert "bad_process: 75 (cpu, pageins)" in result.output
+        assert "another_hog: 60 (mem, stuck)" in result.output
 
     def test_events_nonexistent_id(self, runner: CliRunner, tmp_path: Path) -> None:
         """events <id> with non-existent ID shows error."""

@@ -200,9 +200,13 @@ def events_show(ctx, event_id: int) -> None:
             click.echo(f"\nSamples captured: {len(samples)}")
 
             for sample in samples:
-                click.echo(f"  Tier {sample.tier} | Max Score: {sample.data.max_score}")
+                timestamp_str = sample.data.timestamp.strftime("%H:%M:%S")
+                click.echo(
+                    f"  {timestamp_str} | Tier {sample.tier} | Max Score: {sample.data.max_score}"
+                )
                 for rogue in sample.data.rogues[:5]:
-                    click.echo(f"    {rogue.command}: {rogue.score}")
+                    categories_str = ", ".join(sorted(rogue.categories))
+                    click.echo(f"    {rogue.command}: {rogue.score} ({categories_str})")
     finally:
         conn.close()
 
