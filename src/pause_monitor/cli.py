@@ -160,7 +160,7 @@ def events(ctx, limit: int, status: str | None) -> None:
 @click.pass_context
 def events_show(ctx, event_id: int) -> None:
     """Show details of a specific event."""
-    from pause_monitor.storage import get_connection, get_event_by_id, get_event_samples
+    from pause_monitor.storage import get_connection, get_event_by_id, get_process_samples
 
     config = ctx.obj["config"]
 
@@ -194,41 +194,15 @@ def events_show(ctx, event_id: int) -> None:
         if event.notes:
             click.echo(f"Notes: {event.notes}")
 
-        # Show samples captured during this event
-        samples = get_event_samples(conn, event_id)
+        # Show process samples captured during this event
+        samples = get_process_samples(conn, event_id)
         if samples:
             click.echo(f"\nSamples captured: {len(samples)}")
 
-            # Find the peak sample (highest stress)
-            peak_sample = max(samples, key=lambda s: s.stress.total if s.stress else 0)
-            if peak_sample.stress:
-                click.echo("\nPeak sample stress breakdown:")
-                click.echo(f"  Load: {peak_sample.stress.load}")
-                click.echo(f"  Memory: {peak_sample.stress.memory}")
-                click.echo(f"  Thermal: {peak_sample.stress.thermal}")
-                click.echo(f"  Latency: {peak_sample.stress.latency}")
-                click.echo(f"  I/O: {peak_sample.stress.io}")
-                click.echo(f"  GPU: {peak_sample.stress.gpu}")
-                click.echo(f"  Wakeups: {peak_sample.stress.wakeups}")
-                click.echo(f"  Page-ins: {peak_sample.stress.pageins}")
-
-            # Show top CPU processes from peak sample
-            if peak_sample.top_cpu_procs:
-                click.echo("\nTop CPU processes (at peak):")
-                for proc in peak_sample.top_cpu_procs[:5]:
-                    click.echo(
-                        f"  {proc.get('name', 'unknown')} (PID {proc.get('pid', 0)}): "
-                        f"{proc.get('cpu_ms_per_s', 0):.0f} ms/s"
-                    )
-
-            # Show top pagein processes if any
-            if peak_sample.top_pagein_procs:
-                click.echo("\nTop page-in processes (at peak):")
-                for proc in peak_sample.top_pagein_procs[:5]:
-                    click.echo(
-                        f"  {proc.get('name', 'unknown')} (PID {proc.get('pid', 0)}): "
-                        f"{proc.get('pageins_per_s', 0):.1f}/s"
-                    )
+            for sample in samples:
+                click.echo(f"  Tier {sample.tier} | Max Score: {sample.data.max_score}")
+                for rogue in sample.data.rogues[:5]:
+                    click.echo(f"    {rogue.command}: {rogue.score}")
     finally:
         conn.close()
 

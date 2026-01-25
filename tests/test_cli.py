@@ -9,8 +9,7 @@ from click.testing import CliRunner
 
 from pause_monitor.cli import main
 from pause_monitor.config import AlertsConfig, Config, RetentionConfig, SamplingConfig
-from pause_monitor.storage import Sample, create_event, finalize_event, init_database
-from pause_monitor.stress import StressBreakdown
+from pause_monitor.storage import create_event, finalize_event, init_database
 
 
 def create_test_event(
@@ -32,29 +31,6 @@ def create_test_event(
         peak_tier=peak_tier,
     )
     return event_id
-
-
-def make_test_sample(**kwargs) -> Sample:
-    """Create Sample with sensible defaults for testing."""
-    defaults = {
-        "timestamp": datetime.now(),
-        "interval": 0.1,
-        "load_avg": 1.0,
-        "mem_pressure": 50,
-        "throttled": False,
-        "cpu_power": 5.0,
-        "gpu_pct": 10.0,
-        "gpu_power": 1.0,
-        "io_read_per_s": 1000.0,
-        "io_write_per_s": 500.0,
-        "wakeups_per_s": 50.0,
-        "pageins_per_s": 0.0,
-        "stress": StressBreakdown(
-            load=0, memory=0, thermal=0, latency=0, io=0, gpu=0, wakeups=0, pageins=0
-        ),
-    }
-    defaults.update(kwargs)
-    return Sample(**defaults)
 
 
 @pytest.fixture
