@@ -135,6 +135,81 @@ class TestEventsCommand:
         assert "Peak Stress: 50/100" in result.output
         assert "Test pause event" in result.output
 
+    def test_events_show_displays_process_samples(self, runner: CliRunner, tmp_path: Path) -> None:
+        """events show <id> displays ProcessSamples data (tier, max_score, rogues)."""
+        from pause_monitor.collector import ProcessSamples, ProcessScore
+        from pause_monitor.storage import insert_process_sample
+
+        db_path = tmp_path / "data.db"
+        init_database(db_path)
+
+        # Create event with process samples
+        import sqlite3
+
+        conn = sqlite3.connect(db_path)
+        event_id = create_test_event(
+            conn,
+            start_time=datetime(2026, 1, 20, 14, 30, 0),
+            duration_seconds=5.0,
+            peak_stress=75,
+            peak_tier=3,
+        )
+
+        # Insert process samples with rogue processes
+        samples = ProcessSamples(
+            timestamp=datetime(2026, 1, 20, 14, 30, 1),
+            elapsed_ms=100,
+            process_count=150,
+            max_score=75,
+            rogues=[
+                ProcessScore(
+                    pid=1234,
+                    command="bad_process",
+                    cpu=95.0,
+                    state="running",
+                    mem=1024000,
+                    cmprs=512000,
+                    pageins=500,
+                    csw=1000,
+                    sysbsd=2000,
+                    threads=50,
+                    score=75,
+                    categories=frozenset({"cpu", "pageins"}),
+                ),
+                ProcessScore(
+                    pid=5678,
+                    command="another_hog",
+                    cpu=80.0,
+                    state="stuck",
+                    mem=2048000,
+                    cmprs=1024000,
+                    pageins=200,
+                    csw=500,
+                    sysbsd=1000,
+                    threads=30,
+                    score=60,
+                    categories=frozenset({"stuck", "mem"}),
+                ),
+            ],
+        )
+        insert_process_sample(conn, event_id, tier=3, samples=samples)
+        conn.close()
+
+        with patch("pause_monitor.config.Config.load") as mock_load:
+            mock_config = MagicMock(spec=Config)
+            mock_config.db_path = db_path
+            mock_load.return_value = mock_config
+            result = runner.invoke(main, ["events", "show", str(event_id)])
+
+        assert result.exit_code == 0
+        # Verify ProcessSamples data is displayed
+        assert "Samples captured: 1" in result.output
+        assert "Tier 3" in result.output
+        assert "Max Score: 75" in result.output
+        # Verify rogue processes are shown
+        assert "bad_process: 75" in result.output
+        assert "another_hog: 60" in result.output
+
     def test_events_nonexistent_id(self, runner: CliRunner, tmp_path: Path) -> None:
         """events <id> with non-existent ID shows error."""
         db_path = tmp_path / "data.db"

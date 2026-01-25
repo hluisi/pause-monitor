@@ -71,11 +71,11 @@ def status() -> None:
                 duration_str = "ongoing"
 
             tier_str = f"tier {event.peak_tier}" if event.peak_tier else "elevated"
-            stress_str = f"peak {event.peak_stress}" if event.peak_stress else ""
+            score_str = f"peak score {event.peak_stress}" if event.peak_stress else ""
 
             click.echo(
                 f"  - {event.start_timestamp.strftime('%H:%M:%S')}: "
-                f"{duration_str} {tier_str} {stress_str}"
+                f"{duration_str} {tier_str} {score_str}"
             )
     finally:
         conn.close()
