@@ -2,7 +2,6 @@
 
 import asyncio
 import json
-from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -72,21 +71,14 @@ class ForensicsCapture:
         data = {
             "samples": [
                 {
-                    "timestamp": s.timestamp.isoformat(),
-                    "stress": asdict(s.stress),
+                    "timestamp": s.samples.timestamp.isoformat(),
                     "tier": s.tier,
+                    "max_score": s.samples.max_score,
+                    "process_count": s.samples.process_count,
+                    "rogues": [p.to_dict() for p in s.samples.rogues],
                 }
                 for s in contents.samples
-            ],
-            "snapshots": [
-                {
-                    "timestamp": s.timestamp.isoformat(),
-                    "trigger": s.trigger,
-                    "by_cpu": [asdict(p) for p in s.by_cpu],
-                    "by_memory": [asdict(p) for p in s.by_memory],
-                }
-                for s in contents.snapshots
-            ],
+            ]
         }
 
         path = self.event_dir / "ring_buffer.json"
@@ -95,113 +87,38 @@ class ForensicsCapture:
 
 
 def identify_culprits(contents: "BufferContents") -> list[dict]:
-    """Identify culprits by correlating stress factors with process data.
+    """Identify top culprit processes from ring buffer samples.
 
-    Uses stress scores to identify WHICH factors are elevated (the "what"),
-    then maps those factors to the relevant processes (the "who").
+    With per-process scoring, rogues are already identified and scored.
+    This function aggregates across all samples to find the peak offenders.
 
     Args:
-        contents: Frozen ring buffer contents with samples and snapshots
+        contents: Frozen ring buffer contents with samples
 
     Returns:
-        List of {"factor": str, "score": int, "processes": [str]}
-        sorted by score descending
+        List of {"command": str, "score": int, "categories": [str]}
+        sorted by score descending, limited to top 5
     """
     if not contents.samples:
         return []
 
-    # Find MAX stress for each factor across all samples (spikes are transient)
-    max_stress: dict[str, float] = {
-        "load": 0,
-        "memory": 0,
-        "thermal": 0,
-        "latency": 0,
-        "io": 0,
-        "gpu": 0,
-        "wakeups": 0,
-        "pageins": 0,
-    }
+    # Track max score per process (keyed by command name)
+    # Processes can appear in multiple samples; we want peak score
+    peak_scores: dict[str, dict] = {}
 
     for sample in contents.samples:
-        if sample.stress:
-            max_stress["load"] = max(max_stress["load"], sample.stress.load)
-            max_stress["memory"] = max(max_stress["memory"], sample.stress.memory)
-            max_stress["thermal"] = max(max_stress["thermal"], sample.stress.thermal)
-            max_stress["latency"] = max(max_stress["latency"], sample.stress.latency)
-            max_stress["io"] = max(max_stress["io"], sample.stress.io)
-            max_stress["gpu"] = max(max_stress["gpu"], sample.stress.gpu)
-            max_stress["wakeups"] = max(max_stress["wakeups"], sample.stress.wakeups)
-            max_stress["pageins"] = max(max_stress["pageins"], sample.stress.pageins)
-
-    # Collect processes from snapshots (for load/memory factors)
-    cpu_processes: list[str] = []
-    memory_processes: list[str] = []
-    for snapshot in contents.snapshots:
-        for proc in snapshot.by_cpu:
-            if proc.name not in cpu_processes:
-                cpu_processes.append(proc.name)
-        for proc in snapshot.by_memory:
-            if proc.name not in memory_processes:
-                memory_processes.append(proc.name)
-
-    # Collect per-process data from metrics (for pagein/wakeup/io factors)
-    pagein_processes: list[str] = []
-    wakeup_processes: list[str] = []
-    diskio_processes: list[str] = []
-
-    for sample in contents.samples:
-        if not sample.metrics:
-            continue
-
-        # Top pagein processes
-        if sample.metrics.top_pagein_processes:
-            for proc in sample.metrics.top_pagein_processes:
-                name = proc.get("name", "?")
-                if name not in pagein_processes:
-                    pagein_processes.append(name)
-
-        # Top wakeup processes
-        if sample.metrics.top_wakeup_processes:
-            for proc in sample.metrics.top_wakeup_processes:
-                name = proc.get("name", "?")
-                if name not in wakeup_processes:
-                    wakeup_processes.append(name)
-
-        # Top disk I/O processes
-        if sample.metrics.top_diskio_processes:
-            for proc in sample.metrics.top_diskio_processes:
-                name = proc.get("name", "?")
-                if name not in diskio_processes:
-                    diskio_processes.append(name)
-
-    # Map factors to their relevant process source
-    factor_to_processes = {
-        "load": cpu_processes,
-        "memory": memory_processes,
-        "thermal": cpu_processes,  # Thermal stress from CPU-heavy processes
-        "latency": cpu_processes,  # Latency often from CPU contention
-        "io": diskio_processes if diskio_processes else cpu_processes,
-        "gpu": cpu_processes,  # GPU stress from compute-heavy processes
-        "wakeups": wakeup_processes if wakeup_processes else cpu_processes,
-        "pageins": pagein_processes if pagein_processes else cpu_processes,
-    }
-
-    # Build culprits list for factors above threshold
-    threshold = 10  # Minimum score to be considered a culprit
-    culprits = []
-
-    for factor, score in max_stress.items():
-        if score >= threshold:
-            processes = factor_to_processes.get(factor, [])[:5]
-            culprits.append(
-                {
-                    "factor": factor,
-                    "score": int(score),
-                    "processes": processes,
+        for rogue in sample.samples.rogues:
+            existing = peak_scores.get(rogue.command)
+            if existing is None or rogue.score > existing["score"]:
+                peak_scores[rogue.command] = {
+                    "command": rogue.command,
+                    "score": rogue.score,
+                    "categories": list(rogue.categories),
                 }
-            )
 
-    return sorted(culprits, key=lambda c: c["score"], reverse=True)
+    # Sort by score descending and return top 5
+    culprits = sorted(peak_scores.values(), key=lambda c: c["score"], reverse=True)
+    return culprits[:5]
 
 
 async def capture_spindump(event_dir: Path, timeout: float = 30.0) -> bool:

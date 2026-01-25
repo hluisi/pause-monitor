@@ -1,42 +1,80 @@
 """Tests for forensics capture."""
 
 import asyncio
-from datetime import datetime
+import json
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from pause_monitor.collector import PowermetricsResult
+from pause_monitor.collector import ProcessSamples, ProcessScore
 from pause_monitor.forensics import (
     ForensicsCapture,
     capture_spindump,
     capture_system_logs,
     capture_tailspin,
     create_event_dir,
+    identify_culprits,
     run_full_capture,
 )
+from pause_monitor.ringbuffer import BufferContents, RingBuffer, RingSample
 
 
-def make_test_metrics(**kwargs) -> PowermetricsResult:
-    """Create PowermetricsResult with sensible defaults for testing."""
+def make_process_score(
+    pid: int = 1,
+    command: str = "test",
+    cpu: float = 50.0,
+    score: int = 25,
+    categories: frozenset[str] | None = None,
+    **kwargs,
+) -> ProcessScore:
+    """Create ProcessScore with sensible defaults for testing."""
     defaults = {
-        "elapsed_ns": 100_000_000,
-        "throttled": False,
-        "cpu_power": 5.0,
-        "gpu_pct": 10.0,
-        "gpu_power": 1.0,
-        "io_read_per_s": 1000.0,
-        "io_write_per_s": 500.0,
-        "wakeups_per_s": 50.0,
-        "pageins_per_s": 0.0,
-        "top_cpu_processes": [],
-        "top_pagein_processes": [],
-        "top_wakeup_processes": [],
-        "top_diskio_processes": [],
+        "state": "running",
+        "mem": 100 * 1024 * 1024,  # 100MB
+        "cmprs": 10 * 1024 * 1024,  # 10MB
+        "pageins": 100,
+        "csw": 1000,
+        "sysbsd": 500,
+        "threads": 10,
     }
     defaults.update(kwargs)
-    return PowermetricsResult(**defaults)
+    return ProcessScore(
+        pid=pid,
+        command=command,
+        cpu=cpu,
+        state=defaults["state"],
+        mem=defaults["mem"],
+        cmprs=defaults["cmprs"],
+        pageins=defaults["pageins"],
+        csw=defaults["csw"],
+        sysbsd=defaults["sysbsd"],
+        threads=defaults["threads"],
+        score=score,
+        categories=categories or frozenset({"cpu"}),
+    )
+
+
+def make_process_samples(
+    rogues: list[ProcessScore] | None = None,
+    max_score: int | None = None,
+    process_count: int = 100,
+    elapsed_ms: int = 50,
+    timestamp: datetime | None = None,
+) -> ProcessSamples:
+    """Create ProcessSamples with sensible defaults for testing."""
+    if rogues is None:
+        rogues = []
+    if max_score is None:
+        max_score = max((r.score for r in rogues), default=0)
+    return ProcessSamples(
+        timestamp=timestamp or datetime.now(),
+        elapsed_ms=elapsed_ms,
+        process_count=process_count,
+        max_score=max_score,
+        rogues=rogues,
+    )
 
 
 def test_create_event_dir(tmp_path: Path):
@@ -265,21 +303,15 @@ async def test_run_full_capture_orchestrates_all(tmp_path: Path):
                 mock_logs.assert_called_once_with(event_dir, window_seconds=60)
 
 
-@pytest.mark.skip(reason="Needs forensics.py update for per-process scoring (Task 13)")
 def test_forensics_capture_includes_ring_buffer(tmp_path):
     """ForensicsCapture writes ring buffer contents to event dir."""
-    import json
-
-    from pause_monitor.forensics import ForensicsCapture
-    from pause_monitor.ringbuffer import RingBuffer
-    from pause_monitor.stress import StressBreakdown
-
     # Create buffer with samples
     buffer = RingBuffer(max_samples=10)
-    metrics = make_test_metrics()
-    stress = StressBreakdown(load=10, memory=5, thermal=0, latency=0, io=0, gpu=0, wakeups=0)
-    buffer.push(metrics, stress, tier=1)
-    buffer.push(metrics, stress, tier=2)
+    rogue = make_process_score(command="chrome", score=25, categories=frozenset({"cpu", "mem"}))
+    samples1 = make_process_samples(rogues=[rogue], max_score=25)
+    samples2 = make_process_samples(rogues=[rogue], max_score=25)
+    buffer.push(samples1, tier=1)
+    buffer.push(samples2, tier=2)
     frozen = buffer.freeze()
 
     # Create capture with buffer
@@ -296,48 +328,31 @@ def test_forensics_capture_includes_ring_buffer(tmp_path):
     # Verify sample structure
     sample = data["samples"][0]
     assert "timestamp" in sample
-    assert "stress" in sample
     assert "tier" in sample
+    assert "max_score" in sample
+    assert "process_count" in sample
+    assert "rogues" in sample
     assert sample["tier"] == 1
-    assert sample["stress"]["load"] == 10
+    assert sample["max_score"] == 25
 
-    # Verify snapshots key exists (empty in this test)
-    assert "snapshots" in data
-    assert data["snapshots"] == []
+    # Verify rogues structure
+    assert len(sample["rogues"]) == 1
+    rogue_data = sample["rogues"][0]
+    assert rogue_data["command"] == "chrome"
+    assert rogue_data["score"] == 25
+    assert set(rogue_data["categories"]) == {"cpu", "mem"}
 
 
-@pytest.mark.skip(reason="Needs forensics.py update for per-process scoring (Task 13)")
-def test_forensics_capture_ring_buffer_with_snapshots(tmp_path):
-    """ForensicsCapture correctly serializes process snapshots."""
-    import json
-
-    from pause_monitor.forensics import ForensicsCapture
-    from pause_monitor.ringbuffer import ProcessInfo, ProcessSnapshot, RingBuffer
-    from pause_monitor.stress import StressBreakdown
-
-    # Create buffer with samples and a snapshot
+def test_forensics_capture_ring_buffer_with_multiple_rogues(tmp_path):
+    """ForensicsCapture correctly serializes multiple rogues."""
+    # Create buffer with samples containing multiple rogues
     buffer = RingBuffer(max_samples=10)
-    metrics = make_test_metrics()
-    stress = StressBreakdown(load=10, memory=5, thermal=0, latency=0, io=0, gpu=0, wakeups=0)
-    buffer.push(metrics, stress, tier=1)
-    buffer.push(metrics, stress, tier=2)
-
-    # Manually add a snapshot to test serialization
-    from datetime import datetime
-
-    snapshot = ProcessSnapshot(
-        timestamp=datetime.now(),
-        trigger="tier2_entry",
-        by_cpu=[
-            ProcessInfo(pid=123, name="chrome", cpu_pct=45.0, memory_mb=512.0),
-            ProcessInfo(pid=456, name="python", cpu_pct=30.0, memory_mb=256.0),
-        ],
-        by_memory=[
-            ProcessInfo(pid=123, name="chrome", cpu_pct=45.0, memory_mb=512.0),
-            ProcessInfo(pid=789, name="vscode", cpu_pct=5.0, memory_mb=1024.0),
-        ],
-    )
-    buffer._snapshots.append(snapshot)
+    rogues = [
+        make_process_score(pid=123, command="chrome", cpu=45.0, score=30),
+        make_process_score(pid=456, command="python", cpu=30.0, score=20),
+    ]
+    samples = make_process_samples(rogues=rogues, max_score=30)
+    buffer.push(samples, tier=2)
     frozen = buffer.freeze()
 
     # Create capture and write
@@ -348,241 +363,116 @@ def test_forensics_capture_ring_buffer_with_snapshots(tmp_path):
     data = json.loads((tmp_path / "ring_buffer.json").read_text())
 
     # Verify samples structure
-    assert len(data["samples"]) == 2
+    assert len(data["samples"]) == 1
     sample = data["samples"][0]
-    assert "timestamp" in sample
-    assert "stress" in sample
-    assert "tier" in sample
-    assert sample["tier"] == 1
-    assert sample["stress"]["load"] == 10
+    assert sample["tier"] == 2
+    assert sample["max_score"] == 30
 
-    # Verify snapshots structure
-    assert len(data["snapshots"]) == 1
-    snap = data["snapshots"][0]
-    assert "timestamp" in snap
-    assert snap["trigger"] == "tier2_entry"
-    assert len(snap["by_cpu"]) == 2
-    assert len(snap["by_memory"]) == 2
-    assert snap["by_cpu"][0]["name"] == "chrome"
-    assert snap["by_cpu"][0]["cpu_pct"] == 45.0
+    # Verify rogues
+    assert len(sample["rogues"]) == 2
+    assert sample["rogues"][0]["command"] == "chrome"
+    assert sample["rogues"][0]["cpu"] == 45.0
+    assert sample["rogues"][1]["command"] == "python"
 
 
-@pytest.mark.skip(reason="Needs forensics.py update for per-process scoring (Task 13)")
 def test_identify_culprits_from_buffer():
-    """identify_culprits correlates high stress factors with processes."""
-    from datetime import datetime
+    """identify_culprits returns top rogues by score."""
+    rogue = make_process_score(command="Chrome", score=30, categories=frozenset({"cpu", "mem"}))
+    samples = make_process_samples(rogues=[rogue])
+    ring_sample = RingSample(samples=samples, tier=2)
+    contents = BufferContents(samples=(ring_sample,))
 
-    from pause_monitor.forensics import identify_culprits
-    from pause_monitor.ringbuffer import BufferContents, ProcessInfo, ProcessSnapshot, RingSample
-    from pause_monitor.stress import StressBreakdown
-
-    # High memory stress
-    metrics = make_test_metrics()
-    samples = [
-        RingSample(
-            timestamp=datetime.now(),
-            metrics=metrics,
-            stress=StressBreakdown(load=5, memory=25, thermal=0, latency=0, io=0, gpu=0, wakeups=0),
-            tier=2,
-        )
-    ]
-
-    # Process snapshot with memory hog
-    snapshots = [
-        ProcessSnapshot(
-            timestamp=datetime.now(),
-            trigger="tier2_entry",
-            by_cpu=[],
-            by_memory=[ProcessInfo(pid=1, name="Chrome", cpu_pct=10, memory_mb=2048)],
-        )
-    ]
-
-    contents = BufferContents(samples=samples, snapshots=snapshots)
     culprits = identify_culprits(contents)
 
     assert len(culprits) == 1
-    assert culprits[0]["factor"] == "memory"
-    assert "Chrome" in culprits[0]["processes"]
+    assert culprits[0]["command"] == "Chrome"
+    assert culprits[0]["score"] == 30
+    assert set(culprits[0]["categories"]) == {"cpu", "mem"}
 
 
-@pytest.mark.skip(reason="Needs forensics.py update for per-process scoring (Task 13)")
-def test_identify_culprits_multiple_factors():
-    """identify_culprits returns multiple factors sorted by score."""
-    from datetime import datetime
-
-    from pause_monitor.forensics import identify_culprits
-    from pause_monitor.ringbuffer import BufferContents, ProcessInfo, ProcessSnapshot, RingSample
-    from pause_monitor.stress import StressBreakdown
-
-    # High load and memory stress
-    metrics = make_test_metrics()
-    samples = [
-        RingSample(
-            timestamp=datetime.now(),
-            metrics=metrics,
-            stress=StressBreakdown(
-                load=30, memory=15, thermal=0, latency=0, io=0, gpu=0, wakeups=0
-            ),
-            tier=2,
-        )
+def test_identify_culprits_multiple_processes():
+    """identify_culprits returns multiple processes sorted by score."""
+    rogues = [
+        make_process_score(command="python", score=30),
+        make_process_score(command="Chrome", score=15),
     ]
+    samples = make_process_samples(rogues=rogues)
+    ring_sample = RingSample(samples=samples, tier=2)
+    contents = BufferContents(samples=(ring_sample,))
 
-    snapshots = [
-        ProcessSnapshot(
-            timestamp=datetime.now(),
-            trigger="tier2_entry",
-            by_cpu=[ProcessInfo(pid=1, name="python", cpu_pct=150, memory_mb=500)],
-            by_memory=[ProcessInfo(pid=2, name="Chrome", cpu_pct=10, memory_mb=2048)],
-        )
-    ]
-
-    contents = BufferContents(samples=samples, snapshots=snapshots)
     culprits = identify_culprits(contents)
 
-    # Should have both factors, sorted by score (load=30 > memory=15)
+    # Should have both processes, sorted by score (python=30 > Chrome=15)
     assert len(culprits) == 2
-    assert culprits[0]["factor"] == "load"
+    assert culprits[0]["command"] == "python"
     assert culprits[0]["score"] == 30
-    assert culprits[1]["factor"] == "memory"
+    assert culprits[1]["command"] == "Chrome"
     assert culprits[1]["score"] == 15
 
 
-@pytest.mark.skip(reason="Needs forensics.py update for per-process scoring (Task 13)")
 def test_identify_culprits_empty_buffer():
     """identify_culprits returns empty list for empty buffer."""
-    from pause_monitor.forensics import identify_culprits
-    from pause_monitor.ringbuffer import BufferContents
+    contents = BufferContents(samples=())
 
-    contents = BufferContents(samples=[], snapshots=[])
     culprits = identify_culprits(contents)
 
     assert culprits == []
 
 
-@pytest.mark.skip(reason="Needs forensics.py update for per-process scoring (Task 13)")
 def test_identify_culprits_uses_peak_values():
-    """identify_culprits uses MAX (peak) stress, not averages.
+    """identify_culprits uses MAX (peak) score across samples.
 
-    This is important because stress spikes are transient - using averages
-    dilutes the signal when most of the 30-second buffer is idle.
+    If a process appears in multiple samples with different scores,
+    the peak score should be used.
     """
-    from datetime import datetime, timedelta
-
-    from pause_monitor.forensics import identify_culprits
-    from pause_monitor.ringbuffer import BufferContents, ProcessInfo, ProcessSnapshot, RingSample
-    from pause_monitor.stress import StressBreakdown
-
     now = datetime.now()
-    metrics = make_test_metrics()
-    # Three samples with memory stress: 20, 10, 0 -> MAX is 20
+    # Same process with different scores across samples
     samples = [
-        RingSample(
+        make_process_samples(
+            rogues=[make_process_score(command="Safari", score=20)],
             timestamp=now - timedelta(seconds=2),
-            metrics=metrics,
-            stress=StressBreakdown(load=0, memory=20, thermal=0, latency=0, io=0, gpu=0, wakeups=0),
-            tier=2,
         ),
-        RingSample(
+        make_process_samples(
+            rogues=[make_process_score(command="Safari", score=35)],  # Peak
             timestamp=now - timedelta(seconds=1),
-            metrics=metrics,
-            stress=StressBreakdown(load=0, memory=10, thermal=0, latency=0, io=0, gpu=0, wakeups=0),
-            tier=2,
         ),
-        RingSample(
+        make_process_samples(
+            rogues=[make_process_score(command="Safari", score=10)],
             timestamp=now,
-            metrics=metrics,
-            stress=StressBreakdown(load=0, memory=0, thermal=0, latency=0, io=0, gpu=0, wakeups=0),
-            tier=1,
         ),
     ]
+    ring_samples = tuple(RingSample(samples=s, tier=2) for s in samples)
+    contents = BufferContents(samples=ring_samples)
 
-    snapshots = [
-        ProcessSnapshot(
-            timestamp=now,
-            trigger="tier2_entry",
-            by_cpu=[],
-            by_memory=[ProcessInfo(pid=1, name="Safari", cpu_pct=5, memory_mb=1024)],
-        )
-    ]
-
-    contents = BufferContents(samples=samples, snapshots=snapshots)
     culprits = identify_culprits(contents)
 
-    # MAX memory is 20 (the peak), not average of 10
+    # Should use peak score of 35
     assert len(culprits) == 1
-    assert culprits[0]["factor"] == "memory"
-    assert culprits[0]["score"] == 20
+    assert culprits[0]["command"] == "Safari"
+    assert culprits[0]["score"] == 35
 
 
-@pytest.mark.skip(reason="Needs forensics.py update for per-process scoring (Task 13)")
-def test_identify_culprits_below_threshold():
-    """identify_culprits returns empty when all factors below threshold."""
-    from datetime import datetime
+def test_identify_culprits_limits_to_top_5():
+    """identify_culprits returns at most 5 culprits."""
+    rogues = [make_process_score(command=f"proc{i}", score=100 - i) for i in range(10)]
+    samples = make_process_samples(rogues=rogues)
+    ring_sample = RingSample(samples=samples, tier=2)
+    contents = BufferContents(samples=(ring_sample,))
 
-    from pause_monitor.forensics import identify_culprits
-    from pause_monitor.ringbuffer import BufferContents, ProcessInfo, ProcessSnapshot, RingSample
-    from pause_monitor.stress import StressBreakdown
+    culprits = identify_culprits(contents)
 
-    # All factors below threshold of 10
-    metrics = make_test_metrics()
-    samples = [
-        RingSample(
-            timestamp=datetime.now(),
-            metrics=metrics,
-            stress=StressBreakdown(load=5, memory=5, thermal=0, latency=0, io=5, gpu=5, wakeups=5),
-            tier=1,
-        )
-    ]
+    assert len(culprits) == 5
+    # Should be top 5 by score
+    assert culprits[0]["command"] == "proc0"
+    assert culprits[4]["command"] == "proc4"
 
-    snapshots = [
-        ProcessSnapshot(
-            timestamp=datetime.now(),
-            trigger="tier2_entry",
-            by_cpu=[ProcessInfo(pid=1, name="python", cpu_pct=50, memory_mb=500)],
-            by_memory=[ProcessInfo(pid=1, name="python", cpu_pct=50, memory_mb=500)],
-        )
-    ]
 
-    contents = BufferContents(samples=samples, snapshots=snapshots)
+def test_identify_culprits_no_rogues():
+    """identify_culprits handles samples with no rogues."""
+    samples = make_process_samples(rogues=[])
+    ring_sample = RingSample(samples=samples, tier=1)
+    contents = BufferContents(samples=(ring_sample,))
+
     culprits = identify_culprits(contents)
 
     assert culprits == []
-
-
-@pytest.mark.skip(reason="Needs forensics.py update for per-process scoring (Task 13)")
-def test_identify_culprits_gpu_factor():
-    """identify_culprits correctly identifies high GPU stress."""
-    from datetime import datetime
-
-    from pause_monitor.forensics import identify_culprits
-    from pause_monitor.ringbuffer import BufferContents, ProcessInfo, ProcessSnapshot, RingSample
-    from pause_monitor.stress import StressBreakdown
-
-    # High GPU stress (above threshold of 10)
-    metrics = make_test_metrics()
-    samples = [
-        RingSample(
-            timestamp=datetime.now(),
-            metrics=metrics,
-            stress=StressBreakdown(load=5, memory=5, thermal=0, latency=0, io=0, gpu=15, wakeups=0),
-            tier=2,
-        )
-    ]
-
-    snapshots = [
-        ProcessSnapshot(
-            timestamp=datetime.now(),
-            trigger="tier2_entry",
-            by_cpu=[ProcessInfo(pid=1, name="blender", cpu_pct=200, memory_mb=4096)],
-            by_memory=[ProcessInfo(pid=1, name="blender", cpu_pct=200, memory_mb=4096)],
-        )
-    ]
-
-    contents = BufferContents(samples=samples, snapshots=snapshots)
-    culprits = identify_culprits(contents)
-
-    # Should identify GPU factor with CPU processes (GPU-heavy processes typically high CPU)
-    assert len(culprits) == 1
-    assert culprits[0]["factor"] == "gpu"
-    assert culprits[0]["score"] == 15
-    assert "blender" in culprits[0]["processes"]
