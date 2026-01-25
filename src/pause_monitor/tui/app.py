@@ -275,7 +275,7 @@ class EventDetailScreen(Screen):
 
     def compose(self) -> ComposeResult:
         """Build the detail view layout."""
-        from pause_monitor.storage import get_event_by_id
+        from pause_monitor.storage import get_event_by_id, get_process_samples
 
         self._event = get_event_by_id(self._conn, self.event_id)
         if not self._event:
@@ -287,31 +287,45 @@ class EventDetailScreen(Screen):
         event = self._event
         status_icon = STATUS_ICONS.get(event.status, "?")
 
+        # Calculate duration
+        if event.end_timestamp:
+            duration = (event.end_timestamp - event.start_timestamp).total_seconds()
+            duration_str = f"{duration:.1f}s"
+            end_time_str = event.end_timestamp.strftime("%Y-%m-%d %H:%M:%S")
+        else:
+            duration_str = "ongoing"
+            end_time_str = "(ongoing)"
+
+        # Get rogue processes from stored samples
+        samples = get_process_samples(self._conn, self.event_id)
+        rogues: list[str] = []
+        if samples:
+            # Collect unique rogues across all samples, sorted by max score
+            rogue_map: dict[tuple[int, str], int] = {}  # (pid, command) -> max_score
+            for sample in samples:
+                for rogue in sample.data.rogues:
+                    key = (rogue.pid, rogue.command)
+                    if key not in rogue_map or rogue.score > rogue_map[key]:
+                        rogue_map[key] = rogue.score
+            # Sort by score descending, take top 10
+            sorted_rogues = sorted(rogue_map.items(), key=lambda x: x[1], reverse=True)[:10]
+            rogues = [f"{cmd} (PID {pid}, score {score})" for (pid, cmd), score in sorted_rogues]
+
         yield Vertical(
             Label(f"Event #{event.id} {status_icon}", classes="title"),
-            Label(f"Time: {event.timestamp.strftime('%Y-%m-%d %H:%M:%S')}"),
-            Label(f"Duration: {event.duration:.2f}s"),
+            Label(f"Start: {event.start_timestamp.strftime('%Y-%m-%d %H:%M:%S')}"),
+            Label(f"End: {end_time_str}"),
+            Label(f"Duration: {duration_str}"),
             Label(f"Status: {event.status}"),
-            Label("Stress Breakdown:", classes="section"),
-            Label(
-                f"  Total: {event.stress.total}  "
-                f"Load: {event.stress.load}  Memory: {event.stress.memory}  "
-                f"Thermal: {event.stress.thermal}  Latency: {event.stress.latency}  "
-                f"I/O: {event.stress.io}  GPU: {event.stress.gpu}  "
-                f"Wakeups: {event.stress.wakeups}"
-            ),
-            Label("Culprits:", classes="section"),
+            Label(f"Peak Tier: {event.peak_tier or '-'}"),
+            Label(f"Peak Score: {event.peak_stress or '-'}"),
+            Label("Top Rogues:", classes="section"),
             VerticalScroll(
-                *(
-                    [Label(f"  • {c}") for c in event.culprits]
-                    if event.culprits
-                    else [Label("  (none)")]
-                ),
+                *([Label(f"  {r}") for r in rogues] if rogues else [Label("  (none)")]),
                 classes="culprit-list",
             ),
             Label("Notes:", classes="section"),
             Label(f"  {event.notes or '(none)'}", classes="notes"),
-            Label(f"Event Dir: {event.event_dir or '(none)'}"),
         )
 
     def _update_status(self, new_status: str) -> None:
