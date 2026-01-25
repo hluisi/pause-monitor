@@ -41,10 +41,14 @@ class StressGauge(Static):
     }
     """
 
-    def __init__(self, **kwargs: Any) -> None:
+    def __init__(
+        self, elevated_threshold: int = 50, critical_threshold: int = 75, **kwargs: Any
+    ) -> None:
         super().__init__(**kwargs)
         self._score = 0
         self._connected = False
+        self._elevated_threshold = elevated_threshold
+        self._critical_threshold = critical_threshold
 
     def on_mount(self) -> None:
         """Show initial disconnected state."""
@@ -57,11 +61,11 @@ class StressGauge(Static):
         self.remove_class("disconnected")
         self.update(f"Score: {score:3d}/100 {'█' * (score // 5)}{'░' * (20 - score // 5)}")
 
-        # Update styling based on level
+        # Update styling based on tier thresholds
         self.remove_class("elevated", "critical")
-        if score >= 60:
+        if score >= self._critical_threshold:
             self.add_class("critical")
-        elif score >= 30:
+        elif score >= self._elevated_threshold:
             self.add_class("elevated")
 
     def set_disconnected(self) -> None:
@@ -165,7 +169,7 @@ class ProcessesPanel(Static):
         if self._table:
             self._table.clear()
 
-            for p in rogues[:10]:  # Show top 10
+            for p in rogues:
                 self._table.add_row(
                     p.get("command", "?")[:20],
                     str(p.get("score", 0)),
@@ -307,8 +311,8 @@ class EventDetailScreen(Screen):
                     key = (rogue.pid, rogue.command)
                     if key not in rogue_map or rogue.score > rogue_map[key]:
                         rogue_map[key] = rogue.score
-            # Sort by score descending, take top 10
-            sorted_rogues = sorted(rogue_map.items(), key=lambda x: x[1], reverse=True)[:10]
+            # Sort by score descending
+            sorted_rogues = sorted(rogue_map.items(), key=lambda x: x[1], reverse=True)
             rogues = [f"{cmd} (PID {pid}, score {score})" for (pid, cmd), score in sorted_rogues]
 
         yield Vertical(
@@ -726,7 +730,11 @@ class PauseMonitorApp(App):
         """Create the TUI layout."""
         yield Header()
 
-        yield StressGauge(id="stress-gauge")
+        yield StressGauge(
+            elevated_threshold=self.config.tiers.elevated_threshold,
+            critical_threshold=self.config.tiers.critical_threshold,
+            id="stress-gauge",
+        )
         yield SampleInfoPanel(id="sample-info")
         yield EventsTable(id="events")
         yield ProcessesPanel(id="processes")

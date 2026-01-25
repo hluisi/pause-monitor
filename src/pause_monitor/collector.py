@@ -246,17 +246,18 @@ class TopCollector:
         """Compute stressor score using config weights, then apply state multiplier."""
         weights = self.config.scoring.weights
         multipliers = self.config.scoring.state_multipliers
+        norm = self.config.scoring.normalization
 
-        # Normalize each metric to 0-1 scale
+        # Normalize each metric to 0-1 scale using configurable maximums
         normalized = {
-            "cpu": min(1.0, proc["cpu"] / 100.0),
+            "cpu": min(1.0, proc["cpu"] / norm.cpu),
             "state": self._normalize_state(proc["state"]),
-            "pageins": min(1.0, proc["pageins"] / 1000.0),
-            "mem": min(1.0, proc["mem"] / (8 * 1024**3)),  # 8GB
-            "cmprs": min(1.0, proc["cmprs"] / (1 * 1024**3)),  # 1GB
-            "csw": min(1.0, proc["csw"] / 100000.0),  # 100k
-            "sysbsd": min(1.0, proc["sysbsd"] / 100000.0),  # 100k
-            "threads": min(1.0, proc["threads"] / 1000.0),  # 1000
+            "pageins": min(1.0, proc["pageins"] / norm.pageins),
+            "mem": min(1.0, proc["mem"] / (norm.mem_gb * 1024**3)),
+            "cmprs": min(1.0, proc["cmprs"] / (norm.cmprs_gb * 1024**3)),
+            "csw": min(1.0, proc["csw"] / norm.csw),
+            "sysbsd": min(1.0, proc["sysbsd"] / norm.sysbsd),
+            "threads": min(1.0, proc["threads"] / norm.threads),
         }
 
         # Weighted sum (base score - what this process WOULD contribute if active)
@@ -330,13 +331,9 @@ class TopCollector:
             stderr=asyncio.subprocess.PIPE,
         )
 
-        try:
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=10.0)
-        except asyncio.TimeoutError:
-            proc.kill()
-            await proc.wait()
-            log.warning("top_timeout", timeout=10.0)
-            raise RuntimeError("top command timed out")
+        # No timeout - if the system is paused, top takes longer.
+        # That's exactly what we're measuring via elapsed_ms.
+        stdout, stderr = await proc.communicate()
 
         if proc.returncode != 0:
             stderr_text = stderr.decode(errors="replace")

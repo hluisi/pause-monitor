@@ -25,30 +25,24 @@ class TierAction(StrEnum):
 
 
 class TierManager:
-    """Manages tier transitions with hysteresis.
+    """Manages tier transitions based on score.
 
     Tier 1 (Sentinel): score < elevated_threshold
     Tier 2 (Elevated): elevated_threshold <= score < critical_threshold
     Tier 3 (Critical): score >= critical_threshold
-
-    De-escalation requires score below threshold for 5 seconds.
     """
 
     def __init__(
         self,
         elevated_threshold: int,
         critical_threshold: int,
-        deescalation_delay: float = 5.0,
     ) -> None:
         self._elevated_threshold = elevated_threshold
         self._critical_threshold = critical_threshold
-        self._deescalation_delay = deescalation_delay
 
         self._current_tier = Tier.SENTINEL
         self._tier2_entry_time: float | None = None
         self._tier3_entry_time: float | None = None
-        self._tier2_low_since: float | None = None
-        self._tier3_low_since: float | None = None
         self._peak_score = 0
 
     @property
@@ -77,57 +71,55 @@ class TierManager:
         Returns TierAction if state change occurred, None otherwise.
         """
         now = time.monotonic()
-        action: TierAction | None = None
 
-        # Check for escalation first (immediate)
-        if score >= self._critical_threshold and self._current_tier < Tier.CRITICAL:
-            self._current_tier = Tier.CRITICAL
-            self._tier3_entry_time = now
-            self._tier3_low_since = None
-            # Track peak on entry to tier 3 as well
-            if score > self._peak_score:
-                self._peak_score = score
-            return TierAction.TIER3_ENTRY
+        # Determine what tier this score belongs to
+        if score >= self._critical_threshold:
+            new_tier = Tier.CRITICAL
+        elif score >= self._elevated_threshold:
+            new_tier = Tier.ELEVATED
+        else:
+            new_tier = Tier.SENTINEL
 
-        if score >= self._elevated_threshold and self._current_tier < Tier.ELEVATED:
-            self._current_tier = Tier.ELEVATED
-            self._tier2_entry_time = now
-            self._tier2_low_since = None
-            self._peak_score = score
-            return TierAction.TIER2_ENTRY
-
-        # Track peak during elevated states (after escalation checks)
+        # Track peak during elevated states
         if self._current_tier >= Tier.ELEVATED and score > self._peak_score:
             self._peak_score = score
-            # Only emit peak action for Tier 2 - Tier 3 is already critical.
-            # Ring buffer triggers don't include "tier3_peak" by design.
-            if self._current_tier == Tier.ELEVATED:
-                action = TierAction.TIER2_PEAK
 
-        # Check for de-escalation with hysteresis
-        if self._current_tier == Tier.CRITICAL:
-            if score < self._critical_threshold:
-                if self._tier3_low_since is None:
-                    self._tier3_low_since = now
-                elif now - self._tier3_low_since >= self._deescalation_delay:
-                    self._current_tier = Tier.ELEVATED
-                    self._tier3_entry_time = None
-                    self._tier3_low_since = None
-                    return TierAction.TIER3_EXIT
-            else:
-                self._tier3_low_since = None
+        # No change
+        if new_tier == self._current_tier:
+            # Check for new peak in tier 2
+            if self._current_tier == Tier.ELEVATED and score == self._peak_score:
+                return TierAction.TIER2_PEAK
+            return None
 
-        if self._current_tier == Tier.ELEVATED:
-            if score < self._elevated_threshold:
-                if self._tier2_low_since is None:
-                    self._tier2_low_since = now
-                elif now - self._tier2_low_since >= self._deescalation_delay:
-                    self._current_tier = Tier.SENTINEL
-                    self._tier2_entry_time = None
-                    self._tier2_low_since = None
-                    self._peak_score = 0
-                    return TierAction.TIER2_EXIT
+        # Determine action based on transition
+        action: TierAction | None = None
+        old_tier = self._current_tier
+        self._current_tier = new_tier
+
+        if new_tier == Tier.CRITICAL:
+            self._tier3_entry_time = now
+            if old_tier < Tier.ELEVATED:
+                # Jumped straight to critical from sentinel
+                self._tier2_entry_time = now
+            self._peak_score = score
+            action = TierAction.TIER3_ENTRY
+
+        elif new_tier == Tier.ELEVATED:
+            if old_tier == Tier.SENTINEL:
+                # Entering elevated from sentinel
+                self._tier2_entry_time = now
+                self._peak_score = score
+                action = TierAction.TIER2_ENTRY
             else:
-                self._tier2_low_since = None
+                # Dropping from critical to elevated
+                self._tier3_entry_time = None
+                action = TierAction.TIER3_EXIT
+
+        else:  # new_tier == Tier.SENTINEL
+            # Dropping to sentinel
+            self._tier2_entry_time = None
+            self._tier3_entry_time = None
+            self._peak_score = 0
+            action = TierAction.TIER2_EXIT
 
         return action

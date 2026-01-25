@@ -12,8 +12,6 @@ class SamplingConfig:
 
     normal_interval: int = 5
     elevated_interval: int = 1
-    elevation_threshold: int = 30
-    critical_threshold: int = 60
 
 
 @dataclass
@@ -32,7 +30,6 @@ class AlertsConfig:
     pause_detected: bool = True
     pause_min_duration: float = 2.0
     critical_stress: bool = True
-    critical_threshold: int = 60
     critical_duration: int = 30
     elevated_entered: bool = False
     forensics_completed: bool = True
@@ -57,6 +54,15 @@ class SuspectsConfig:
 
 
 @dataclass
+class ForensicsConfig:
+    """Forensics capture timeout configuration."""
+
+    spindump_timeout: int = 30  # Seconds to wait for spindump
+    tailspin_timeout: int = 10  # Seconds to wait for tailspin
+    logs_timeout: int = 10  # Seconds to wait for system log capture
+
+
+@dataclass
 class SentinelConfig:
     """Sentinel timing configuration."""
 
@@ -64,6 +70,8 @@ class SentinelConfig:
     ring_buffer_seconds: int = 30
     pause_threshold_ratio: float = 2.0  # Latency ratio to detect pause
     peak_tracking_seconds: int = 30  # Interval to update peak stress
+    sample_interval_ms: int = 1500  # Expected time for top -l 2 -s 1
+    wake_suppress_seconds: float = 10.0  # Suppress pause detection after wake
 
 
 @dataclass
@@ -106,11 +114,29 @@ class StateMultipliers:
 
 
 @dataclass
+class NormalizationConfig:
+    """Maximum values for normalizing metrics to 0-1 scale.
+
+    Each value represents what counts as "maxed out" for that metric.
+    A process at this value scores 1.0 for that metric component.
+    """
+
+    cpu: float = 100.0  # Percentage (natural max)
+    mem_gb: float = 8.0  # Memory in gigabytes
+    cmprs_gb: float = 1.0  # Compressed memory in gigabytes
+    pageins: int = 1000  # Page-ins per sample
+    csw: int = 100000  # Context switches per sample
+    sysbsd: int = 100000  # Syscalls per sample
+    threads: int = 1000  # Thread count
+
+
+@dataclass
 class ScoringConfig:
     """Scoring configuration."""
 
     weights: ScoringWeights = field(default_factory=ScoringWeights)
     state_multipliers: StateMultipliers = field(default_factory=StateMultipliers)
+    normalization: NormalizationConfig = field(default_factory=NormalizationConfig)
 
 
 @dataclass
@@ -153,6 +179,7 @@ class Config:
     retention: RetentionConfig = field(default_factory=RetentionConfig)
     alerts: AlertsConfig = field(default_factory=AlertsConfig)
     suspects: SuspectsConfig = field(default_factory=SuspectsConfig)
+    forensics: ForensicsConfig = field(default_factory=ForensicsConfig)
     sentinel: SentinelConfig = field(default_factory=SentinelConfig)
     tiers: TiersConfig = field(default_factory=TiersConfig)
     scoring: ScoringConfig = field(default_factory=ScoringConfig)
@@ -211,8 +238,6 @@ class Config:
         sampling = tomlkit.table()
         sampling.add("normal_interval", self.sampling.normal_interval)
         sampling.add("elevated_interval", self.sampling.elevated_interval)
-        sampling.add("elevation_threshold", self.sampling.elevation_threshold)
-        sampling.add("critical_threshold", self.sampling.critical_threshold)
         doc.add("sampling", sampling)
         doc.add(tomlkit.nl())
 
@@ -227,7 +252,6 @@ class Config:
         alerts.add("pause_detected", self.alerts.pause_detected)
         alerts.add("pause_min_duration", self.alerts.pause_min_duration)
         alerts.add("critical_stress", self.alerts.critical_stress)
-        alerts.add("critical_threshold", self.alerts.critical_threshold)
         alerts.add("critical_duration", self.alerts.critical_duration)
         alerts.add("elevated_entered", self.alerts.elevated_entered)
         alerts.add("forensics_completed", self.alerts.forensics_completed)
@@ -240,11 +264,20 @@ class Config:
         doc.add("suspects", suspects)
         doc.add(tomlkit.nl())
 
+        forensics = tomlkit.table()
+        forensics.add("spindump_timeout", self.forensics.spindump_timeout)
+        forensics.add("tailspin_timeout", self.forensics.tailspin_timeout)
+        forensics.add("logs_timeout", self.forensics.logs_timeout)
+        doc.add("forensics", forensics)
+        doc.add(tomlkit.nl())
+
         sentinel = tomlkit.table()
         sentinel.add("fast_interval_ms", self.sentinel.fast_interval_ms)
         sentinel.add("ring_buffer_seconds", self.sentinel.ring_buffer_seconds)
         sentinel.add("pause_threshold_ratio", self.sentinel.pause_threshold_ratio)
         sentinel.add("peak_tracking_seconds", self.sentinel.peak_tracking_seconds)
+        sentinel.add("sample_interval_ms", self.sentinel.sample_interval_ms)
+        sentinel.add("wake_suppress_seconds", self.sentinel.wake_suppress_seconds)
         doc.add("sentinel", sentinel)
         doc.add(tomlkit.nl())
 
@@ -276,6 +309,16 @@ class Config:
         state_mult.add("running", self.scoring.state_multipliers.running)
         state_mult.add("stuck", self.scoring.state_multipliers.stuck)
         scoring.add("state_multipliers", state_mult)
+
+        norm = tomlkit.table()
+        norm.add("cpu", self.scoring.normalization.cpu)
+        norm.add("mem_gb", self.scoring.normalization.mem_gb)
+        norm.add("cmprs_gb", self.scoring.normalization.cmprs_gb)
+        norm.add("pageins", self.scoring.normalization.pageins)
+        norm.add("csw", self.scoring.normalization.csw)
+        norm.add("sysbsd", self.scoring.normalization.sysbsd)
+        norm.add("threads", self.scoring.normalization.threads)
+        scoring.add("normalization", norm)
 
         doc.add("scoring", scoring)
         doc.add(tomlkit.nl())
@@ -350,6 +393,7 @@ class Config:
         retention_data = data.get("retention", {})
         alerts_data = data.get("alerts", {})
         suspects_data = data.get("suspects", {})
+        forensics_data = data.get("forensics", {})
         sentinel_data = data.get("sentinel", {})
         tiers_data = data.get("tiers", {})
         scoring_data = data.get("scoring", {})
@@ -359,8 +403,6 @@ class Config:
             sampling=SamplingConfig(
                 normal_interval=sampling_data.get("normal_interval", 5),
                 elevated_interval=sampling_data.get("elevated_interval", 1),
-                elevation_threshold=sampling_data.get("elevation_threshold", 30),
-                critical_threshold=sampling_data.get("critical_threshold", 60),
             ),
             retention=RetentionConfig(
                 samples_days=retention_data.get("samples_days", 30),
@@ -371,7 +413,6 @@ class Config:
                 pause_detected=alerts_data.get("pause_detected", True),
                 pause_min_duration=alerts_data.get("pause_min_duration", 2.0),
                 critical_stress=alerts_data.get("critical_stress", True),
-                critical_threshold=alerts_data.get("critical_threshold", 60),
                 critical_duration=alerts_data.get("critical_duration", 30),
                 elevated_entered=alerts_data.get("elevated_entered", False),
                 forensics_completed=alerts_data.get("forensics_completed", True),
@@ -391,11 +432,18 @@ class Config:
                     ],
                 ),
             ),
+            forensics=ForensicsConfig(
+                spindump_timeout=forensics_data.get("spindump_timeout", 30),
+                tailspin_timeout=forensics_data.get("tailspin_timeout", 10),
+                logs_timeout=forensics_data.get("logs_timeout", 10),
+            ),
             sentinel=SentinelConfig(
                 fast_interval_ms=sentinel_data.get("fast_interval_ms", 100),
                 ring_buffer_seconds=sentinel_data.get("ring_buffer_seconds", 30),
                 pause_threshold_ratio=sentinel_data.get("pause_threshold_ratio", 2.0),
                 peak_tracking_seconds=sentinel_data.get("peak_tracking_seconds", 30),
+                sample_interval_ms=sentinel_data.get("sample_interval_ms", 1500),
+                wake_suppress_seconds=sentinel_data.get("wake_suppress_seconds", 10.0),
             ),
             tiers=_load_tiers_config(tiers_data),
             scoring=_load_scoring_config(scoring_data),
@@ -416,6 +464,10 @@ def _load_tiers_config(data: dict) -> TiersConfig:
 def _load_scoring_config(data: dict) -> ScoringConfig:
     """Load scoring config from TOML data."""
     weights_data = data.get("weights", {})
+    state_mult_data = data.get("state_multipliers", {})
+    norm_data = data.get("normalization", {})
+
+    defaults = NormalizationConfig()
     return ScoringConfig(
         weights=ScoringWeights(
             cpu=weights_data.get("cpu", 25),
@@ -426,7 +478,25 @@ def _load_scoring_config(data: dict) -> ScoringConfig:
             csw=weights_data.get("csw", 10),
             sysbsd=weights_data.get("sysbsd", 5),
             threads=weights_data.get("threads", 0),
-        )
+        ),
+        state_multipliers=StateMultipliers(
+            idle=state_mult_data.get("idle", 0.5),
+            sleeping=state_mult_data.get("sleeping", 0.6),
+            stopped=state_mult_data.get("stopped", 0.7),
+            halted=state_mult_data.get("halted", 0.8),
+            zombie=state_mult_data.get("zombie", 0.9),
+            running=state_mult_data.get("running", 1.0),
+            stuck=state_mult_data.get("stuck", 1.0),
+        ),
+        normalization=NormalizationConfig(
+            cpu=norm_data.get("cpu", defaults.cpu),
+            mem_gb=norm_data.get("mem_gb", defaults.mem_gb),
+            cmprs_gb=norm_data.get("cmprs_gb", defaults.cmprs_gb),
+            pageins=norm_data.get("pageins", defaults.pageins),
+            csw=norm_data.get("csw", defaults.csw),
+            sysbsd=norm_data.get("sysbsd", defaults.sysbsd),
+            threads=norm_data.get("threads", defaults.threads),
+        ),
     )
 
 

@@ -1,11 +1,6 @@
 """Tests for sleep/wake detection."""
 
-from datetime import datetime
-
 from pause_monitor.sleepwake import (
-    PauseDetector,
-    PauseEvent,
-    SleepWakeEvent,
     SleepWakeType,
     parse_pmset_log,
 )
@@ -72,52 +67,3 @@ def test_sleep_wake_event_duration():
 
     duration = (first_wake.timestamp - first_sleep.timestamp).total_seconds()
     assert 300 <= duration <= 400  # About 5 minutes of sleep
-
-
-# --- Pause Detection Tests ---
-
-
-def test_pause_detector_no_pause_normal_latency():
-    """No pause detected when latency is normal."""
-    detector = PauseDetector(expected_interval=5.0)
-
-    result = detector.check(actual_interval=5.2)
-    assert result is None
-
-
-def test_pause_detector_detects_pause():
-    """Pause detected when actual interval >> expected."""
-    detector = PauseDetector(expected_interval=5.0, pause_threshold=2.0)
-
-    result = detector.check(actual_interval=15.0)
-
-    assert result is not None
-    assert isinstance(result, PauseEvent)
-    assert result.duration == 15.0
-    assert result.expected == 5.0
-
-
-def test_pause_detector_ignores_sleep():
-    """Pause not flagged if system was recently asleep."""
-    detector = PauseDetector(expected_interval=5.0)
-
-    # Simulate wake event
-    wake_event = SleepWakeEvent(
-        timestamp=datetime.now(),
-        event_type=SleepWakeType.WAKE,
-        reason="Lid Open",
-    )
-
-    result = detector.check(actual_interval=60.0, recent_wake=wake_event)
-
-    assert result is None  # Not a pause, just woke up
-
-
-def test_pause_detector_latency_ratio():
-    """PauseEvent includes latency ratio."""
-    detector = PauseDetector(expected_interval=5.0)
-
-    result = detector.check(actual_interval=25.0)
-
-    assert result is not None
-    assert result.latency_ratio == 5.0

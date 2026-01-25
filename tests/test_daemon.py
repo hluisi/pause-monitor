@@ -825,11 +825,11 @@ async def test_daemon_main_loop_handles_pause_detection(patched_config_paths, mo
     monkeypatch.setattr(daemon, "_handle_pause", mock_handle_pause)
 
     # Create a sample with long elapsed_ms indicating a pause
-    # pause_threshold_ratio default is 2.0, expected is 1000ms
-    # So 3000ms elapsed should trigger pause detection
+    # pause_threshold_ratio default is 2.0, expected is 1500ms
+    # So 4500ms elapsed (3x expected) should trigger pause detection
     pause_sample = ProcessSamples(
         timestamp=datetime.now(),
-        elapsed_ms=3000,  # 3x expected = definitely a pause
+        elapsed_ms=4500,  # 3x expected = definitely a pause
         process_count=100,
         max_score=20,
         rogues=[],
@@ -851,5 +851,5 @@ async def test_daemon_main_loop_handles_pause_detection(patched_config_paths, mo
 
     # Should have called pause handler
     assert len(pause_calls) == 1
-    assert pause_calls[0][0] == 3000  # elapsed_ms
-    assert pause_calls[0][1] == 1000  # expected_ms
+    assert pause_calls[0][0] == 4500  # elapsed_ms
+    assert pause_calls[0][1] == 1500  # expected_ms

@@ -3,6 +3,7 @@
 from pause_monitor.config import (
     AlertsConfig,
     Config,
+    NormalizationConfig,
     RetentionConfig,
     SamplingConfig,
     SentinelConfig,
@@ -16,8 +17,6 @@ def test_sampling_config_defaults():
     config = SamplingConfig()
     assert config.normal_interval == 5
     assert config.elevated_interval == 1
-    assert config.elevation_threshold == 30
-    assert config.critical_threshold == 60
 
 
 def test_retention_config_defaults():
@@ -34,7 +33,6 @@ def test_alerts_config_defaults():
     assert config.pause_detected is True
     assert config.pause_min_duration == 2.0
     assert config.critical_stress is True
-    assert config.critical_threshold == 60
     assert config.critical_duration == 30
     assert config.elevated_entered is False
     assert config.forensics_completed is True
@@ -96,7 +94,10 @@ learning_mode = true
 
 [sampling]
 normal_interval = 10
-elevation_threshold = 50
+
+[tiers]
+elevated_threshold = 40
+critical_threshold = 80
 
 [alerts]
 enabled = false
@@ -105,8 +106,9 @@ enabled = false
     config = Config.load(config_path)
     assert config.learning_mode is True
     assert config.sampling.normal_interval == 10
-    assert config.sampling.elevation_threshold == 50
     assert config.sampling.elevated_interval == 1  # Default preserved
+    assert config.tiers.elevated_threshold == 40
+    assert config.tiers.critical_threshold == 80
     assert config.alerts.enabled is False
 
 
@@ -204,6 +206,18 @@ def test_sentinel_config_has_peak_tracking_interval():
     assert config.peak_tracking_seconds == 30  # Default: one buffer cycle
 
 
+def test_sentinel_config_has_sample_interval():
+    """SentinelConfig should have sample interval for pause detection."""
+    config = SentinelConfig()
+    assert config.sample_interval_ms == 1500  # top -l 2 -s 1 takes ~1.5s
+
+
+def test_sentinel_config_has_wake_suppress():
+    """SentinelConfig should have wake suppress window."""
+    config = SentinelConfig()
+    assert config.wake_suppress_seconds == 10.0
+
+
 def test_config_loads_new_sentinel_fields(tmp_path):
     """Config loads pause_threshold_ratio and peak_tracking_seconds."""
     config_file = tmp_path / "config.toml"
@@ -231,6 +245,33 @@ def test_config_save_includes_new_sentinel_fields(tmp_path):
     content = config_path.read_text()
     assert "pause_threshold_ratio = 2.5" in content
     assert "peak_tracking_seconds = 45" in content
+
+
+def test_config_loads_sample_interval_and_wake_suppress(tmp_path):
+    """Config loads sample_interval_ms and wake_suppress_seconds."""
+    config_file = tmp_path / "config.toml"
+    config_file.write_text("""
+[sentinel]
+sample_interval_ms = 2000
+wake_suppress_seconds = 15.0
+""")
+
+    config = Config.load(config_file)
+    assert config.sentinel.sample_interval_ms == 2000
+    assert config.sentinel.wake_suppress_seconds == 15.0
+
+
+def test_config_save_includes_sample_interval_and_wake_suppress(tmp_path):
+    """Config.save() writes sample_interval_ms and wake_suppress_seconds."""
+    config_path = tmp_path / "config.toml"
+    config = Config()
+    config.sentinel.sample_interval_ms = 1800
+    config.sentinel.wake_suppress_seconds = 20.0
+    config.save(config_path)
+
+    content = config_path.read_text()
+    assert "sample_interval_ms = 1800" in content
+    assert "wake_suppress_seconds = 20.0" in content
 
 
 def test_scoring_weights_default():
@@ -337,3 +378,75 @@ states = ["stuck"]
     # Defaults for unspecified categories
     assert config.rogue_selection.mem.enabled is True
     assert config.rogue_selection.mem.count == 3
+
+
+def test_normalization_config_defaults():
+    """NormalizationConfig has correct defaults."""
+    norm = NormalizationConfig()
+    assert norm.cpu == 100.0
+    assert norm.mem_gb == 8.0
+    assert norm.cmprs_gb == 1.0
+    assert norm.pageins == 1000
+    assert norm.csw == 100000
+    assert norm.sysbsd == 100000
+    assert norm.threads == 1000
+
+
+def test_scoring_config_includes_normalization():
+    """ScoringConfig includes normalization field."""
+    config = Config()
+    assert hasattr(config.scoring, "normalization")
+    assert config.scoring.normalization.mem_gb == 8.0
+
+
+def test_config_save_includes_normalization(tmp_path):
+    """Config.save() writes normalization section."""
+    config_path = tmp_path / "config.toml"
+    config = Config()
+    config.scoring.normalization.mem_gb = 16.0
+    config.scoring.normalization.pageins = 2000
+    config.save(config_path)
+
+    content = config_path.read_text()
+    assert "[scoring.normalization]" in content
+    assert "mem_gb = 16.0" in content
+    assert "pageins = 2000" in content
+
+
+def test_config_loads_normalization(tmp_path):
+    """Config.load() reads normalization section from TOML."""
+    config_file = tmp_path / "config.toml"
+    config_file.write_text("""
+[scoring.normalization]
+cpu = 100.0
+mem_gb = 32.0
+cmprs_gb = 4.0
+pageins = 5000
+csw = 200000
+sysbsd = 150000
+threads = 500
+""")
+
+    config = Config.load(config_file)
+    assert config.scoring.normalization.mem_gb == 32.0
+    assert config.scoring.normalization.cmprs_gb == 4.0
+    assert config.scoring.normalization.pageins == 5000
+    assert config.scoring.normalization.csw == 200000
+    assert config.scoring.normalization.sysbsd == 150000
+    assert config.scoring.normalization.threads == 500
+
+
+def test_config_loads_partial_normalization(tmp_path):
+    """Config.load() uses defaults for missing normalization fields."""
+    config_file = tmp_path / "config.toml"
+    config_file.write_text("""
+[scoring.normalization]
+mem_gb = 64.0
+""")
+
+    config = Config.load(config_file)
+    # Specified value
+    assert config.scoring.normalization.mem_gb == 64.0
+    # Defaults for unspecified
+    assert config.scoring.normalization.cpu == 100.0
+    assert config.scoring.normalization.pageins == 1000

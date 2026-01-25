@@ -204,7 +204,7 @@ def events_show(ctx, event_id: int) -> None:
                 click.echo(
                     f"  {timestamp_str} | Tier {sample.tier} | Max Score: {sample.data.max_score}"
                 )
-                for rogue in sample.data.rogues[:5]:
+                for rogue in sample.data.rogues:
                     categories_str = ", ".join(sorted(rogue.categories))
                     click.echo(f"    {rogue.command}: {rogue.score} ({categories_str})")
     finally:
@@ -418,8 +418,10 @@ def config_show() -> None:
     click.echo("[sampling]")
     click.echo(f"  normal_interval = {cfg.sampling.normal_interval}")
     click.echo(f"  elevated_interval = {cfg.sampling.elevated_interval}")
-    click.echo(f"  elevation_threshold = {cfg.sampling.elevation_threshold}")
-    click.echo(f"  critical_threshold = {cfg.sampling.critical_threshold}")
+    click.echo()
+    click.echo("[tiers]")
+    click.echo(f"  elevated_threshold = {cfg.tiers.elevated_threshold}")
+    click.echo(f"  critical_threshold = {cfg.tiers.critical_threshold}")
     click.echo()
     click.echo("[retention]")
     click.echo(f"  samples_days = {cfg.retention.samples_days}")

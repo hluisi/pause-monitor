@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from pause_monitor.config import ForensicsConfig
     from pause_monitor.ringbuffer import BufferContents
 
 import structlog
@@ -97,7 +98,7 @@ def identify_culprits(contents: "BufferContents") -> list[dict]:
 
     Returns:
         List of {"pid": int, "command": str, "score": int, "categories": [str]}
-        sorted by score descending, limited to top 5.
+        sorted by score descending.
         Processes are keyed by PID, so two processes with the same command
         but different PIDs are treated as separate entries.
     """
@@ -119,9 +120,9 @@ def identify_culprits(contents: "BufferContents") -> list[dict]:
                     "categories": list(rogue.categories),
                 }
 
-    # Sort by score descending and return top 5
+    # Sort by score descending
     culprits = sorted(peak_scores.values(), key=lambda c: c["score"], reverse=True)
-    return culprits[:5]
+    return culprits
 
 
 async def capture_spindump(event_dir: Path, timeout: float = 30.0) -> bool:
@@ -259,18 +260,25 @@ async def capture_system_logs(
 async def run_full_capture(
     capture: ForensicsCapture,
     window_seconds: int = 60,
+    config: "ForensicsConfig | None" = None,
 ) -> None:
     """Run all forensic capture steps.
 
     Args:
         capture: ForensicsCapture instance with event_dir set
         window_seconds: Seconds of history to capture
+        config: Forensics config with timeout values (uses defaults if None)
     """
+    # Use config timeouts or defaults
+    spindump_timeout = config.spindump_timeout if config else 30
+    tailspin_timeout = config.tailspin_timeout if config else 10
+    logs_timeout = config.logs_timeout if config else 10
+
     # Run captures concurrently
     await asyncio.gather(
-        capture_spindump(capture.event_dir),
-        capture_tailspin(capture.event_dir),
-        capture_system_logs(capture.event_dir, window_seconds=window_seconds),
+        capture_spindump(capture.event_dir, timeout=spindump_timeout),
+        capture_tailspin(capture.event_dir, timeout=tailspin_timeout),
+        capture_system_logs(capture.event_dir, window_seconds=window_seconds, timeout=logs_timeout),
     )
 
     log.info("full_capture_complete", event_dir=str(capture.event_dir))

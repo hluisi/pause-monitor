@@ -283,7 +283,7 @@ async def test_capture_system_logs_timeout(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_run_full_capture_orchestrates_all(tmp_path: Path):
-    """run_full_capture runs all capture steps."""
+    """run_full_capture runs all capture steps with default timeouts."""
     event_dir = tmp_path / "event_001"
     event_dir.mkdir()
 
@@ -298,9 +298,36 @@ async def test_run_full_capture_orchestrates_all(tmp_path: Path):
 
                 await run_full_capture(capture, window_seconds=60)
 
-                mock_spin.assert_called_once_with(event_dir)
-                mock_tail.assert_called_once_with(event_dir)
-                mock_logs.assert_called_once_with(event_dir, window_seconds=60)
+                # Default timeouts: spindump=30, tailspin=10, logs=10
+                mock_spin.assert_called_once_with(event_dir, timeout=30)
+                mock_tail.assert_called_once_with(event_dir, timeout=10)
+                mock_logs.assert_called_once_with(event_dir, window_seconds=60, timeout=10)
+
+
+@pytest.mark.asyncio
+async def test_run_full_capture_uses_config_timeouts(tmp_path: Path):
+    """run_full_capture uses timeouts from ForensicsConfig."""
+    from pause_monitor.config import ForensicsConfig
+
+    event_dir = tmp_path / "event_001"
+    event_dir.mkdir()
+
+    capture = ForensicsCapture(event_dir)
+    config = ForensicsConfig(spindump_timeout=45, tailspin_timeout=15, logs_timeout=20)
+
+    with patch("pause_monitor.forensics.capture_spindump") as mock_spin:
+        with patch("pause_monitor.forensics.capture_tailspin") as mock_tail:
+            with patch("pause_monitor.forensics.capture_system_logs") as mock_logs:
+                mock_spin.return_value = True
+                mock_tail.return_value = True
+                mock_logs.return_value = True
+
+                await run_full_capture(capture, window_seconds=60, config=config)
+
+                # Custom timeouts from config
+                mock_spin.assert_called_once_with(event_dir, timeout=45)
+                mock_tail.assert_called_once_with(event_dir, timeout=15)
+                mock_logs.assert_called_once_with(event_dir, window_seconds=60, timeout=20)
 
 
 def test_forensics_capture_includes_ring_buffer(tmp_path):
@@ -458,8 +485,8 @@ def test_identify_culprits_uses_peak_values():
     assert culprits[0]["score"] == 35
 
 
-def test_identify_culprits_limits_to_top_5():
-    """identify_culprits returns at most 5 culprits."""
+def test_identify_culprits_returns_all_sorted_by_score():
+    """identify_culprits returns all rogues sorted by score descending."""
     rogues = [make_process_score(pid=i, command=f"proc{i}", score=100 - i) for i in range(10)]
     samples = make_process_samples(rogues=rogues)
     ring_sample = RingSample(samples=samples, tier=2)
@@ -467,12 +494,12 @@ def test_identify_culprits_limits_to_top_5():
 
     culprits = identify_culprits(contents)
 
-    assert len(culprits) == 5
-    # Should be top 5 by score
+    # All rogues returned, sorted by score descending
+    assert len(culprits) == 10
     assert culprits[0]["pid"] == 0
-    assert culprits[0]["command"] == "proc0"
-    assert culprits[4]["pid"] == 4
-    assert culprits[4]["command"] == "proc4"
+    assert culprits[0]["score"] == 100
+    assert culprits[9]["pid"] == 9
+    assert culprits[9]["score"] == 91
 
 
 def test_identify_culprits_no_rogues():

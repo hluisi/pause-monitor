@@ -86,9 +86,6 @@ class DaemonState:
 class Daemon:
     """Main daemon class orchestrating sampling and detection."""
 
-    # Expected sample interval in milliseconds (1Hz sampling)
-    SAMPLE_INTERVAL_MS = 1000
-
     def __init__(self, config: Config):
         self.config = config
         self.state = DaemonState()
@@ -293,7 +290,7 @@ class Daemon:
     async def _run_heavy_capture(self, capture: ForensicsCapture) -> None:
         """Run heavy forensics capture (spindump, tailspin, logs) and notify on completion."""
         try:
-            await run_full_capture(capture)
+            await run_full_capture(capture, config=self.config.forensics)
             self.notifier.forensics_completed(capture.event_dir)
         except Exception as e:
             log.exception(
@@ -332,7 +329,7 @@ class Daemon:
         # Extract top process names from peak sample's rogues
         culprit_names = []
         if peak_sample and peak_sample.samples.rogues:
-            for rogue in peak_sample.samples.rogues[:5]:
+            for rogue in peak_sample.samples.rogues:
                 if rogue.command and rogue.command not in culprit_names:
                     culprit_names.append(rogue.command)
 
@@ -351,7 +348,11 @@ class Daemon:
 
         # Run heavy captures (spindump, tailspin, logs) in background
         asyncio.create_task(
-            run_full_capture(capture, window_seconds=self.config.sentinel.ring_buffer_seconds)
+            run_full_capture(
+                capture,
+                window_seconds=self.config.sentinel.ring_buffer_seconds,
+                config=self.config.forensics,
+            )
         )
 
         # Notify user
@@ -569,7 +570,7 @@ class Daemon:
 
         The loop runs until shutdown event is set.
         """
-        expected_ms = self.SAMPLE_INTERVAL_MS
+        expected_ms = self.config.sentinel.sample_interval_ms
         pause_threshold = self.config.sentinel.pause_threshold_ratio
 
         while not self._shutdown_event.is_set():

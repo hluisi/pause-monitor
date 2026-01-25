@@ -599,3 +599,37 @@ async def test_run_top_command():
     # Should have some output with PID header
     assert "PID" in output
     assert len(output) > 0
+
+
+def test_score_process_uses_normalization_config():
+    """Scoring should use normalization values from config."""
+    config = Config()
+    # Set a lower memory normalization max - 4GB instead of 8GB
+    config.scoring.normalization.mem_gb = 4.0
+    collector = TopCollector(config)
+
+    proc = {
+        "pid": 1,
+        "command": "mem_hog",
+        "cpu": 0.0,
+        "state": "running",
+        "mem": 4 * 1024**3,  # 4GB - should be 1.0 normalized with 4GB max
+        "cmprs": 0,
+        "pageins": 0,
+        "csw": 0,
+        "sysbsd": 0,
+        "threads": 1,
+        "_categories": {"mem"},
+    }
+
+    scored = collector._score_process(proc)
+    # With 4GB max and 4GB usage, mem contribution should be full (weight=15)
+    # Score should be around 15 (mem weight) * 1.0 (state mult for running)
+    assert scored.score >= 14  # Allow some rounding
+
+    # Now with default 8GB max, same process should score lower
+    config2 = Config()  # Uses default 8GB
+    collector2 = TopCollector(config2)
+    scored2 = collector2._score_process(proc)
+    # With 8GB max and 4GB usage, mem contribution is 0.5 * 15 = 7.5
+    assert scored2.score < scored.score
