@@ -70,13 +70,13 @@ class SentinelConfig:
 class TiersConfig:
     """Tier threshold configuration for process scores."""
 
-    elevated_threshold: int = 35
-    critical_threshold: int = 65
+    elevated_threshold: int = 50
+    critical_threshold: int = 75
 
 
 @dataclass
 class ScoringWeights:
-    """Weights for per-process stressor scoring (default weights sum to 100, excluding threads)."""
+    """Weights for per-process stressor scoring (sum to 100, excluding threads)."""
 
     cpu: int = 25
     state: int = 20
@@ -89,10 +89,28 @@ class ScoringWeights:
 
 
 @dataclass
+class StateMultipliers:
+    """Post-score multipliers based on process state. Applied after base score calculation."""
+
+    idle: float = 0.5
+    sleeping: float = 0.6
+    stopped: float = 0.7
+    halted: float = 0.8
+    zombie: float = 0.9
+    running: float = 1.0
+    stuck: float = 1.0
+
+    def get(self, state: str) -> float:
+        """Get multiplier for a state, defaulting to 1.0 for unknown states."""
+        return getattr(self, state, 1.0)
+
+
+@dataclass
 class ScoringConfig:
     """Scoring configuration."""
 
     weights: ScoringWeights = field(default_factory=ScoringWeights)
+    state_multipliers: StateMultipliers = field(default_factory=StateMultipliers)
 
 
 @dataclass
@@ -236,7 +254,7 @@ class Config:
         doc.add("tiers", tiers)
         doc.add(tomlkit.nl())
 
-        # Scoring section with nested weights
+        # Scoring section with nested weights and state multipliers
         scoring = tomlkit.table()
         weights = tomlkit.table()
         weights.add("cpu", self.scoring.weights.cpu)
@@ -248,6 +266,17 @@ class Config:
         weights.add("sysbsd", self.scoring.weights.sysbsd)
         weights.add("threads", self.scoring.weights.threads)
         scoring.add("weights", weights)
+
+        state_mult = tomlkit.table()
+        state_mult.add("idle", self.scoring.state_multipliers.idle)
+        state_mult.add("sleeping", self.scoring.state_multipliers.sleeping)
+        state_mult.add("stopped", self.scoring.state_multipliers.stopped)
+        state_mult.add("halted", self.scoring.state_multipliers.halted)
+        state_mult.add("zombie", self.scoring.state_multipliers.zombie)
+        state_mult.add("running", self.scoring.state_multipliers.running)
+        state_mult.add("stuck", self.scoring.state_multipliers.stuck)
+        scoring.add("state_multipliers", state_mult)
+
         doc.add("scoring", scoring)
         doc.add(tomlkit.nl())
 
@@ -368,14 +397,20 @@ class Config:
                 pause_threshold_ratio=sentinel_data.get("pause_threshold_ratio", 2.0),
                 peak_tracking_seconds=sentinel_data.get("peak_tracking_seconds", 30),
             ),
-            tiers=TiersConfig(
-                elevated_threshold=tiers_data.get("elevated_threshold", 35),
-                critical_threshold=tiers_data.get("critical_threshold", 65),
-            ),
+            tiers=_load_tiers_config(tiers_data),
             scoring=_load_scoring_config(scoring_data),
             rogue_selection=_load_rogue_selection_config(rogue_data),
             learning_mode=data.get("learning_mode", False),
         )
+
+
+def _load_tiers_config(data: dict) -> TiersConfig:
+    """Load tiers config from TOML data, using dataclass defaults for missing fields."""
+    defaults = TiersConfig()
+    return TiersConfig(
+        elevated_threshold=data.get("elevated_threshold", defaults.elevated_threshold),
+        critical_threshold=data.get("critical_threshold", defaults.critical_threshold),
+    )
 
 
 def _load_scoring_config(data: dict) -> ScoringConfig:

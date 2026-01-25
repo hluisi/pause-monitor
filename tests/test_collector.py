@@ -406,6 +406,36 @@ def test_score_process_stuck():
     assert scored.score >= 15  # State weight is 20, stuck gives exactly 20
 
 
+def test_score_process_state_multiplier():
+    """State multiplier should reduce sleeping process scores vs running."""
+    config = Config()
+    collector = TopCollector(config)
+
+    # Same activity, different states
+    base_proc = {
+        "pid": 1,
+        "command": "test",
+        "cpu": 50.0,
+        "mem": 1000000000,
+        "cmprs": 0,
+        "pageins": 0,
+        "csw": 0,
+        "sysbsd": 0,
+        "threads": 1,
+        "_categories": {"cpu"},
+    }
+
+    running_proc = {**base_proc, "state": "running"}
+    sleeping_proc = {**base_proc, "state": "sleeping"}
+
+    running_score = collector._score_process(running_proc).score
+    sleeping_score = collector._score_process(sleeping_proc).score
+
+    # Running gets 1.0x, sleeping gets 0.6x
+    assert running_score > sleeping_score
+    assert sleeping_score == int(running_score * 0.6)
+
+
 def test_score_process_categories_preserved():
     """Categories should be preserved in ProcessScore."""
     config = Config()

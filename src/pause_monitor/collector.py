@@ -230,7 +230,7 @@ class TopCollector:
         return list(selected.values())
 
     def _normalize_state(self, state: str) -> float:
-        """Normalize state to 0-1 scale."""
+        """Normalize state to 0-1 scale for base score calculation."""
         if state == "stuck":
             return 1.0
         elif state == "zombie":
@@ -243,8 +243,9 @@ class TopCollector:
             return 0.0
 
     def _score_process(self, proc: dict) -> ProcessScore:
-        """Compute stressor score using config weights."""
+        """Compute stressor score using config weights, then apply state multiplier."""
         weights = self.config.scoring.weights
+        multipliers = self.config.scoring.state_multipliers
 
         # Normalize each metric to 0-1 scale
         normalized = {
@@ -258,8 +259,8 @@ class TopCollector:
             "threads": min(1.0, proc["threads"] / 1000.0),  # 1000
         }
 
-        # Weighted sum
-        total = (
+        # Weighted sum (base score - what this process WOULD contribute if active)
+        base_score = (
             normalized["cpu"] * weights.cpu
             + normalized["state"] * weights.state
             + normalized["pageins"] * weights.pageins
@@ -270,7 +271,9 @@ class TopCollector:
             + normalized["threads"] * weights.threads
         )
 
-        score = min(100, int(total))
+        # Apply state multiplier (discount for currently-inactive processes)
+        state_mult = multipliers.get(proc["state"])
+        score = min(100, int(base_score * state_mult))
 
         return ProcessScore(
             pid=proc["pid"],

@@ -169,16 +169,22 @@ def test_tier_manager_entry_time_accessors():
     assert manager.tier3_entry_time is None  # Cleared on exit
 
 
-def test_tier_manager_default_thresholds():
-    """Default thresholds should be 35/65."""
-    tm = TierManager()
-    assert tm._elevated_threshold == 35
-    assert tm._critical_threshold == 65
+def test_tier_manager_uses_config_thresholds():
+    """TierManager should use thresholds from TiersConfig."""
+    from pause_monitor.config import TiersConfig
+
+    tiers = TiersConfig()
+    tm = TierManager(
+        elevated_threshold=tiers.elevated_threshold,
+        critical_threshold=tiers.critical_threshold,
+    )
+    assert tm._elevated_threshold == tiers.elevated_threshold
+    assert tm._critical_threshold == tiers.critical_threshold
 
 
 def test_tier_manager_peak_score_property():
     """Should have peak_score property."""
-    tm = TierManager()
+    tm = TierManager(elevated_threshold=30, critical_threshold=60)
     tm.update(40)  # Enter tier 2
     tm.update(50)  # Higher score
 

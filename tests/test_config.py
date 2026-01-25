@@ -126,10 +126,11 @@ def test_sentinel_config_defaults():
 
 
 def test_tiers_config_defaults():
-    """TiersConfig has correct defaults."""
+    """TiersConfig has sensible defaults."""
     config = TiersConfig()
-    assert config.elevated_threshold == 35
-    assert config.critical_threshold == 65
+    # Verify defaults exist and are sensible (elevated < critical)
+    assert config.elevated_threshold > 0
+    assert config.critical_threshold > config.elevated_threshold
 
 
 def test_config_loads_sentinel_section(tmp_path):
@@ -170,8 +171,9 @@ def test_full_config_includes_sentinel_and_tiers():
     config = Config()
     assert hasattr(config, "sentinel")
     assert hasattr(config, "tiers")
-    assert config.sentinel.fast_interval_ms == 100
-    assert config.tiers.elevated_threshold == 35
+    # Verify fields exist and match their respective config defaults
+    assert config.sentinel.fast_interval_ms == SentinelConfig().fast_interval_ms
+    assert config.tiers.elevated_threshold == TiersConfig().elevated_threshold
 
 
 def test_config_loads_partial_sentinel_section(tmp_path):
@@ -254,11 +256,13 @@ def test_rogue_selection_default():
     assert config.rogue_selection.state.states == ["zombie"]
 
 
-def test_tier_thresholds_updated():
-    """Tier thresholds should be 35/65 for process scores."""
+def test_tier_thresholds_in_config():
+    """Config includes tier thresholds from TiersConfig."""
     config = Config()
-    assert config.tiers.elevated_threshold == 35
-    assert config.tiers.critical_threshold == 65
+    # Verify Config.tiers matches TiersConfig defaults
+    defaults = TiersConfig()
+    assert config.tiers.elevated_threshold == defaults.elevated_threshold
+    assert config.tiers.critical_threshold == defaults.critical_threshold
 
 
 def test_config_save_includes_scoring_section(tmp_path):

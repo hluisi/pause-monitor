@@ -36,8 +36,8 @@ class TierManager:
 
     def __init__(
         self,
-        elevated_threshold: int = 35,
-        critical_threshold: int = 65,
+        elevated_threshold: int,
+        critical_threshold: int,
         deescalation_delay: float = 5.0,
     ) -> None:
         self._elevated_threshold = elevated_threshold
