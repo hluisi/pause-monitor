@@ -22,7 +22,6 @@ from pause_monitor.socket_server import SocketServer
 from pause_monitor.storage import (
     create_event,
     get_process_samples,
-    init_database,
     insert_process_sample,
 )
 
@@ -153,11 +152,9 @@ async def test_collector_scoring_produces_differentiated_scores(monkeypatch, sam
 # --- Integration Test: ProcessSamples → Storage → Retrieval ---
 
 
-def test_process_samples_storage_roundtrip(tmp_path):
+def test_process_samples_storage_roundtrip(initialized_db):
     """ProcessSamples should be stored and retrieved correctly via JSON blob storage."""
-    db_path = tmp_path / "test.db"
-    init_database(db_path)
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(initialized_db)
 
     # Create an event
     event_id = create_event(conn, datetime.now())
@@ -234,11 +231,9 @@ def test_process_samples_storage_roundtrip(tmp_path):
     assert "stuck" in kernel.categories
 
 
-def test_multiple_tier_samples_per_event(tmp_path):
+def test_multiple_tier_samples_per_event(initialized_db):
     """Multiple ProcessSamples at different tiers should be stored correctly."""
-    db_path = tmp_path / "test.db"
-    init_database(db_path)
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(initialized_db)
 
     event_id = create_event(conn, datetime.now())
 
@@ -407,11 +402,9 @@ async def test_full_collection_to_socket_cycle(monkeypatch, short_tmp_path, samp
 
 
 @pytest.mark.asyncio
-async def test_collection_storage_retrieval_cycle(monkeypatch, tmp_path, sample_top_output):
+async def test_collection_storage_retrieval_cycle(monkeypatch, initialized_db, sample_top_output):
     """Test collection → storage → retrieval cycle."""
-    db_path = tmp_path / "test.db"
-    init_database(db_path)
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(initialized_db)
 
     config = Config()
     collector = TopCollector(config)
@@ -466,90 +459,91 @@ async def test_collection_storage_retrieval_cycle(monkeypatch, tmp_path, sample_
 # --- Integration Test: Tier Determination ---
 
 
-@pytest.mark.asyncio
-async def test_tier_determination_from_max_score(monkeypatch):
-    """Tier should be determined by max_score thresholds (35/65).
-
-    Scoring weights: cpu=25, state=20, pageins=15, mem=15, cmprs=10, csw=10, sysbsd=5
-    Normalization: cpu/100, pageins/1000, mem/8GB, cmprs/1GB, csw/100k, sysbsd/100k
-    """
-    config = Config()
-
-    test_cases = [
-        # (top_output, min_expected_score, max_expected_score, expected_tier)
-        (
-            # Low stress - should be tier 1 (score < 35)
-            # 10% cpu = 2.5
-            """
+# Test cases for tier determination:
+# (top_output, min_expected_score, max_expected_score, expected_tier)
+# Scoring weights: cpu=25, state=20, pageins=15, mem=15, cmprs=10, csw=10, sysbsd=5
+# Normalization: cpu/100, pageins/1000, mem/8GB, cmprs/1GB, csw/100k, sysbsd/100k
+TIER_TEST_CASES = [
+    pytest.param(
+        # Low stress - should be tier 1 (score < 35)
+        # 10% cpu = 2.5
+        """
 PID    COMMAND          %CPU STATE    MEM    CMPRS  #TH    CSW        SYSBSD     PAGEINS
 1      idle             10.0 sleeping 100M   0B     1      1000       500        10
 """,
-            0,
-            34,
-            1,
-        ),
-        (
-            # Medium stress - should be tier 2 (35 <= score < 65)
-            # 100% cpu = 25, 500 pageins = 7.5, 4GB mem = 7.5, 100k csw = 10 = ~50
-            """
+        0,
+        34,
+        1,
+        id="tier1-low-stress",
+    ),
+    pytest.param(
+        # Medium stress - should be tier 2 (35 <= score < 65)
+        # 100% cpu = 25, 500 pageins = 7.5, 4GB mem = 7.5, 100k csw = 10 = ~50
+        """
 PID    COMMAND          %CPU STATE    MEM    CMPRS  #TH    CSW        SYSBSD     PAGEINS
 1      medium           100.0 running 4G     200M   50     100000     50000      500
 """,
-            35,
-            64,
-            2,
-        ),
-        (
-            # High stress (stuck + high metrics) - should be tier 3 (score >= 65)
-            # 100% cpu = 25, stuck = 20, 1000 pageins = 15, 8GB mem = 15 = 75+
-            """
+        35,
+        64,
+        2,
+        id="tier2-medium-stress",
+    ),
+    pytest.param(
+        # High stress (stuck + high metrics) - should be tier 3 (score >= 65)
+        # 100% cpu = 25, stuck = 20, 1000 pageins = 15, 8GB mem = 15 = 75+
+        """
 PID    COMMAND          %CPU STATE    MEM    CMPRS  #TH    CSW        SYSBSD     PAGEINS
 1      stressor         100.0 stuck   8G     1G     200    100000     100000     1000
 """,
-            65,
-            100,
-            3,
-        ),
-    ]
+        65,
+        100,
+        3,
+        id="tier3-high-stress",
+    ),
+]
 
-    for top_output, min_score, max_score, expected_tier in test_cases:
-        collector = TopCollector(config)
 
-        async def mock_run_top():
-            return top_output
+@pytest.mark.parametrize("top_output,min_score,max_score,expected_tier", TIER_TEST_CASES)
+@pytest.mark.asyncio
+async def test_tier_determination_from_max_score(
+    monkeypatch, top_output, min_score, max_score, expected_tier
+):
+    """Tier should be determined by max_score thresholds (35/65)."""
+    config = Config()
+    collector = TopCollector(config)
 
-        monkeypatch.setattr(collector, "_run_top", mock_run_top)
+    async def mock_run_top():
+        return top_output
 
-        samples = await collector.collect()
+    monkeypatch.setattr(collector, "_run_top", mock_run_top)
 
-        # Verify score is in expected range
-        assert min_score <= samples.max_score <= max_score, (
-            f"Expected score in [{min_score}, {max_score}], got {samples.max_score}"
-        )
+    samples = await collector.collect()
 
-        # Determine tier based on thresholds
-        if samples.max_score >= 65:
-            actual_tier = 3
-        elif samples.max_score >= 35:
-            actual_tier = 2
-        else:
-            actual_tier = 1
+    # Verify score is in expected range
+    assert min_score <= samples.max_score <= max_score, (
+        f"Expected score in [{min_score}, {max_score}], got {samples.max_score}"
+    )
 
-        assert actual_tier == expected_tier, (
-            f"Expected tier {expected_tier} for max_score={samples.max_score}, "
-            f"got tier {actual_tier}"
-        )
+    # Determine tier based on thresholds
+    if samples.max_score >= 65:
+        actual_tier = 3
+    elif samples.max_score >= 35:
+        actual_tier = 2
+    else:
+        actual_tier = 1
+
+    assert actual_tier == expected_tier, (
+        f"Expected tier {expected_tier} for max_score={samples.max_score}, got tier {actual_tier}"
+    )
 
 
 # --- Integration Test: Process Categories Tracking ---
 
 
 @pytest.mark.asyncio
-async def test_process_categories_preserved_through_cycle(monkeypatch, tmp_path):
+async def test_process_categories_preserved_through_cycle(monkeypatch, initialized_db):
     """Process categories should be preserved through collection → storage → retrieval."""
-    db_path = tmp_path / "test.db"
-    init_database(db_path)
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(initialized_db)
 
     config = Config()
     collector = TopCollector(config)
@@ -609,11 +603,9 @@ async def test_empty_top_output_handling(monkeypatch):
     assert len(samples.rogues) == 0
 
 
-def test_empty_process_samples_storage(tmp_path):
+def test_empty_process_samples_storage(initialized_db):
     """Empty ProcessSamples should be stored and retrieved correctly."""
-    db_path = tmp_path / "test.db"
-    init_database(db_path)
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(initialized_db)
 
     event_id = create_event(conn, datetime.now())
 
