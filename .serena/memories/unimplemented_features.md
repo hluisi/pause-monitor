@@ -1,39 +1,36 @@
 # Unimplemented Features and Stubs
 
-> **Phase 6 COMPLETE (2026-01-22).** Tier-based event storage; SCHEMA_VERSION=6.
+> **Per-Process Scoring Redesign COMPLETE (2026-01-24).** TopCollector at 1Hz; SCHEMA_VERSION=7.
 
-**Last audited:** 2026-01-23
+**Last audited:** 2026-01-24
 
 ## Completed (via Redesign)
 
-- ~~Sentinel slow loop~~ - Replaced by Daemon powermetrics integration
+- ~~Sentinel slow loop~~ - Replaced by Daemon TopCollector integration
 - ~~TUI socket streaming~~ - Implemented via SocketServer/SocketClient
-- ~~Complete 8-factor stress (including pageins)~~ - All factors now calculated from powermetrics
-- ~~Process attribution~~ - Using powermetrics top_cpu_processes + top_pagein_processes
+- ~~Complete 8-factor stress~~ - All factors now calculated from top output
+- ~~Process attribution~~ - Using TopCollector rogue selection with scoring
 - ~~Ring Buffer~~ - `ringbuffer.py` stores last 30s of stress samples
 - ~~Tier State Machine~~ - `sentinel.py:TierManager` manages tier transitions
 - ~~Event Status Management~~ - CLI `events mark` command and TUI EventsScreen
 - ~~Socket Server/Client~~ - Real-time data streaming to TUI
-- ~~10Hz Main Loop~~ - Single 100ms loop driven by powermetrics stream
+- ~~10Hz Main Loop~~ - Replaced by 1Hz TopCollector loop
+- ~~`status` command crash~~ - Fixed to use correct Event attributes (start_timestamp, peak_tier, peak_stress)
+- ~~`history` command stale data~~ - Now uses events table correctly
+- ~~Per-process stressor scoring~~ - TopCollector with 8 weighted factors
+- ~~Schema v7~~ - JSON blob storage for ProcessSamples
 
 ## Explicit Stubs
 
 | Location | Current Behavior | Expected Behavior |
 |----------|------------------|-------------------|
-| `tui/app.py:843-845` `action_show_history()` | `self.notify("History view not yet implemented")` | Navigate to history view with charts/graphs showing stress trends |
-
-## Broken Code (Needs Fix)
-
-| Location | Issue | Impact |
-|----------|-------|--------|
-| `cli.py:81` `status` command | References `event.timestamp` and `event.duration` which don't exist on new `Event` class (should be `event.start_timestamp` and computed duration) | **AttributeError** - `status` command crashes when events exist |
-| `cli.py:50,317` `status`/`history` commands | Use `get_recent_samples()` which queries legacy `samples` table | Shows stale/empty data since daemon no longer inserts into `samples` |
+| `tui/app.py:778-780` `action_show_history()` | `self.notify("History view not yet implemented")` | Navigate to history view with charts/graphs showing stress trends |
 
 ## Config Defined But Not Used
 
 | Config Key | Where Defined | What Should Happen |
 |------------|---------------|-------------------|
-| `learning_mode` | `config.py:87` | Daemon should suppress alerts, store all samples, and track pause correlations for calibration. Currently only stored/loaded in config but never checked in daemon logic. |
+| `learning_mode` | `config.py:142` | Daemon should suppress alerts, store all samples, and track pause correlations for calibration. Currently only stored/loaded in config but never checked in daemon logic. |
 | `suspects.patterns` | `config.py:46-57` | Should flag processes matching patterns as suspects in forensics and culprit identification. Pattern list exists but is never searched against process names in daemon.py or forensics.py. |
 
 ## Database Tables Status
@@ -41,9 +38,10 @@
 | Table | Status | Notes |
 |-------|--------|-------|
 | `events` | **Active** | Tier-based event storage (start/end timestamps, peak_tier) |
-| `event_samples` | **Active** | Samples captured during escalation events (tier 2: peaks, tier 3: continuous 10Hz) |
-| `samples` | **Legacy/Orphaned** | Not written by daemon; still queried by `status` and `history` commands (causing stale results) |
-| `process_samples` | **Legacy/Unused** | Schema exists, no INSERT statements, never populated |
+| `process_sample_records` | **Active (v7)** | JSON blob storage for ProcessSamples during escalation |
+| `event_samples` | **Active (legacy format)** | Powermetrics-style samples with stress breakdown - may be unused with new TopCollector |
+| `samples` | **Legacy/Orphaned** | Not written or read by current code |
+| `process_samples` | **Legacy/Unused** | Schema exists, never populated |
 | `daemon_state` | **Partial** | Only `schema_version` is used; design spec says `io_baseline` and `last_sample_id` should also be persisted |
 
 ## Design Spec Gaps (Missing CLI Commands)
@@ -66,39 +64,42 @@
 ## Legacy Data Issues
 
 | Issue | Impact | Fix Needed |
-|-------|--------|-----------|
-| `samples` table orphaned | `status` and `history` CLI commands show stale/no data | Either (a) update commands to use `event_samples` or (b) have daemon also write to `samples` |
-| `process_samples` table unused | No per-process data stored in database | Design intended this for forensics; either delete table or implement insertion |
+|-------|--------|------------|
+| `samples` table orphaned | Table exists, never used | Either delete table in future schema migration or document as legacy |
+| `process_samples` table unused | Table exists, never populated | Either delete table in future schema migration or document as legacy |
+| `event_samples` table potentially orphaned | May not be used with new TopCollector/ProcessSamples approach | Audit daemon.py to confirm whether still written |
 
 ## Priority Recommendations
 
-### High Priority (Broken Functionality)
+### High Priority (Missing Core Features)
 
-1. **Fix `status` command** - References wrong Event attributes (`timestamp` → `start_timestamp`, add duration calculation). This crashes when events exist.
+1. **Learning mode** - Make `config.learning_mode` actually do something in daemon (suppress alerts, collect calibration data).
 
-2. **Fix `status`/`history` data source** - These commands query legacy `samples` table which daemon no longer populates. Need to update to use `event_samples` or add backward-compatible sample insertion.
+2. **Suspects patterns** - Use `config.suspects.patterns` to flag known-problematic processes in forensics output.
 
-### Medium Priority (Missing Core Features)
+3. **Sudoers/tailspin setup** - `install` command should configure sudoers rules and enable tailspin for privileged forensics operations.
 
-3. **Learning mode** - Make `config.learning_mode` actually do something in daemon (suppress alerts, collect calibration data).
+4. **`calibrate` command** - Implement CLI command to analyze learning data and suggest threshold values.
 
-4. **Suspects patterns** - Use `config.suspects.patterns` to flag known-problematic processes in forensics output.
+5. **Event directory cleanup** - `prune_old_data()` should also delete orphaned event directories.
 
-5. **Sudoers/tailspin setup** - `install` command should configure sudoers rules and enable tailspin for privileged forensics operations.
+### Medium Priority (Nice to Have)
 
-6. **`calibrate` command** - Implement CLI command to analyze learning data and suggest threshold values.
+6. **TUI history view** - Events screen is done, history view remains as stub notification.
 
-7. **Event directory cleanup** - `prune_old_data()` should also delete orphaned event directories.
+7. **SIGHUP config reload** - Nice to have for live tuning without daemon restart.
 
-### Low Priority (Nice to Have)
+8. **`history --at` option** - Query what was happening at a specific point in time.
 
-8. **TUI history view** - Events screen is done, history view remains as stub notification.
+9. **Daemon state persistence** - Persist `io_baseline` and `last_sample_id` across daemon restarts.
 
-9. **SIGHUP config reload** - Nice to have for live tuning without daemon restart.
+10. **`check_forensics_health()`** - Verify forensics tools are available and working during install.
 
-10. **`history --at` option** - Query what was happening at a specific point in time.
+### Low Priority (Tech Debt)
 
-11. **Daemon state persistence** - Persist `io_baseline` and `last_sample_id` across daemon restarts.
+11. **Legacy table cleanup** - Remove `samples` and `process_samples` tables in future schema migration if confirmed unused.
+
+12. **Audit `event_samples` usage** - Determine if still written with new TopCollector approach.
 
 ## Verification Commands
 
@@ -106,21 +107,18 @@
 # Check for explicit stubs/TODOs
 grep -rn "TODO\|FIXME\|not.*implemented" src/pause_monitor/
 
-# Verify status command crash (if events exist in DB)
-uv run pause-monitor status
-
 # Check learning_mode usage in daemon (should be empty)
 grep -rn "learning_mode" src/pause_monitor/daemon.py
 
 # Check suspects.patterns usage (should only be in config.py)
 grep -rn "suspects\|patterns" src/pause_monitor/*.py | grep -v config.py | grep -v __pycache__
 
-# Check legacy samples table population (should be empty)
-grep -rn "insert_sample" src/pause_monitor/daemon.py
-
 # Check event directory cleanup (should find nothing)
 grep -rn "rmtree\|shutil" src/pause_monitor/storage.py
 
 # List CLI commands that exist
 uv run pause-monitor --help
+
+# Check schema version
+sqlite3 ~/.local/share/pause-monitor/data.db "SELECT value FROM daemon_state WHERE key='schema_version'"
 ```

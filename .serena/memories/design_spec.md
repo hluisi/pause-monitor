@@ -1,8 +1,10 @@
 # Design Specification
 
 > ✅ **Phase 6 COMPLETE (2026-01-22).** Tier-based event storage redesign; SCHEMA_VERSION=6.
+> ⚠️ **Per-Process Scoring Redesign Planned.** See "Per-Process Stressor Scoring" section below.
 
-**Last updated:** 2026-01-23 (Schema redesign for tier-based saving)
+**Last updated:** 2026-01-24 (Added per-process scoring design and TUI redesign)
+**Primary language:** Python
 
 ## Source Documents
 
@@ -15,6 +17,10 @@
 | docs/plans/phase-4-socket-server.md | 2026-01-23 | Archived |
 | docs/plans/phase-5-socket-client-tui.md | 2026-01-23 | Archived |
 | docs/plans/phase-6-cleanup.md | 2026-01-23 | Archived |
+| docs/plans/2026-01-23-per-process-stressor-scoring-design.md | 2026-01-24 | Active |
+| docs/plans/2026-01-23-per-process-stressor-scoring-plan.md | 2026-01-24 | Active |
+| docs/plans/2026-01-23-tui-redesign-design.md | 2026-01-24 | Active |
+| docs/plans/2026-01-23-per-process-stressor-scoring-plan-1st-try.md | 2026-01-24 | Superseded |
 
 ## Overview
 
@@ -25,7 +31,7 @@ A **real-time** system health monitoring tool for macOS that tracks down intermi
 2. Historical trending - Track system behavior over days/weeks to spot patterns
 3. Real-time alerting - Know when the system is under stress before it freezes
 
-## Architecture
+## Architecture (Current - Phase 6)
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -51,7 +57,7 @@ A **real-time** system health monitoring tool for macOS that tracks down intermi
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-## Components
+## Components (Current)
 
 ### Sampler (daemon.py)
 - **Purpose:** Background daemon orchestrating sampling, detection, and forensics
@@ -132,7 +138,206 @@ A **real-time** system health monitoring tool for macOS that tracks down intermi
 - **Purpose:** Distinguish sleep from actual pauses
 - **Methods:** pmset log parsing, clock drift detection
 
-## Data Models
+---
+
+## Per-Process Stressor Scoring (PLANNED REDESIGN)
+
+> **Status:** Design complete, implementation plan ready. See `2026-01-23-per-process-stressor-scoring-design.md` and `2026-01-23-per-process-stressor-scoring-plan.md`.
+
+### Y-Statement Summary
+
+**In the context of** identifying what causes system pauses and slowdowns,
+**facing** incomplete per-process data from powermetrics and a reactive "detect then hunt" model,
+**we decided for** per-process stressor scoring using top at 1Hz with 8 weighted metrics,
+**to achieve** proactive rogue process identification with built-in attribution,
+**accepting** lower sample rate (1Hz vs 10Hz) and a breaking schema change (v7).
+
+### Problem Statement
+
+The current system calculates a single system-wide stress score then hunts for culprits when problems occur. This is backwards — we detect stress, then scramble to figure out who caused it.
+
+The redesign flips this model: continuously identify which processes are causing the most trouble, rank them by a stressor score, and have attribution ready *before* problems manifest.
+
+### New Data Source
+
+Replace `powermetrics` with `top` (macOS) in delta mode at 1Hz.
+
+| | powermetrics | top |
+|--|--------------|-----|
+| **Rate** | 10Hz | 1Hz |
+| **Per-process metrics** | Limited (cpu, pageins only) | Complete (8 metrics) |
+
+### Scoring Weights (8 factors, sum to 100)
+
+| Metric | Weight | What it reveals |
+|--------|--------|-----------------|
+| `cpu` | 25 | CPU hogging — most common trouble sign |
+| `state` | 20 | Stuck/frozen — binary and critical when present |
+| `pageins` | 15 | Disk I/O for memory — catastrophic for performance |
+| `mem` | 15 | Memory footprint — drives system-wide pressure |
+| `cmprs` | 10 | Compressed memory — system struggling with this process |
+| `csw` | 10 | Context switches — scheduling behavior, thrashing |
+| `sysbsd` | 5 | BSD syscalls — kernel interaction overhead |
+| `threads` | 0 | Used for selection only, not scoring |
+
+### Rogue Process Selection
+
+Not every process gets scored — only those flagged as potential rogues:
+
+**Automatic inclusion:**
+- `state = "stuck"` or `state = "zombie"` — Always a problem
+- `pageins > 0` — Any disk I/O for memory is concerning
+
+**Top 3 per category:**
+- CPU, Memory, Compressed, Threads, Context Switches, Syscalls
+
+**Expected result:** 10-20 unique processes per sample
+
+### New Data Structures
+
+```python
+@dataclass
+class ProcessMetrics:
+    """Raw metrics for a single process from top."""
+    pid: int
+    command: str
+    cpu: float
+    state: str
+    mem: int
+    cmprs: int
+    pageins: int
+    csw: int
+    sysbsd: int
+    threads: int
+
+@dataclass
+class ScoredProcess:
+    """A process with its calculated stressor score."""
+    metrics: ProcessMetrics
+    score: int  # 0-100
+    categories: frozenset[str]  # Why included
+
+@dataclass
+class TopResult:
+    """THE canonical format used everywhere."""
+    timestamp: float
+    process_count: int
+    max_score: int
+    rogue_processes: list[ScoredProcess]
+```
+
+### Tier Transitions
+
+Tiers driven by **max process score** (not system-wide average):
+
+| Tier | Trigger |
+|------|---------|
+| SENTINEL (1) | max score < 35 |
+| ELEVATED (2) | max score ≥ 35 |
+| CRITICAL (3) | max score ≥ 65 |
+
+**Rationale:** One rogue process CAN pause a system — it should escalate the whole system.
+
+### Storage Schema (v7)
+
+Simplified: store `TopResult` directly as JSON blob.
+
+```sql
+CREATE TABLE event_samples (
+    id INTEGER PRIMARY KEY,
+    event_id INTEGER NOT NULL,
+    tier INTEGER NOT NULL,
+    top_result TEXT NOT NULL,  -- Entire TopResult as JSON
+    FOREIGN KEY (event_id) REFERENCES events(id)
+);
+```
+
+### Configuration Changes
+
+New sections in config.toml:
+
+```toml
+[scoring]
+cpu = 25
+state = 20
+pageins = 15
+mem = 15
+cmprs = 10
+csw = 10
+sysbsd = 5
+threads = 0
+
+[scoring.normalization]
+cpu_low = 10
+cpu_high = 80
+mem_low = 1000000000  # 1GB
+mem_high = 8000000000  # 8GB
+# ... etc
+
+[tiers]
+elevated_threshold = 35  # Was 15
+critical_threshold = 65  # Was 50
+```
+
+### Implementation Tasks (15 total)
+
+| Phase | Tasks | Description |
+|-------|-------|-------------|
+| 1 | 1-4 | Data model & configuration |
+| 2 | 5-6 | Data collection (top parsing, TopStream) |
+| 3 | 7 | Storage schema v7 |
+| 4 | 8-10 | Daemon integration |
+| 5 | 11-13 | Minimal TUI & CLI |
+| 6 | 14-15 | Cleanup & migration |
+
+---
+
+## TUI Redesign (PLANNED)
+
+> **Status:** Design complete. See `2026-01-23-tui-redesign-design.md`.
+
+### Y-Statement Summary
+
+**In the context of** real-time system monitoring,
+**facing** ephemeral process data that disappears before it can be read and a cluttered multi-screen interface,
+**we decided for** a single dense btop-style screen with per-process stress scoring and a persistent activity log,
+**to achieve** immediate visibility into what's causing system stress,
+**accepting** less screen space for historical event management (delegated to CLI).
+
+### Key Changes
+
+1. **Single-screen real-time monitoring** — Everything visible at once, no page switching
+2. **Unified process table** — One table sorted by per-process stressor score
+3. **Persistent activity log** — Capture threshold crossings so ephemeral spikes are recorded
+4. **Per-process stress scoring** — New feature: each process gets 0-80 score
+5. **Removed complexity:** EventsScreen (→CLI), EventDetailScreen (→CLI), separate CPU/Pagein tables (→unified)
+
+### Proposed Layout
+
+```
+┌─ pause-monitor ─────────────────────────────────────────────────────────────┐
+│ STRESS ████████████░░░░░░░░  42/100  [TIER 1]              14:32:07        │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ ▁▂▃▄▃▂▂▃▅▆▅▄▃▂▂▃▄▅▆▇█▇▆▅▄▃▂▁▁▂▃ (30s)   Load:2.1 Mem:72% Pgin:12/s IO:45M │
+├─ PROCESSES (sorted by stress) ──────────────────────────────────────────────┤
+│ NAME                 STRESS   CPU ms/s   PAGEINS/s   IO KB/s   WAKEUPS/s   │
+│ Chrome                  47      1842          12       2048        145     │
+│ mds_stores              23       412           0       4096         23     │
+│ kernel_task             18       523           0        128        892     │
+│ ...                                                                        │
+├─ ACTIVITY LOG ──────────────────────────────────────────────────────────────┤
+│ 14:32:05  ▲ Chrome           847 pageins/s                                 │
+│ 14:31:58  ▲ mds_stores       12.4 MB/s IO                                  │
+│ 14:31:42  ● Tier → ELEVATED  (stress: 67)                                  │
+│ ...                                                                        │
+├─ RECENT EVENTS ─────────────────────────────────────────────────────────────┤
+│ ○ Jan 23 14:28  32s  peak:72   ○ Jan 23 12:15  8s  peak:54   [e] more     │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## Data Models (Current - Phase 6)
 
 ### events table (Primary - Tier-Based Saving)
 | Field | Type | Purpose |
@@ -348,14 +553,25 @@ Location: `~/.config/pause-monitor/config.toml`
 
 ## Workflows
 
-### Sampling Loop
-1. Run powermetrics at 1s intervals (streaming)
+### Sampling Loop (Current)
+1. Run powermetrics at 100ms intervals (streaming)
 2. Parse each plist sample
 3. Calculate stress score
-4. Check if elevated mode should change (hysteresis: elevate at 30, de-elevate at 20)
-5. Store sample if: elevated mode OR every 5th sample
-6. If pause detected (interval > 2x expected), trigger forensics
-7. If critical stress (>60), trigger preemptive snapshot
+4. Check if elevated mode should change (hysteresis: elevate at threshold, de-elevate after 5s below)
+5. Push to ring buffer and broadcast via socket
+6. If tier 2+, save event samples to SQLite
+7. If pause detected (interval > 2x expected), trigger forensics
+8. If critical stress (>50), trigger preemptive snapshot
+
+### Sampling Loop (Planned - Per-Process)
+1. Run top at 1Hz intervals
+2. Parse output, extract all ~400 processes
+3. Select rogues (automatic inclusion + top 3 per category)
+4. Score each rogue (8 weighted factors)
+5. Use max_score for tier transitions
+6. Push TopResult to ring buffer and broadcast
+7. If tier 2+, save TopResult JSON to SQLite
+8. Forensics unchanged
 
 ### Pause Detection
 1. Compare actual interval vs expected interval
@@ -388,7 +604,7 @@ Location: `~/.config/pause-monitor/config.toml`
 |----------|-----------|
 | Stress scoring over CPU thresholds | High CPU alone doesn't indicate problems; what matters is contention |
 | Always 1s sampling, variable storage | Avoids restarting powermetrics when switching modes; stress calculation still happens every second |
-| Hysteresis for mode transitions | Elevate at 30, de-elevate at 20 to prevent rapid mode cycling |
+| Hysteresis for mode transitions | Elevate at threshold, de-elevate after 5s below to prevent rapid mode cycling |
 | WAL mode for SQLite | Allows concurrent daemon writes and TUI reads |
 | tailspin for kernel traces | Only way to see kernel-level activity during freezes |
 | pmset for sleep detection | No pyobjc dependency, works reliably, provides wake type |
@@ -398,6 +614,9 @@ Location: `~/.config/pause-monitor/config.toml`
 | User-specific sudoers rules | Constrain output paths to prevent cross-user attacks |
 | Unix socket for TUI streaming | Real-time data without SQLite polling overhead |
 | TierManager extracted from Sentinel | Reusable state machine; Sentinel class deleted in Phase 5 |
+| **Per-process scoring (planned)** | Attribution built-in; flip from "detect then hunt" to "always know the culprits" |
+| **1Hz with top (planned)** | Complete per-process metrics vs partial from powermetrics |
+| **Max score for tiers (planned)** | One rogue CAN pause a system; should escalate the whole system |
 
 ## Privileged Operations
 
