@@ -608,3 +608,45 @@ def test_insert_multiple_process_samples(initialized_db: Path):
     assert retrieved[0].data.elapsed_ms == 100
     assert retrieved[1].data.elapsed_ms == 200
     assert retrieved[2].data.elapsed_ms == 300
+
+
+# --- Daemon State Tests ---
+
+
+def test_get_daemon_state_missing_key(tmp_path):
+    """get_daemon_state returns None for missing key."""
+    from pause_monitor.storage import get_connection, get_daemon_state
+
+    db_path = tmp_path / "test.db"
+    init_database(db_path)
+    conn = get_connection(db_path)
+    value = get_daemon_state(conn, "nonexistent")
+    conn.close()
+    assert value is None
+
+
+def test_set_and_get_daemon_state(tmp_path):
+    """set_daemon_state stores value, get_daemon_state retrieves it."""
+    from pause_monitor.storage import get_connection, get_daemon_state, set_daemon_state
+
+    db_path = tmp_path / "test.db"
+    init_database(db_path)
+    conn = get_connection(db_path)
+    set_daemon_state(conn, "boot_time", "1706000000")
+    value = get_daemon_state(conn, "boot_time")
+    conn.close()
+    assert value == "1706000000"
+
+
+def test_set_daemon_state_overwrites(tmp_path):
+    """set_daemon_state overwrites existing value."""
+    from pause_monitor.storage import get_connection, get_daemon_state, set_daemon_state
+
+    db_path = tmp_path / "test.db"
+    init_database(db_path)
+    conn = get_connection(db_path)
+    set_daemon_state(conn, "boot_time", "1000")
+    set_daemon_state(conn, "boot_time", "2000")
+    value = get_daemon_state(conn, "boot_time")
+    conn.close()
+    assert value == "2000"
