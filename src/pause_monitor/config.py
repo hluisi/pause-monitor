@@ -107,6 +107,8 @@ class BandsConfig:
             "high": self.elevated,
             "critical": self.high,
         }
+        if band not in thresholds:
+            raise ValueError(f"Unknown band: {band!r}. Valid bands: {list(thresholds.keys())}")
         return thresholds[band]
 
     @property
@@ -498,14 +500,26 @@ class Config:
 def _load_bands_config(data: dict) -> BandsConfig:
     """Load bands config from TOML data, using dataclass defaults for missing fields."""
     defaults = BandsConfig()
+    valid_bands = {"low", "medium", "elevated", "high", "critical"}
+
+    tracking_band = data.get("tracking_band", defaults.tracking_band)
+    forensics_band = data.get("forensics_band", defaults.forensics_band)
+
+    if tracking_band not in valid_bands:
+        raise ValueError(f"Invalid tracking_band: {tracking_band!r}. Must be one of {valid_bands}")
+    if forensics_band not in valid_bands:
+        raise ValueError(
+            f"Invalid forensics_band: {forensics_band!r}. Must be one of {valid_bands}"
+        )
+
     return BandsConfig(
         low=data.get("low", defaults.low),
         medium=data.get("medium", defaults.medium),
         elevated=data.get("elevated", defaults.elevated),
         high=data.get("high", defaults.high),
         critical=data.get("critical", defaults.critical),
-        tracking_band=data.get("tracking_band", defaults.tracking_band),
-        forensics_band=data.get("forensics_band", defaults.forensics_band),
+        tracking_band=tracking_band,
+        forensics_band=forensics_band,
     )
 
 

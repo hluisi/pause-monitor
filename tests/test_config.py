@@ -519,3 +519,40 @@ mem_gb = 64.0
     # Defaults for unspecified
     assert config.scoring.normalization.cpu == 100.0
     assert config.scoring.normalization.pageins == 1000
+
+
+def test_bands_get_threshold_raises_for_invalid_band():
+    """get_threshold() raises ValueError for invalid band name."""
+    import pytest
+
+    bands = BandsConfig()
+    with pytest.raises(ValueError, match="Unknown band: 'invalid'"):
+        bands.get_threshold("invalid")
+
+
+def test_config_load_raises_for_invalid_tracking_band(tmp_path):
+    """Config.load() raises ValueError for invalid tracking_band."""
+    import pytest
+
+    config_file = tmp_path / "config.toml"
+    config_file.write_text("""
+[bands]
+tracking_band = "elavated"
+""")
+
+    with pytest.raises(ValueError, match="Invalid tracking_band"):
+        Config.load(config_file)
+
+
+def test_config_load_raises_for_invalid_forensics_band(tmp_path):
+    """Config.load() raises ValueError for invalid forensics_band."""
+    import pytest
+
+    config_file = tmp_path / "config.toml"
+    config_file.write_text("""
+[bands]
+forensics_band = "hihg"
+""")
+
+    with pytest.raises(ValueError, match="Invalid forensics_band"):
+        Config.load(config_file)
