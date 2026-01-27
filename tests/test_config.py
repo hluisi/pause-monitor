@@ -2,13 +2,13 @@
 
 from pause_monitor.config import (
     AlertsConfig,
+    BandsConfig,
     Config,
     NormalizationConfig,
     RetentionConfig,
     SamplingConfig,
     SentinelConfig,
     SuspectsConfig,
-    TiersConfig,
 )
 
 
@@ -95,9 +95,14 @@ learning_mode = true
 [sampling]
 normal_interval = 10
 
-[tiers]
-elevated_threshold = 40
-critical_threshold = 80
+[bands]
+low = 15
+medium = 30
+elevated = 50
+high = 70
+critical = 90
+tracking_band = "medium"
+forensics_band = "elevated"
 
 [alerts]
 enabled = false
@@ -107,8 +112,9 @@ enabled = false
     assert config.learning_mode is True
     assert config.sampling.normal_interval == 10
     assert config.sampling.elevated_interval == 1  # Default preserved
-    assert config.tiers.elevated_threshold == 40
-    assert config.tiers.critical_threshold == 80
+    assert config.bands.low == 15
+    assert config.bands.medium == 30
+    assert config.bands.tracking_band == "medium"
     assert config.alerts.enabled is False
 
 
@@ -127,12 +133,14 @@ def test_sentinel_config_defaults():
     assert config.ring_buffer_seconds == 30
 
 
-def test_tiers_config_defaults():
-    """TiersConfig has sensible defaults."""
-    config = TiersConfig()
-    # Verify defaults exist and are sensible (elevated < critical)
-    assert config.elevated_threshold > 0
-    assert config.critical_threshold > config.elevated_threshold
+def test_bands_config_has_ordered_thresholds():
+    """BandsConfig has sensible ordered thresholds."""
+    bands = BandsConfig()
+    # Verify defaults are ordered: low < medium < elevated < high < critical
+    assert bands.low < bands.medium
+    assert bands.medium < bands.elevated
+    assert bands.elevated < bands.high
+    assert bands.high < bands.critical
 
 
 def test_config_loads_sentinel_section(tmp_path):
@@ -143,39 +151,41 @@ def test_config_loads_sentinel_section(tmp_path):
 fast_interval_ms = 200
 ring_buffer_seconds = 60
 
-[tiers]
-elevated_threshold = 20
-critical_threshold = 60
+[bands]
+low = 15
+medium = 30
+elevated = 50
+high = 70
 """)
 
     config = Config.load(config_file)
     assert config.sentinel.fast_interval_ms == 200
     assert config.sentinel.ring_buffer_seconds == 60
-    assert config.tiers.elevated_threshold == 20
-    assert config.tiers.critical_threshold == 60
+    assert config.bands.low == 15
+    assert config.bands.elevated == 50
 
 
 def test_config_save_includes_sentinel_section(tmp_path):
-    """Config.save() writes sentinel and tiers sections."""
+    """Config.save() writes sentinel and bands sections."""
     config_path = tmp_path / "config.toml"
     config = Config()
     config.sentinel.fast_interval_ms = 150
-    config.tiers.elevated_threshold = 25
+    config.bands.low = 25
     config.save(config_path)
 
     content = config_path.read_text()
     assert "fast_interval_ms = 150" in content
-    assert "elevated_threshold = 25" in content
+    assert "low = 25" in content
 
 
-def test_full_config_includes_sentinel_and_tiers():
-    """Full Config object has sentinel and tiers fields."""
+def test_full_config_includes_sentinel_and_bands():
+    """Full Config object has sentinel and bands fields."""
     config = Config()
     assert hasattr(config, "sentinel")
-    assert hasattr(config, "tiers")
+    assert hasattr(config, "bands")
     # Verify fields exist and match their respective config defaults
     assert config.sentinel.fast_interval_ms == SentinelConfig().fast_interval_ms
-    assert config.tiers.elevated_threshold == TiersConfig().elevated_threshold
+    assert config.bands.low == BandsConfig().low
 
 
 def test_config_loads_partial_sentinel_section(tmp_path):
@@ -297,13 +307,16 @@ def test_rogue_selection_default():
     assert config.rogue_selection.state.states == ["zombie"]
 
 
-def test_tier_thresholds_in_config():
-    """Config includes tier thresholds from TiersConfig."""
+def test_band_thresholds_in_config():
+    """Config includes band thresholds from BandsConfig."""
     config = Config()
-    # Verify Config.tiers matches TiersConfig defaults
-    defaults = TiersConfig()
-    assert config.tiers.elevated_threshold == defaults.elevated_threshold
-    assert config.tiers.critical_threshold == defaults.critical_threshold
+    # Verify Config.bands matches BandsConfig defaults
+    defaults = BandsConfig()
+    assert config.bands.low == defaults.low
+    assert config.bands.medium == defaults.medium
+    assert config.bands.elevated == defaults.elevated
+    assert config.bands.high == defaults.high
+    assert config.bands.critical == defaults.critical
 
 
 def test_config_save_includes_scoring_section(tmp_path):
@@ -390,6 +403,62 @@ def test_normalization_config_defaults():
     assert norm.csw == 100000
     assert norm.sysbsd == 100000
     assert norm.threads == 1000
+
+
+def test_bands_config_defaults():
+    """BandsConfig has sensible defaults."""
+    bands = BandsConfig()
+    assert bands.low == 20
+    assert bands.medium == 40
+    assert bands.elevated == 60
+    assert bands.high == 80
+    assert bands.critical == 100
+    assert bands.tracking_band == "elevated"
+    assert bands.forensics_band == "high"
+
+
+def test_bands_config_get_band_for_score():
+    """get_band() returns correct band name for score."""
+    bands = BandsConfig()
+    assert bands.get_band(0) == "low"
+    assert bands.get_band(19) == "low"
+    assert bands.get_band(20) == "medium"
+    assert bands.get_band(39) == "medium"
+    assert bands.get_band(40) == "elevated"
+    assert bands.get_band(59) == "elevated"
+    assert bands.get_band(60) == "high"
+    assert bands.get_band(79) == "high"
+    assert bands.get_band(80) == "critical"
+    assert bands.get_band(100) == "critical"
+
+
+def test_bands_config_get_threshold_for_band():
+    """get_threshold() returns score threshold for band name."""
+    bands = BandsConfig()
+    assert bands.get_threshold("low") == 0
+    assert bands.get_threshold("medium") == 20
+    assert bands.get_threshold("elevated") == 40
+    assert bands.get_threshold("high") == 60
+    assert bands.get_threshold("critical") == 80
+
+
+def test_bands_config_tracking_threshold():
+    """tracking_threshold property returns threshold for tracking_band."""
+    bands = BandsConfig()
+    assert bands.tracking_threshold == 40
+
+
+def test_bands_config_forensics_threshold():
+    """forensics_threshold property returns threshold for forensics_band."""
+    bands = BandsConfig()
+    assert bands.forensics_threshold == 60
+
+
+def test_config_has_bands_not_tiers():
+    """Config has bands attribute, not tiers."""
+    config = Config()
+    assert hasattr(config, "bands")
+    assert not hasattr(config, "tiers")
 
 
 def test_scoring_config_includes_normalization():

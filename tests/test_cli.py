@@ -10,10 +10,10 @@ from click.testing import CliRunner
 from pause_monitor.cli import main
 from pause_monitor.config import (
     AlertsConfig,
+    BandsConfig,
     Config,
     RetentionConfig,
     SamplingConfig,
-    TiersConfig,
 )
 from pause_monitor.storage import create_event, finalize_event, init_database
 
@@ -648,9 +648,9 @@ class TestConfigCommand:
         assert "[sampling]" in result.output
         assert "normal_interval = 5" in result.output
         assert "elevated_interval = 1" in result.output
-        assert "[tiers]" in result.output
-        assert "elevated_threshold = 50" in result.output
-        assert "critical_threshold = 75" in result.output
+        assert "[bands]" in result.output
+        assert "low = 20" in result.output
+        assert "critical = 100" in result.output
         assert "[retention]" in result.output
         assert "samples_days = 30" in result.output
         assert "events_days = 90" in result.output
@@ -669,9 +669,12 @@ class TestConfigCommand:
                 normal_interval=10,
                 elevated_interval=2,
             ),
-            tiers=TiersConfig(
-                elevated_threshold=40,
-                critical_threshold=70,
+            bands=BandsConfig(
+                low=15,
+                medium=30,
+                elevated=50,
+                high=70,
+                critical=90,
             ),
             retention=RetentionConfig(samples_days=14, events_days=60),
             alerts=AlertsConfig(enabled=False, sound=False),
@@ -686,8 +689,8 @@ class TestConfigCommand:
         assert "Exists: True" in result.output
         assert "normal_interval = 10" in result.output
         assert "elevated_interval = 2" in result.output
-        assert "elevated_threshold = 40" in result.output
-        assert "critical_threshold = 70" in result.output
+        assert "low = 15" in result.output
+        assert "critical = 90" in result.output
         assert "samples_days = 14" in result.output
         assert "events_days = 60" in result.output
         assert "enabled = False" in result.output

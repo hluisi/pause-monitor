@@ -75,11 +75,49 @@ class SentinelConfig:
 
 
 @dataclass
-class TiersConfig:
-    """Tier threshold configuration for process scores."""
+class BandsConfig:
+    """Band thresholds and behavior triggers."""
 
-    elevated_threshold: int = 50
-    critical_threshold: int = 75
+    low: int = 20
+    medium: int = 40
+    elevated: int = 60
+    high: int = 80
+    critical: int = 100
+    tracking_band: str = "elevated"
+    forensics_band: str = "high"
+
+    def get_band(self, score: int) -> str:
+        """Return band name for a given score."""
+        if score >= self.high:
+            return "critical"
+        if score >= self.elevated:
+            return "high"
+        if score >= self.medium:
+            return "elevated"
+        if score >= self.low:
+            return "medium"
+        return "low"
+
+    def get_threshold(self, band: str) -> int:
+        """Return the minimum score for a band."""
+        thresholds = {
+            "low": 0,
+            "medium": self.low,
+            "elevated": self.medium,
+            "high": self.elevated,
+            "critical": self.high,
+        }
+        return thresholds[band]
+
+    @property
+    def tracking_threshold(self) -> int:
+        """Return the threshold for the tracking band."""
+        return self.get_threshold(self.tracking_band)
+
+    @property
+    def forensics_threshold(self) -> int:
+        """Return the threshold for the forensics band."""
+        return self.get_threshold(self.forensics_band)
 
 
 @dataclass
@@ -181,7 +219,7 @@ class Config:
     suspects: SuspectsConfig = field(default_factory=SuspectsConfig)
     forensics: ForensicsConfig = field(default_factory=ForensicsConfig)
     sentinel: SentinelConfig = field(default_factory=SentinelConfig)
-    tiers: TiersConfig = field(default_factory=TiersConfig)
+    bands: BandsConfig = field(default_factory=BandsConfig)
     scoring: ScoringConfig = field(default_factory=ScoringConfig)
     rogue_selection: RogueSelectionConfig = field(default_factory=RogueSelectionConfig)
     learning_mode: bool = False
@@ -281,10 +319,15 @@ class Config:
         doc.add("sentinel", sentinel)
         doc.add(tomlkit.nl())
 
-        tiers = tomlkit.table()
-        tiers.add("elevated_threshold", self.tiers.elevated_threshold)
-        tiers.add("critical_threshold", self.tiers.critical_threshold)
-        doc.add("tiers", tiers)
+        bands = tomlkit.table()
+        bands.add("low", self.bands.low)
+        bands.add("medium", self.bands.medium)
+        bands.add("elevated", self.bands.elevated)
+        bands.add("high", self.bands.high)
+        bands.add("critical", self.bands.critical)
+        bands.add("tracking_band", self.bands.tracking_band)
+        bands.add("forensics_band", self.bands.forensics_band)
+        doc.add("bands", bands)
         doc.add(tomlkit.nl())
 
         # Scoring section with nested weights and state multipliers
@@ -395,7 +438,7 @@ class Config:
         suspects_data = data.get("suspects", {})
         forensics_data = data.get("forensics", {})
         sentinel_data = data.get("sentinel", {})
-        tiers_data = data.get("tiers", {})
+        bands_data = data.get("bands", {})
         scoring_data = data.get("scoring", {})
         rogue_data = data.get("rogue_selection", {})
 
@@ -445,19 +488,24 @@ class Config:
                 sample_interval_ms=sentinel_data.get("sample_interval_ms", 1500),
                 wake_suppress_seconds=sentinel_data.get("wake_suppress_seconds", 10.0),
             ),
-            tiers=_load_tiers_config(tiers_data),
+            bands=_load_bands_config(bands_data),
             scoring=_load_scoring_config(scoring_data),
             rogue_selection=_load_rogue_selection_config(rogue_data),
             learning_mode=data.get("learning_mode", False),
         )
 
 
-def _load_tiers_config(data: dict) -> TiersConfig:
-    """Load tiers config from TOML data, using dataclass defaults for missing fields."""
-    defaults = TiersConfig()
-    return TiersConfig(
-        elevated_threshold=data.get("elevated_threshold", defaults.elevated_threshold),
-        critical_threshold=data.get("critical_threshold", defaults.critical_threshold),
+def _load_bands_config(data: dict) -> BandsConfig:
+    """Load bands config from TOML data, using dataclass defaults for missing fields."""
+    defaults = BandsConfig()
+    return BandsConfig(
+        low=data.get("low", defaults.low),
+        medium=data.get("medium", defaults.medium),
+        elevated=data.get("elevated", defaults.elevated),
+        high=data.get("high", defaults.high),
+        critical=data.get("critical", defaults.critical),
+        tracking_band=data.get("tracking_band", defaults.tracking_band),
+        forensics_band=data.get("forensics_band", defaults.forensics_band),
     )
 
 

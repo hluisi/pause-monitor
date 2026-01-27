@@ -101,8 +101,8 @@ class Daemon:
 
         # Tier management
         self.tier_manager = TierManager(
-            elevated_threshold=config.tiers.elevated_threshold,
-            critical_threshold=config.tiers.critical_threshold,
+            elevated_threshold=config.bands.tracking_threshold,
+            critical_threshold=config.bands.forensics_threshold,
         )
 
         # Event tracking (tier-based saving)

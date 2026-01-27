@@ -157,16 +157,16 @@ def test_tier_manager_entry_time_accessors():
 
 
 def test_tier_manager_uses_config_thresholds():
-    """TierManager should use thresholds from TiersConfig."""
-    from pause_monitor.config import TiersConfig
+    """TierManager should use thresholds from BandsConfig."""
+    from pause_monitor.config import BandsConfig
 
-    tiers = TiersConfig()
+    bands = BandsConfig()
     tm = TierManager(
-        elevated_threshold=tiers.elevated_threshold,
-        critical_threshold=tiers.critical_threshold,
+        elevated_threshold=bands.tracking_threshold,
+        critical_threshold=bands.forensics_threshold,
     )
-    assert tm._elevated_threshold == tiers.elevated_threshold
-    assert tm._critical_threshold == tiers.critical_threshold
+    assert tm._elevated_threshold == bands.tracking_threshold
+    assert tm._critical_threshold == bands.forensics_threshold
 
 
 def test_tier_manager_peak_score_property():

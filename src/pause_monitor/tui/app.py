@@ -731,8 +731,8 @@ class PauseMonitorApp(App):
         yield Header()
 
         yield StressGauge(
-            elevated_threshold=self.config.tiers.elevated_threshold,
-            critical_threshold=self.config.tiers.critical_threshold,
+            elevated_threshold=self.config.bands.tracking_threshold,
+            critical_threshold=self.config.bands.forensics_threshold,
             id="stress-gauge",
         )
         yield SampleInfoPanel(id="sample-info")
