@@ -98,6 +98,26 @@ def test_tier_manager_peak_returns_action_on_new_peak():
     assert action is None
 
 
+def test_tier_manager_peak_not_returned_when_score_equals_existing_peak():
+    """TierManager should NOT return tier2_peak when score equals (but doesn't exceed) peak.
+
+    This prevents duplicate sample saving when score stays at peak level.
+    """
+    manager = TierManager(elevated_threshold=15, critical_threshold=50)
+    manager.update(score=20)  # Entry
+
+    action = manager.update(score=30)  # New peak
+    assert action == "tier2_peak"
+
+    # Same score again - should NOT be a new peak
+    action = manager.update(score=30)
+    assert action is None  # Not tier2_peak!
+
+    # And again
+    action = manager.update(score=30)
+    assert action is None
+
+
 def test_tier_manager_escalates_at_exact_threshold():
     """Score exactly at threshold triggers escalation."""
     manager = TierManager(elevated_threshold=15, critical_threshold=50)

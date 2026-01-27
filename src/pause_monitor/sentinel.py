@@ -81,13 +81,15 @@ class TierManager:
             new_tier = Tier.SENTINEL
 
         # Track peak during elevated states
+        is_new_peak = False
         if self._current_tier >= Tier.ELEVATED and score > self._peak_score:
             self._peak_score = score
+            is_new_peak = True
 
         # No change
         if new_tier == self._current_tier:
-            # Check for new peak in tier 2
-            if self._current_tier == Tier.ELEVATED and score == self._peak_score:
+            # Return TIER2_PEAK only when we actually set a new peak
+            if self._current_tier == Tier.ELEVATED and is_new_peak:
                 return TierAction.TIER2_PEAK
             return None
 

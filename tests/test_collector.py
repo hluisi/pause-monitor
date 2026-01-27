@@ -126,6 +126,46 @@ def test_parse_top_output():
     assert chrome["pageins"] == 68
 
 
+def test_parse_top_output_uses_second_sample():
+    """Should use sample 2 (accurate delta CPU%) not sample 1 (instantaneous).
+
+    top -l 2 outputs two samples. Sample 1 has inaccurate instantaneous CPU%.
+    Sample 2 has accurate delta CPU% over the 1-second interval.
+    The parser should use the LAST header to get sample 2's data.
+    """
+    two_sample_output = """
+Processes: 500 total, 3 running, 497 sleeping
+Load Avg: 2.00, 1.50, 1.00
+
+PID    COMMAND          %CPU STATE    MEM    CMPRS  #TH    CSW        SYSBSD     PAGEINS
+7229   chrome           95.0 running  339M   10M    38     1000       2000       50
+409    WindowServer     80.0 running  1473M  0B     26     3000       4000       100
+
+Processes: 500 total, 2 running, 498 sleeping
+Load Avg: 2.10, 1.55, 1.05
+
+PID    COMMAND          %CPU STATE    MEM    CMPRS  #TH    CSW        SYSBSD     PAGEINS
+7229   chrome           4.2  running  340M   11M    38     1100       2100       55
+409    WindowServer     2.8  running  1475M  0B     26     3100       4100       105
+"""
+    collector = TopCollector(Config())
+    processes = collector._parse_top_output(two_sample_output)
+
+    # Should only have 2 processes (sample 2), not 4 (both samples)
+    assert len(processes) == 2
+
+    # Should have sample 2's accurate CPU%, not sample 1's inflated values
+    chrome = next(p for p in processes if p["command"] == "chrome")
+    assert chrome["cpu"] == 4.2  # NOT 95.0 from sample 1
+
+    windowserver = next(p for p in processes if p["command"] == "WindowServer")
+    assert windowserver["cpu"] == 2.8  # NOT 80.0 from sample 1
+
+    # Other metrics should also be from sample 2
+    assert chrome["mem"] == 340 * 1024 * 1024  # 340M, not 339M
+    assert chrome["pageins"] == 55  # not 50
+
+
 def test_parse_memory_suffixes():
     """Should handle M, K, G, B suffixes."""
     collector = TopCollector(Config())

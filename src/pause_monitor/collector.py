@@ -135,12 +135,13 @@ class TopCollector:
         lines = raw.strip().split("\n")
         processes = []
 
-        # Find header line
+        # Find LAST header line (sample 2 has accurate CPU% delta)
+        # top -l 2 outputs two samples; sample 1 is instantaneous (inaccurate),
+        # sample 2 is the delta over the interval (accurate)
         header_idx = None
         for i, line in enumerate(lines):
             if line.strip().startswith("PID"):
-                header_idx = i
-                break
+                header_idx = i  # no break - keep updating to find last one
 
         if header_idx is None:
             return []
