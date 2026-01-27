@@ -58,6 +58,8 @@ def short_tmp_path():
 
 def make_test_process_score(**kwargs) -> ProcessScore:
     """Create ProcessScore with sensible defaults for testing."""
+    import time
+
     defaults = {
         "pid": 1,
         "command": "test_proc",
@@ -71,6 +73,7 @@ def make_test_process_score(**kwargs) -> ProcessScore:
         "threads": 4,
         "score": 50,
         "categories": frozenset({"cpu"}),
+        "captured_at": time.time(),
     }
     defaults.update(kwargs)
     return ProcessScore(**defaults)
@@ -179,6 +182,7 @@ def test_process_samples_storage_roundtrip(initialized_db):
                 threads=38,
                 score=75,
                 categories=frozenset({"cpu", "pageins", "mem"}),
+                captured_at=1706000000.0,
             ),
             ProcessScore(
                 pid=0,
@@ -193,6 +197,7 @@ def test_process_samples_storage_roundtrip(initialized_db):
                 threads=870,
                 score=25,
                 categories=frozenset({"stuck", "threads"}),
+                captured_at=1706000000.0,
             ),
         ],
     )

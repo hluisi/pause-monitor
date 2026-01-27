@@ -181,6 +181,7 @@ class TestEventsCommand:
                     threads=50,
                     score=75,
                     categories=frozenset({"cpu", "pageins"}),
+                    captured_at=1706000000.0,
                 ),
                 ProcessScore(
                     pid=5678,
@@ -195,6 +196,7 @@ class TestEventsCommand:
                     threads=30,
                     score=60,
                     categories=frozenset({"stuck", "mem"}),
+                    captured_at=1706000000.0,
                 ),
             ],
         )

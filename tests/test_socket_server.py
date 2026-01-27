@@ -36,6 +36,8 @@ def short_tmp_path():
 
 def make_test_process_score(**kwargs) -> ProcessScore:
     """Create ProcessScore with sensible defaults for testing."""
+    import time
+
     defaults = {
         "pid": 1,
         "command": "test",
@@ -49,6 +51,7 @@ def make_test_process_score(**kwargs) -> ProcessScore:
         "threads": 1,
         "score": 50,
         "categories": frozenset({"cpu"}),
+        "captured_at": time.time(),
     }
     defaults.update(kwargs)
     return ProcessScore(**defaults)

@@ -37,6 +37,7 @@ def test_process_score_to_dict():
         threads=4,
         score=42,
         categories=frozenset({"cpu", "pageins"}),
+        captured_at=1706000000.0,
     )
     d = ps.to_dict()
     assert d["pid"] == 123
@@ -59,6 +60,7 @@ def test_process_score_from_dict():
         "threads": 4,
         "score": 42,
         "categories": ["cpu", "pageins"],
+        "captured_at": 1706000000.0,
     }
     ps = ProcessScore.from_dict(d)
     assert ps.pid == 123
@@ -86,6 +88,7 @@ def test_process_samples_json_roundtrip():
                 threads=2,
                 score=75,
                 categories=frozenset({"cpu"}),
+                captured_at=1706000000.0,
             ),
         ],
     )
@@ -673,3 +676,65 @@ def test_score_process_uses_normalization_config():
     scored2 = collector2._score_process(proc)
     # With 8GB max and 4GB usage, mem contribution is 0.5 * 15 = 7.5
     assert scored2.score < scored.score
+
+
+def test_process_score_has_captured_at():
+    """ProcessScore includes captured_at timestamp."""
+    score = ProcessScore(
+        pid=123,
+        command="test",
+        cpu=50.0,
+        state="running",
+        mem=1000000,
+        cmprs=0,
+        pageins=10,
+        csw=100,
+        sysbsd=50,
+        threads=4,
+        score=45,
+        categories=frozenset(["cpu"]),
+        captured_at=1706000000.0,
+    )
+    assert score.captured_at == 1706000000.0
+
+
+def test_process_score_to_dict_includes_captured_at():
+    """to_dict() includes captured_at field."""
+    score = ProcessScore(
+        pid=123,
+        command="test",
+        cpu=50.0,
+        state="running",
+        mem=1000000,
+        cmprs=0,
+        pageins=10,
+        csw=100,
+        sysbsd=50,
+        threads=4,
+        score=45,
+        categories=frozenset(["cpu"]),
+        captured_at=1706000000.0,
+    )
+    d = score.to_dict()
+    assert d["captured_at"] == 1706000000.0
+
+
+def test_process_score_from_dict_restores_captured_at():
+    """from_dict() restores captured_at field."""
+    d = {
+        "pid": 123,
+        "command": "test",
+        "cpu": 50.0,
+        "state": "running",
+        "mem": 1000000,
+        "cmprs": 0,
+        "pageins": 10,
+        "csw": 100,
+        "sysbsd": 50,
+        "threads": 4,
+        "score": 45,
+        "categories": ["cpu"],
+        "captured_at": 1706000000.0,
+    }
+    score = ProcessScore.from_dict(d)
+    assert score.captured_at == 1706000000.0

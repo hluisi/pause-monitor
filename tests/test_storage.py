@@ -511,6 +511,7 @@ def test_insert_process_sample_json(initialized_db: Path):
                 threads=2,
                 score=75,
                 categories=frozenset({"cpu"}),
+                captured_at=1706000000.0,
             ),
         ],
     )
@@ -594,6 +595,7 @@ def test_insert_multiple_process_samples(initialized_db: Path):
                     threads=2,
                     score=50 + i * 10,
                     categories=frozenset({"cpu"}),
+                    captured_at=1706000000.0 + i,
                 ),
             ],
         )

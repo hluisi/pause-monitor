@@ -570,6 +570,7 @@ async def test_daemon_handles_tier2_exit_writes_bookmark(patched_config_paths):
                 threads=5,
                 score=35,
                 categories=frozenset(["cpu"]),
+                captured_at=1706000000.0,
             )
         ],
     )
@@ -693,6 +694,7 @@ async def test_daemon_main_loop_collects_samples(patched_config_paths, monkeypat
                     threads=5,
                     score=25,
                     categories=frozenset(["cpu"]),
+                    captured_at=1706000000.0,
                 )
             ],
         ),
@@ -715,6 +717,7 @@ async def test_daemon_main_loop_collects_samples(patched_config_paths, monkeypat
                     threads=20,
                     score=45,
                     categories=frozenset(["cpu", "mem"]),
+                    captured_at=1706000000.0,
                 )
             ],
         ),
@@ -780,6 +783,7 @@ async def test_daemon_main_loop_updates_tier_manager(patched_config_paths, monke
                 threads=50,
                 score=50,
                 categories=frozenset(["cpu", "pageins"]),
+                captured_at=1706000000.0,
             )
         ],
     )

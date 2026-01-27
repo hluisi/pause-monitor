@@ -40,6 +40,8 @@ def make_process_score(
         "threads": 10,
     }
     defaults.update(kwargs)
+    import time
+
     return ProcessScore(
         pid=pid,
         command=command,
@@ -53,6 +55,7 @@ def make_process_score(
         threads=defaults["threads"],
         score=score,
         categories=categories or frozenset({"cpu"}),
+        captured_at=defaults.get("captured_at", time.time()),
     )
 
 

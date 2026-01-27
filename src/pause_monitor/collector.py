@@ -31,6 +31,7 @@ class ProcessScore:
     threads: int
     score: int
     categories: frozenset[str]
+    captured_at: float
 
     def to_dict(self) -> dict:
         """Serialize to a dictionary."""
@@ -47,6 +48,7 @@ class ProcessScore:
             "threads": self.threads,
             "score": self.score,
             "categories": list(self.categories),
+            "captured_at": self.captured_at,
         }
 
     @classmethod
@@ -65,6 +67,7 @@ class ProcessScore:
             threads=data["threads"],
             score=data["score"],
             categories=frozenset(data["categories"]),
+            captured_at=data["captured_at"],
         )
 
 
@@ -290,6 +293,7 @@ class TopCollector:
             threads=proc["threads"],
             score=score,
             categories=frozenset(proc["_categories"]),
+            captured_at=time.time(),
         )
 
     async def collect(self) -> ProcessSamples:
