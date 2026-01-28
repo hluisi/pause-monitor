@@ -33,10 +33,11 @@ def tui() -> None:
 @main.command()
 def status() -> None:
     """Quick health check."""
-    from datetime import datetime, timedelta
+    import time
 
+    from pause_monitor.boottime import get_boot_time
     from pause_monitor.config import Config
-    from pause_monitor.storage import get_connection, get_events
+    from pause_monitor.storage import get_connection, get_open_events
 
     config = Config.load()
 
@@ -50,32 +51,20 @@ def status() -> None:
 
     conn = get_connection(config.db_path)
     try:
-        # Get recent events
-        events = get_events(
-            conn,
-            start=datetime.now() - timedelta(days=1),
-            limit=5,
-        )
+        boot_time = get_boot_time()
+        open_events = get_open_events(conn, boot_time)
 
-        if not events:
-            click.echo("No events in the last 24 hours.")
+        if not open_events:
+            click.echo("No active process tracking.")
             return
 
-        click.echo(f"\nRecent events (last 24h): {len(events)}")
-        for event in events:
-            # Compute duration if event has ended
-            if event.end_timestamp:
-                duration = (event.end_timestamp - event.start_timestamp).total_seconds()
-                duration_str = f"{duration:.1f}s"
-            else:
-                duration_str = "ongoing"
-
-            tier_str = f"tier {event.peak_tier}" if event.peak_tier else "elevated"
-            score_str = f"peak score {event.peak_stress}" if event.peak_stress else ""
-
+        click.echo(f"\nActive tracked processes: {len(open_events)}")
+        for event in open_events:
+            duration = time.time() - event["entry_time"]
+            duration_str = f"{duration:.0f}s"
             click.echo(
-                f"  - {event.start_timestamp.strftime('%H:%M:%S')}: "
-                f"{duration_str} {tier_str} {score_str}"
+                f"  - {event['command']} (PID {event['pid']}): "
+                f"{duration_str} in {event['peak_band']} (score {event['peak_score']})"
             )
     finally:
         conn.close()
@@ -83,21 +72,19 @@ def status() -> None:
 
 @main.group(invoke_without_command=True)
 @click.option("--limit", "-n", default=20, help="Number of events to show")
-@click.option(
-    "--status",
-    type=click.Choice(["unreviewed", "reviewed", "pinned", "dismissed"]),
-    help="Filter by status",
-)
+@click.option("--open", "open_only", is_flag=True, help="Show only open events")
 @click.pass_context
-def events(ctx, limit: int, status: str | None) -> None:
-    """List pause events.
+def events(ctx, limit: int, open_only: bool) -> None:
+    """List process events.
 
-    Without subcommand, lists recent events.
+    Shows per-process band tracking events from the current boot.
     Use 'events show <id>' to view event details.
-    Use 'events mark <id>' to change event status.
     """
-    # Store config in context for subcommands
+    import time
+
+    from pause_monitor.boottime import get_boot_time
     from pause_monitor.config import Config
+    from pause_monitor.storage import get_connection, get_open_events
 
     ctx.ensure_object(dict)
     ctx.obj["config"] = Config.load()
@@ -105,8 +92,6 @@ def events(ctx, limit: int, status: str | None) -> None:
     # If a subcommand was invoked, let it handle things
     if ctx.invoked_subcommand is not None:
         return
-
-    from pause_monitor.storage import get_connection, get_events
 
     config = ctx.obj["config"]
 
@@ -116,40 +101,57 @@ def events(ctx, limit: int, status: str | None) -> None:
 
     conn = get_connection(config.db_path)
     try:
-        # List events
-        event_list = get_events(conn, limit=limit, status=status)
+        boot_time = get_boot_time()
 
-        if not event_list:
+        if open_only:
+            # Only show open events
+            events_list = get_open_events(conn, boot_time)
+        else:
+            # Show all events from current boot (both open and closed)
+            cursor = conn.execute(
+                """SELECT id, pid, command, entry_time, exit_time, entry_band, peak_band, peak_score
+                   FROM process_events
+                   WHERE boot_time = ?
+                   ORDER BY entry_time DESC
+                   LIMIT ?""",
+                (boot_time, limit),
+            )
+            events_list = [
+                {
+                    "id": r[0],
+                    "pid": r[1],
+                    "command": r[2],
+                    "entry_time": r[3],
+                    "exit_time": r[4],
+                    "entry_band": r[5],
+                    "peak_band": r[6],
+                    "peak_score": r[7],
+                }
+                for r in cursor.fetchall()
+            ]
+
+        if not events_list:
             click.echo("No events recorded.")
             return
 
-        # Status icons for visual distinction
-        status_icons = {
-            "unreviewed": "●",
-            "reviewed": "○",
-            "pinned": "◆",
-            "dismissed": "◇",
-        }
-
         click.echo(
-            f"{'':3}{'ID':>5}  {'Time':20}  {'Duration':>10}  "
-            f"{'Stress':>7}  {'Tier':>5}  {'Status':12}"
+            f"{'ID':>5}  {'Command':20}  {'PID':>7}  {'Duration':>10}  "
+            f"{'Peak Band':>10}  {'Score':>6}"
         )
         click.echo("-" * 75)
 
-        for event in event_list:
-            icon = status_icons.get(event.status, "?")
-            # Calculate duration from timestamps
-            if event.end_timestamp:
-                duration = (event.end_timestamp - event.start_timestamp).total_seconds()
+        now = time.time()
+        for event in events_list:
+            if event.get("exit_time"):
+                duration = event["exit_time"] - event["entry_time"]
                 duration_str = f"{duration:.1f}s"
             else:
-                duration_str = "ongoing"
-            stress_str = f"{event.peak_stress or 0}/100"
-            tier_str = str(event.peak_tier or "-")
+                duration = now - event["entry_time"]
+                duration_str = f"{duration:.0f}s*"  # * means ongoing
+
             click.echo(
-                f"{icon:3}{event.id:>5}  {event.start_timestamp.strftime('%Y-%m-%d %H:%M:%S'):20}  "
-                f"{duration_str:>10}  {stress_str:>7}  {tier_str:>5}  {event.status:12}"
+                f"{event['id']:>5}  {event['command'][:20]:20}  {event['pid']:>7}  "
+                f"{duration_str:>10}  {event['peak_band']:>10}  {event['peak_score']:>6}"
             )
     finally:
         conn.close()
@@ -159,8 +161,11 @@ def events(ctx, limit: int, status: str | None) -> None:
 @click.argument("event_id", type=int)
 @click.pass_context
 def events_show(ctx, event_id: int) -> None:
-    """Show details of a specific event."""
-    from pause_monitor.storage import get_connection, get_event_by_id, get_process_samples
+    """Show details of a specific process event."""
+    import json
+    from datetime import datetime
+
+    from pause_monitor.storage import get_connection
 
     config = ctx.obj["config"]
 
@@ -170,97 +175,56 @@ def events_show(ctx, event_id: int) -> None:
 
     conn = get_connection(config.db_path)
     try:
-        event = get_event_by_id(conn, event_id)
-        if not event:
+        row = conn.execute(
+            """SELECT id, pid, command, boot_time, entry_time, exit_time,
+                      entry_band, peak_band, peak_score, peak_snapshot
+               FROM process_events WHERE id = ?""",
+            (event_id,),
+        ).fetchone()
+
+        if not row:
             click.echo(f"Error: Event {event_id} not found", err=True)
             raise SystemExit(1)
 
-        # Calculate duration
-        if event.end_timestamp:
-            duration = (event.end_timestamp - event.start_timestamp).total_seconds()
+        entry_time = datetime.fromtimestamp(row[4])
+        exit_time = datetime.fromtimestamp(row[5]) if row[5] else None
+
+        if exit_time:
+            duration = (exit_time - entry_time).total_seconds()
             duration_str = f"{duration:.1f}s"
         else:
             duration_str = "ongoing"
 
-        click.echo(f"Event #{event.id}")
-        click.echo(f"Start: {event.start_timestamp}")
-        if event.end_timestamp:
-            click.echo(f"End: {event.end_timestamp}")
+        click.echo(f"Process Event #{row[0]}")
+        click.echo(f"Command: {row[2]}")
+        click.echo(f"PID: {row[1]}")
+        click.echo(f"Entry: {entry_time} ({row[6]} band)")
+        if exit_time:
+            click.echo(f"Exit: {exit_time}")
         click.echo(f"Duration: {duration_str}")
-        click.echo(f"Status: {event.status}")
-        click.echo(f"Peak Stress: {event.peak_stress or 0}/100")
-        click.echo(f"Peak Tier: {event.peak_tier or '-'}")
+        click.echo(f"Peak Band: {row[7]}")
+        click.echo(f"Peak Score: {row[8]}")
 
-        if event.notes:
-            click.echo(f"Notes: {event.notes}")
+        # Show peak snapshot
+        if row[9]:
+            click.echo("\nPeak Snapshot:")
+            try:
+                snapshot = json.loads(row[9])
+                for key, val in snapshot.items():
+                    click.echo(f"  {key}: {val}")
+            except json.JSONDecodeError:
+                click.echo(f"  {row[9]}")
 
-        # Show process samples captured during this event
-        samples = get_process_samples(conn, event_id)
-        if samples:
-            click.echo(f"\nSamples captured: {len(samples)}")
+        # Show any snapshots
+        snapshots = conn.execute(
+            "SELECT snapshot_type, snapshot FROM process_snapshots WHERE event_id = ?",
+            (event_id,),
+        ).fetchall()
 
-            for sample in samples:
-                timestamp_str = sample.data.timestamp.strftime("%H:%M:%S")
-                click.echo(
-                    f"  {timestamp_str} | Tier {sample.tier} | Max Score: {sample.data.max_score}"
-                )
-                for rogue in sample.data.rogues:
-                    categories_str = ", ".join(sorted(rogue.categories))
-                    click.echo(f"    {rogue.command}: {rogue.score} ({categories_str})")
-    finally:
-        conn.close()
-
-
-@events.command("mark")
-@click.argument("event_id", type=int)
-@click.option("--reviewed", is_flag=True, help="Mark as reviewed")
-@click.option("--pinned", is_flag=True, help="Pin event (protected from pruning)")
-@click.option("--dismissed", is_flag=True, help="Dismiss event (eligible for pruning)")
-@click.option("--notes", help="Add notes to event")
-@click.pass_context
-def events_mark(
-    ctx, event_id: int, reviewed: bool, pinned: bool, dismissed: bool, notes: str | None
-) -> None:
-    """Change event status."""
-    from pause_monitor.storage import get_connection, get_event_by_id, update_event_status
-
-    # Determine status
-    status_flags = sum([reviewed, pinned, dismissed])
-    if status_flags > 1:
-        click.echo("Error: Only one status flag allowed", err=True)
-        raise SystemExit(1)
-
-    status = None
-    if reviewed:
-        status = "reviewed"
-    elif pinned:
-        status = "pinned"
-    elif dismissed:
-        status = "dismissed"
-
-    if not status and not notes:
-        click.echo("Error: Specify --reviewed, --pinned, --dismissed, or --notes", err=True)
-        raise SystemExit(1)
-
-    config = ctx.obj["config"]
-
-    if not config.db_path.exists():
-        click.echo("Error: Database not found", err=True)
-        raise SystemExit(1)
-
-    conn = get_connection(config.db_path)
-    try:
-        event = get_event_by_id(conn, event_id)
-        if not event:
-            click.echo(f"Error: Event {event_id} not found", err=True)
-            raise SystemExit(1)
-
-        if status:
-            update_event_status(conn, event_id, status, notes)
-            click.echo(f"Event {event_id} marked as {status}")
-        elif notes:
-            update_event_status(conn, event_id, event.status, notes)
-            click.echo(f"Notes added to event {event_id}")
+        if snapshots:
+            click.echo(f"\nSnapshots: {len(snapshots)}")
+            for stype, sdata in snapshots:
+                click.echo(f"  [{stype}] {sdata[:100]}...")
     finally:
         conn.close()
 
@@ -269,16 +233,16 @@ def events_mark(
 @click.option("--hours", "-H", default=24, help="Hours of history to show")
 @click.option("--format", "-f", "fmt", type=click.Choice(["table", "json", "csv"]), default="table")
 def history(hours: int, fmt: str) -> None:
-    """Query historical events.
+    """Query historical process events.
 
-    Note: Since Phase 6 redesign, continuous samples are no longer stored.
-    This command shows escalation events (elevated/critical periods) instead.
+    Shows per-process band tracking history.
     """
     import json
-    from datetime import datetime, timedelta
+    import time
+    from datetime import datetime
 
     from pause_monitor.config import Config
-    from pause_monitor.storage import get_connection, get_events
+    from pause_monitor.storage import get_connection
 
     config = Config.load()
 
@@ -289,8 +253,16 @@ def history(hours: int, fmt: str) -> None:
     conn = get_connection(config.db_path)
     try:
         # Get events from time range
-        cutoff = datetime.now() - timedelta(hours=hours)
-        events = get_events(conn, start=cutoff, limit=1000)
+        cutoff = time.time() - (hours * 3600)
+        cursor = conn.execute(
+            """SELECT id, pid, command, entry_time, exit_time, entry_band, peak_band, peak_score
+               FROM process_events
+               WHERE entry_time >= ?
+               ORDER BY entry_time DESC
+               LIMIT 1000""",
+            (cutoff,),
+        )
+        events = cursor.fetchall()
 
         if not events:
             click.echo(f"No events in the last {hours} hour{'s' if hours != 1 else ''}.")
@@ -298,76 +270,85 @@ def history(hours: int, fmt: str) -> None:
 
         if fmt == "json":
             data = []
-            for e in events:
-                duration = None
-                if e.end_timestamp:
-                    duration = (e.end_timestamp - e.start_timestamp).total_seconds()
+            for row in events:
+                entry_time = datetime.fromtimestamp(row[3])
+                exit_time = datetime.fromtimestamp(row[4]) if row[4] else None
+                duration = (row[4] - row[3]) if row[4] else None
                 data.append(
                     {
-                        "id": e.id,
-                        "start": e.start_timestamp.isoformat(),
-                        "end": e.end_timestamp.isoformat() if e.end_timestamp else None,
+                        "id": row[0],
+                        "pid": row[1],
+                        "command": row[2],
+                        "entry": entry_time.isoformat(),
+                        "exit": exit_time.isoformat() if exit_time else None,
                         "duration_sec": duration,
-                        "peak_stress": e.peak_stress,
-                        "peak_tier": e.peak_tier,
-                        "status": e.status,
+                        "entry_band": row[5],
+                        "peak_band": row[6],
+                        "peak_score": row[7],
                     }
                 )
             click.echo(json.dumps(data, indent=2))
         elif fmt == "csv":
-            click.echo("id,start,end,duration_sec,peak_stress,peak_tier,status")
-            for e in events:
-                duration = ""
-                if e.end_timestamp:
-                    duration = f"{(e.end_timestamp - e.start_timestamp).total_seconds():.1f}"
-                end = e.end_timestamp.isoformat() if e.end_timestamp else ""
+            click.echo("id,pid,command,entry,exit,duration_sec,entry_band,peak_band,peak_score")
+            for row in events:
+                entry_time = datetime.fromtimestamp(row[3])
+                exit_time = datetime.fromtimestamp(row[4]) if row[4] else None
+                duration = f"{row[4] - row[3]:.1f}" if row[4] else ""
                 click.echo(
-                    f"{e.id},{e.start_timestamp.isoformat()},{end},"
-                    f"{duration},{e.peak_stress or ''},{e.peak_tier or ''},{e.status}"
+                    f"{row[0]},{row[1]},{row[2]},{entry_time.isoformat()},"
+                    f"{exit_time.isoformat() if exit_time else ''},"
+                    f"{duration},{row[5]},{row[6]},{row[7]}"
                 )
         else:
             # Summary stats
             click.echo(f"Events: {len(events)}")
+            first_time = datetime.fromtimestamp(events[-1][3])
+            last_time = datetime.fromtimestamp(events[0][3])
             click.echo(
-                f"Time range: {events[-1].start_timestamp.strftime('%Y-%m-%d %H:%M')} "
-                f"to {events[0].start_timestamp.strftime('%Y-%m-%d %H:%M')}"
+                f"Time range: {first_time.strftime('%Y-%m-%d %H:%M')} "
+                f"to {last_time.strftime('%Y-%m-%d %H:%M')}"
             )
 
-            # Peak stress stats
-            peak_stresses = [e.peak_stress for e in events if e.peak_stress]
-            if peak_stresses:
-                click.echo(
-                    f"Peak stress - Min: {min(peak_stresses)}, Max: {max(peak_stresses)}, "
-                    f"Avg: {sum(peak_stresses) / len(peak_stresses):.1f}"
-                )
+            # Peak score stats
+            peak_scores = [row[7] for row in events]
+            click.echo(
+                f"Peak scores - Min: {min(peak_scores)}, Max: {max(peak_scores)}, "
+                f"Avg: {sum(peak_scores) / len(peak_scores):.1f}"
+            )
 
-            # Tier breakdown
-            tier2_count = sum(1 for e in events if e.peak_tier == 2)
-            tier3_count = sum(1 for e in events if e.peak_tier == 3)
-            click.echo(f"\nTier 2 (elevated): {tier2_count} events")
-            click.echo(f"Tier 3 (critical): {tier3_count} events")
+            # Band breakdown
+            band_counts: dict[str, int] = {}
+            for row in events:
+                band = row[6]  # peak_band
+                band_counts[band] = band_counts.get(band, 0) + 1
 
-            # Total elevated time
+            click.echo("\nPeak band breakdown:")
+            for band in ["low", "medium", "elevated", "high", "critical"]:
+                if band in band_counts:
+                    click.echo(f"  {band}: {band_counts[band]} events")
+
+            # Total tracked time
             total_duration = 0.0
-            for e in events:
-                if e.end_timestamp:
-                    total_duration += (e.end_timestamp - e.start_timestamp).total_seconds()
+            for row in events:
+                if row[4]:  # exit_time
+                    total_duration += row[4] - row[3]
             if total_duration > 0:
                 mins = total_duration / 60
-                click.echo(f"\nTotal elevated time: {total_duration:.0f}s ({mins:.1f}m)")
+                click.echo(f"\nTotal tracked time: {total_duration:.0f}s ({mins:.1f}m)")
     finally:
         conn.close()
 
 
 @main.command()
+@click.option("--samples-days", default=None, type=int, help="Override sample retention days")
 @click.option("--events-days", default=None, type=int, help="Override event retention days")
 @click.option("--dry-run", is_flag=True, help="Show what would be deleted")
 @click.option("--force", "-f", is_flag=True, help="Skip confirmation prompt")
-def prune(events_days: int | None, dry_run: bool, force: bool) -> None:
-    """Delete old reviewed/dismissed events per retention policy.
+def prune(samples_days: int | None, events_days: int | None, dry_run: bool, force: bool) -> None:
+    """Delete old samples and closed process events.
 
-    Only prunes events marked as 'reviewed' or 'dismissed'.
-    Unreviewed and pinned events are never automatically deleted.
+    Prunes process_sample_records older than samples_days.
+    Prunes closed process_events older than events_days.
     """
     from pause_monitor.config import Config
     from pause_monitor.storage import get_connection, prune_old_data
@@ -378,25 +359,30 @@ def prune(events_days: int | None, dry_run: bool, force: bool) -> None:
         click.echo("Database not found.")
         return
 
+    samples_days = samples_days or config.retention.samples_days
     events_days = events_days or config.retention.events_days
 
     if dry_run:
-        click.echo(f"Would prune reviewed/dismissed events older than {events_days} days")
+        click.echo(f"Would prune samples older than {samples_days} days")
+        click.echo(f"Would prune closed events older than {events_days} days")
         return
 
     if not force:
         click.confirm(
-            f"Delete reviewed/dismissed events older than {events_days} days?",
+            f"Delete samples older than {samples_days} days and "
+            f"closed events older than {events_days} days?",
             abort=True,
         )
 
     conn = get_connection(config.db_path)
     try:
-        events_deleted = prune_old_data(conn, events_days=events_days)
+        samples_deleted, events_deleted = prune_old_data(
+            conn, samples_days=samples_days, events_days=events_days
+        )
     finally:
         conn.close()
 
-    click.echo(f"Deleted {events_deleted} events (with their samples)")
+    click.echo(f"Deleted {samples_deleted} samples and {events_deleted} events")
 
 
 @main.group()

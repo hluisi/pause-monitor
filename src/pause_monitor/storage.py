@@ -3,7 +3,6 @@
 import sqlite3
 import time
 from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
 
 import structlog
@@ -117,124 +116,12 @@ def set_daemon_state(conn: sqlite3.Connection, key: str, value: str) -> None:
 
 
 @dataclass
-class Event:
-    """Escalation event (tier 1 → elevated → tier 1 episode)."""
-
-    start_timestamp: datetime
-    end_timestamp: datetime | None = None  # NULL if ongoing
-    peak_stress: int | None = None
-    peak_tier: int | None = None  # Highest tier reached (2 or 3)
-    status: str = "unreviewed"
-    notes: str | None = None
-    id: int | None = None
-
-
-@dataclass
 class ProcessSampleRecord:
     """Process sample record - ring buffer entry for 1Hz collection."""
 
     timestamp: float
     data: ProcessSamples
     id: int | None = None
-
-
-def create_event(conn: sqlite3.Connection, start_timestamp: datetime) -> int:
-    """Create a new event and return its ID."""
-    cursor = conn.execute(
-        "INSERT INTO events (start_timestamp) VALUES (?)",
-        (start_timestamp.timestamp(),),
-    )
-    conn.commit()
-    return cursor.lastrowid
-
-
-def finalize_event(
-    conn: sqlite3.Connection,
-    event_id: int,
-    end_timestamp: datetime,
-    peak_stress: int,
-    peak_tier: int,
-) -> None:
-    """Finalize an event when returning to tier 1."""
-    conn.execute(
-        """
-        UPDATE events SET end_timestamp = ?, peak_stress = ?, peak_tier = ?
-        WHERE id = ?
-        """,
-        (end_timestamp.timestamp(), peak_stress, peak_tier, event_id),
-    )
-    conn.commit()
-
-
-def get_events(
-    conn: sqlite3.Connection,
-    start: datetime | None = None,
-    end: datetime | None = None,
-    limit: int = 100,
-    status: str | None = None,
-) -> list[Event]:
-    """Get events, optionally filtered by time range and/or status."""
-    query = """
-        SELECT id, start_timestamp, end_timestamp, peak_stress, peak_tier, status, notes
-        FROM events
-    """
-    params: list = []
-    conditions = []
-
-    if start:
-        conditions.append("start_timestamp >= ?")
-        params.append(start.timestamp())
-    if end:
-        conditions.append("start_timestamp <= ?")
-        params.append(end.timestamp())
-    if status:
-        conditions.append("status = ?")
-        params.append(status)
-
-    if conditions:
-        query += " WHERE " + " AND ".join(conditions)
-
-    query += " ORDER BY start_timestamp DESC LIMIT ?"
-    params.append(limit)
-
-    rows = conn.execute(query, params).fetchall()
-
-    return [
-        Event(
-            id=row[0],
-            start_timestamp=datetime.fromtimestamp(row[1]),
-            end_timestamp=datetime.fromtimestamp(row[2]) if row[2] else None,
-            peak_stress=row[3],
-            peak_tier=row[4],
-            status=row[5] or "unreviewed",
-            notes=row[6],
-        )
-        for row in rows
-    ]
-
-
-def get_event_by_id(conn: sqlite3.Connection, event_id: int) -> Event | None:
-    """Get a single event by ID."""
-    row = conn.execute(
-        """
-        SELECT id, start_timestamp, end_timestamp, peak_stress, peak_tier, status, notes
-        FROM events WHERE id = ?
-        """,
-        (event_id,),
-    ).fetchone()
-
-    if not row:
-        return None
-
-    return Event(
-        id=row[0],
-        start_timestamp=datetime.fromtimestamp(row[1]),
-        end_timestamp=datetime.fromtimestamp(row[2]) if row[2] else None,
-        peak_stress=row[3],
-        peak_tier=row[4],
-        status=row[5] or "unreviewed",
-        notes=row[6],
-    )
 
 
 def insert_process_sample(
@@ -306,96 +193,52 @@ def get_process_samples(
     ]
 
 
-def update_event_status(
-    conn: sqlite3.Connection,
-    event_id: int,
-    status: str,
-    notes: str | None = None,
-) -> None:
-    """Update event status and optionally notes.
-
-    Note: This is legacy code for the old events table which no longer exists.
-    Kept for backward compatibility until full cleanup.
-
-    Args:
-        conn: Database connection
-        event_id: The event ID to update
-        status: New status (unreviewed, reviewed, pinned, dismissed)
-        notes: Optional notes (if None, existing notes are preserved)
-
-    Raises:
-        ValueError: If status is not a valid event status
-    """
-    valid_statuses = frozenset({"unreviewed", "reviewed", "pinned", "dismissed"})
-    if status not in valid_statuses:
-        raise ValueError(f"Invalid status '{status}'. Must be one of: {sorted(valid_statuses)}")
-    if notes is not None:
-        conn.execute(
-            "UPDATE events SET status = ?, notes = ? WHERE id = ?",
-            (status, notes, event_id),
-        )
-    else:
-        conn.execute(
-            "UPDATE events SET status = ? WHERE id = ?",
-            (status, event_id),
-        )
-    conn.commit()
-
-
 def prune_old_data(
     conn: sqlite3.Connection,
+    samples_days: int = 30,
     events_days: int = 90,
-) -> int:
-    """Delete old events and their samples, respecting event lifecycle status.
-
-    Only prunes events with status 'reviewed' or 'dismissed'.
-    Never prunes 'unreviewed' or 'pinned' events regardless of age.
+) -> tuple[int, int]:
+    """Delete old process samples and closed process events.
 
     Args:
         conn: Database connection
-        events_days: Delete events older than this (only reviewed/dismissed)
+        samples_days: Delete process_sample_records older than this
+        events_days: Delete closed process_events older than this
 
     Returns:
-        Number of events deleted
+        Tuple of (samples_deleted, events_deleted)
 
     Raises:
         ValueError: If retention days < 1
     """
-    if events_days < 1:
+    if samples_days < 1 or events_days < 1:
         raise ValueError("Retention days must be >= 1")
 
+    cutoff_samples = time.time() - (samples_days * 86400)
     cutoff_events = time.time() - (events_days * 86400)
 
-    # Get event IDs to delete
-    event_ids = conn.execute(
+    # Delete old process samples
+    cursor = conn.execute(
+        "DELETE FROM process_sample_records WHERE timestamp < ?",
+        (cutoff_samples,),
+    )
+    samples_deleted = cursor.rowcount
+
+    # Delete old closed process events (and cascades to snapshots)
+    cursor = conn.execute(
         """
-        SELECT id FROM events
-        WHERE start_timestamp < ? AND status IN ('reviewed', 'dismissed')
+        DELETE FROM process_events
+        WHERE exit_time IS NOT NULL AND exit_time < ?
         """,
         (cutoff_events,),
-    ).fetchall()
-
-    if not event_ids:
-        return 0
-
-    ids = [row[0] for row in event_ids]
-    placeholders = ",".join("?" * len(ids))
-
-    # Delete event samples first (foreign key)
-    conn.execute(f"DELETE FROM event_samples WHERE event_id IN ({placeholders})", ids)
-
-    # Note: process_sample_records is now a time-based ring buffer without event_id
-    # Pruning is handled separately by prune_process_samples()
-
-    # Delete events
-    cursor = conn.execute(f"DELETE FROM events WHERE id IN ({placeholders})", ids)
+    )
     events_deleted = cursor.rowcount
 
     conn.commit()
 
-    log.info("prune_complete", events_deleted=events_deleted)
+    log.info("prune_complete", samples_deleted=samples_deleted, events_deleted=events_deleted)
 
-    return events_deleted
+    return (samples_deleted, events_deleted)
 
 
 # --- Process Event CRUD Functions ---

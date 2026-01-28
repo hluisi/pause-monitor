@@ -1,45 +1,17 @@
 """Tests for SQLite storage layer."""
 
 import sqlite3
-from datetime import datetime, timedelta
+import time
+from datetime import datetime
 from pathlib import Path
 
 import pytest
 
 from pause_monitor.storage import (
     SCHEMA_VERSION,
-    create_event,
-    finalize_event,
     get_schema_version,
     init_database,
 )
-
-
-def create_test_event(
-    conn: sqlite3.Connection,
-    start_time: datetime | None = None,
-    duration_seconds: float = 2.5,
-    peak_stress: int = 15,
-    peak_tier: int = 2,
-    status: str = "unreviewed",
-) -> int:
-    """Create a test event using the new API."""
-    from pause_monitor.storage import update_event_status
-
-    if start_time is None:
-        start_time = datetime.now()
-
-    event_id = create_event(conn, start_time)
-    finalize_event(
-        conn,
-        event_id,
-        end_timestamp=start_time + timedelta(seconds=duration_seconds),
-        peak_stress=peak_stress,
-        peak_tier=peak_tier,
-    )
-    if status != "unreviewed":
-        update_event_status(conn, event_id, status)
-    return event_id
 
 
 def test_init_database_creates_file(tmp_path: Path):
@@ -90,397 +62,31 @@ def test_init_database_sets_schema_version(tmp_path: Path):
     assert version == SCHEMA_VERSION
 
 
-def test_event_dataclass():
-    """Event has correct fields for the new schema."""
-    from pause_monitor.storage import Event
+# --- ProcessSampleRecord Tests ---
 
-    now = datetime.now()
-    event = Event(
-        start_timestamp=now,
-        end_timestamp=now + timedelta(seconds=3.5),
-        peak_stress=15,
-        peak_tier=2,
-        status="unreviewed",
-        notes="Test pause",
+
+def test_process_sample_record_dataclass():
+    """ProcessSampleRecord has correct fields."""
+    from pause_monitor.collector import ProcessSamples
+    from pause_monitor.storage import ProcessSampleRecord
+
+    samples = ProcessSamples(
+        timestamp=datetime.now(),
+        elapsed_ms=500,
+        process_count=100,
+        max_score=50,
+        rogues=[],
     )
-    # Calculate duration from timestamps
-    duration = (event.end_timestamp - event.start_timestamp).total_seconds()
-    assert duration == 3.5
-    assert event.peak_stress == 15
-    assert event.peak_tier == 2
-
-
-def test_create_and_finalize_event(initialized_db: Path):
-    """create_event and finalize_event store event in database."""
-    from pause_monitor.storage import get_event_by_id
-
-    conn = sqlite3.connect(initialized_db)
-    start_time = datetime.now()
-    event_id = create_event(conn, start_time)
-    assert event_id > 0
-
-    # Finalize the event
-    end_time = start_time + timedelta(seconds=2.5)
-    finalize_event(conn, event_id, end_timestamp=end_time, peak_stress=25, peak_tier=2)
-
-    # Verify it was stored correctly
-    event = get_event_by_id(conn, event_id)
-    conn.close()
-
-    assert event is not None
-    assert event.start_timestamp == start_time
-    assert event.end_timestamp == end_time
-    assert event.peak_stress == 25
-    assert event.peak_tier == 2
-
-
-def test_get_events_by_timerange(initialized_db: Path):
-    """get_events returns events within time range."""
-    from pause_monitor.storage import get_events
-
-    conn = sqlite3.connect(initialized_db)
-
-    base_time = 1000000.0
-    for i in range(5):
-        start_time = datetime.fromtimestamp(base_time + i * 3600)
-        create_test_event(conn, start_time=start_time, peak_stress=10 + i)
-
-    events = get_events(
-        conn,
-        start=datetime.fromtimestamp(base_time + 3600),
-        end=datetime.fromtimestamp(base_time + 10800),
+    record = ProcessSampleRecord(
+        id=1,
+        timestamp=time.time(),
+        data=samples,
     )
-    conn.close()
+    assert record.id == 1
+    assert record.data.max_score == 50
 
-    assert len(events) == 3
 
-
-def test_get_event_by_id_found(initialized_db: Path):
-    """get_event_by_id returns event when found."""
-    from pause_monitor.storage import get_event_by_id
-
-    conn = sqlite3.connect(initialized_db)
-    start_time = datetime.now()
-    event_id = create_test_event(conn, start_time=start_time, peak_stress=30, peak_tier=2)
-
-    retrieved = get_event_by_id(conn, event_id)
-    conn.close()
-
-    assert retrieved is not None
-    assert retrieved.id == event_id
-    assert retrieved.peak_stress == 30
-    assert retrieved.peak_tier == 2
-
-
-def test_get_event_by_id_not_found(initialized_db: Path):
-    """get_event_by_id returns None when not found."""
-    from pause_monitor.storage import get_event_by_id
-
-    conn = sqlite3.connect(initialized_db)
-    result = get_event_by_id(conn, 99999)
-    conn.close()
-
-    assert result is None
-
-
-def test_prune_old_data_deletes_old_events(initialized_db: Path):
-    """prune_old_data deletes old events with prunable status."""
-    import time
-
-    from pause_monitor.storage import prune_old_data
-
-    conn = sqlite3.connect(initialized_db)
-
-    # Insert old event (100 days ago) with 'reviewed' status (prunable)
-    old_time = datetime.fromtimestamp(time.time() - 100 * 86400)
-    create_test_event(conn, start_time=old_time, status="reviewed")
-
-    # Insert recent event (30 days ago) - also reviewed but within retention
-    recent_time = datetime.fromtimestamp(time.time() - 30 * 86400)
-    create_test_event(conn, start_time=recent_time, status="reviewed")
-
-    # Prune events older than 90 days
-    events_deleted = prune_old_data(conn, events_days=90)
-
-    # Verify old event was deleted, recent kept
-    count = conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
-    conn.close()
-
-    assert events_deleted == 1
-    assert count == 1
-
-
-def test_prune_only_deletes_prunable_events(initialized_db: Path):
-    """prune_old_data only deletes reviewed/dismissed events, not unreviewed/pinned."""
-    import time
-
-    from pause_monitor.storage import prune_old_data
-
-    conn = sqlite3.connect(initialized_db)
-
-    # Insert old events of each status
-    old_time = datetime.fromtimestamp(time.time() - 100 * 86400)
-    create_test_event(conn, start_time=old_time, status="unreviewed")  # Should NOT be pruned
-    create_test_event(conn, start_time=old_time, status="pinned")  # Should NOT be pruned
-    create_test_event(conn, start_time=old_time, status="reviewed")  # Should be pruned
-    create_test_event(conn, start_time=old_time, status="dismissed")  # Should be pruned
-
-    # Prune events older than 90 days
-    events_deleted = prune_old_data(conn, events_days=90)
-
-    # Only reviewed and dismissed should be pruned
-    count = conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
-    conn.close()
-
-    assert events_deleted == 2
-    assert count == 2  # unreviewed and pinned remain
-
-
-def test_prune_with_nothing_to_delete(initialized_db: Path):
-    """prune_old_data returns zero when nothing to delete."""
-    import time
-
-    from pause_monitor.storage import prune_old_data
-
-    conn = sqlite3.connect(initialized_db)
-
-    # Insert recent event (10 days ago) - within retention
-    recent_time = datetime.fromtimestamp(time.time() - 10 * 86400)
-    create_test_event(conn, start_time=recent_time, status="reviewed")
-
-    # Prune with 90 day retention
-    events_deleted = prune_old_data(conn, events_days=90)
-    conn.close()
-
-    assert events_deleted == 0
-
-
-def test_prune_rejects_zero_days(initialized_db: Path):
-    """prune_old_data raises ValueError when events_days < 1."""
-    from pause_monitor.storage import prune_old_data
-
-    conn = sqlite3.connect(initialized_db)
-
-    with pytest.raises(ValueError, match="Retention days must be >= 1"):
-        prune_old_data(conn, events_days=0)
-
-    conn.close()
-
-
-def test_prune_rejects_negative_days(initialized_db: Path):
-    """prune_old_data raises ValueError for negative retention days."""
-    from pause_monitor.storage import prune_old_data
-
-    conn = sqlite3.connect(initialized_db)
-
-    with pytest.raises(ValueError, match="Retention days must be >= 1"):
-        prune_old_data(conn, events_days=-5)
-
-    conn.close()
-
-
-# --- Event Status Tests ---
-
-
-def test_event_dataclass_has_status_field():
-    """Event dataclass has status field with default value."""
-    from pause_monitor.storage import Event
-
-    event = Event(
-        start_timestamp=datetime.now(),
-        end_timestamp=datetime.now() + timedelta(seconds=3.5),
-        peak_stress=15,
-        peak_tier=2,
-    )
-    # Default should be "unreviewed"
-    assert event.status == "unreviewed"
-    assert event.notes is None
-
-
-def test_event_dataclass_accepts_status():
-    """Event dataclass accepts explicit status value."""
-    from pause_monitor.storage import Event
-
-    event = Event(
-        start_timestamp=datetime.now(),
-        end_timestamp=datetime.now() + timedelta(seconds=3.5),
-        peak_stress=15,
-        peak_tier=2,
-        status="pinned",
-        notes="Important event",
-    )
-    assert event.status == "pinned"
-    assert event.notes == "Important event"
-
-
-def test_create_event_with_status(initialized_db: Path):
-    """Events are created with default unreviewed status."""
-    from pause_monitor.storage import get_event_by_id
-
-    conn = sqlite3.connect(initialized_db)
-    event_id = create_test_event(conn, status="unreviewed")
-    retrieved = get_event_by_id(conn, event_id)
-    conn.close()
-
-    assert retrieved is not None
-    assert retrieved.status == "unreviewed"
-
-
-def test_create_event_with_pinned_status(initialized_db: Path):
-    """Events can have pinned status set via update."""
-    from pause_monitor.storage import get_event_by_id, update_event_status
-
-    conn = sqlite3.connect(initialized_db)
-    event_id = create_test_event(conn)
-
-    # Update to pinned with notes
-    update_event_status(conn, event_id, "pinned", "Keep this one")
-    retrieved = get_event_by_id(conn, event_id)
-    conn.close()
-
-    assert retrieved is not None
-    assert retrieved.status == "pinned"
-    assert retrieved.notes == "Keep this one"
-
-
-def test_update_event_status(initialized_db: Path):
-    """Event status can be updated."""
-    from pause_monitor.storage import get_event_by_id, update_event_status
-
-    conn = sqlite3.connect(initialized_db)
-    event_id = create_test_event(conn)
-
-    # Update status only
-    update_event_status(conn, event_id, "reviewed")
-    retrieved = get_event_by_id(conn, event_id)
-    conn.close()
-
-    assert retrieved is not None
-    assert retrieved.status == "reviewed"
-
-
-def test_update_event_status_with_notes(initialized_db: Path):
-    """Event status can be updated with notes."""
-    from pause_monitor.storage import get_event_by_id, update_event_status
-
-    conn = sqlite3.connect(initialized_db)
-    event_id = create_test_event(conn)
-
-    # Update status with notes
-    update_event_status(conn, event_id, "pinned", "Chrome memory leak")
-    retrieved = get_event_by_id(conn, event_id)
-    conn.close()
-
-    assert retrieved is not None
-    assert retrieved.status == "pinned"
-    assert retrieved.notes == "Chrome memory leak"
-
-
-def test_update_event_status_preserves_notes(initialized_db: Path):
-    """Updating status without notes preserves existing notes."""
-    from pause_monitor.storage import get_event_by_id, update_event_status
-
-    conn = sqlite3.connect(initialized_db)
-    event_id = create_test_event(conn)
-
-    # First set notes
-    update_event_status(conn, event_id, "unreviewed", "Original note")
-
-    # Update status only (notes=None should preserve existing notes)
-    update_event_status(conn, event_id, "reviewed")
-    retrieved = get_event_by_id(conn, event_id)
-    conn.close()
-
-    assert retrieved is not None
-    assert retrieved.status == "reviewed"
-    assert retrieved.notes == "Original note"
-
-
-def test_update_event_status_invalid_status(initialized_db: Path):
-    """update_event_status rejects invalid status values."""
-    from pause_monitor.storage import update_event_status
-
-    conn = sqlite3.connect(initialized_db)
-    event_id = create_test_event(conn)
-
-    # Invalid status should raise ValueError
-    with pytest.raises(ValueError) as exc_info:
-        update_event_status(conn, event_id, "invalid_status")
-
-    assert "Invalid status 'invalid_status'" in str(exc_info.value)
-    assert "dismissed" in str(exc_info.value)  # Shows valid options
-    conn.close()
-
-
-def test_get_events_returns_status(initialized_db: Path):
-    """get_events includes status field in results."""
-    from pause_monitor.storage import get_events, update_event_status
-
-    conn = sqlite3.connect(initialized_db)
-    event_id = create_test_event(conn)
-    update_event_status(conn, event_id, "pinned", "Test note")
-
-    events = get_events(conn, limit=10)
-    conn.close()
-
-    assert len(events) == 1
-    assert events[0].status == "pinned"
-    assert events[0].notes == "Test note"
-
-
-def test_event_stores_peak_stress(initialized_db: Path):
-    """Events store and retrieve peak_stress correctly."""
-    from pause_monitor.storage import get_event_by_id
-
-    conn = sqlite3.connect(initialized_db)
-    event_id = create_test_event(conn, peak_stress=68, peak_tier=3)
-    retrieved = get_event_by_id(conn, event_id)
-    conn.close()
-
-    assert retrieved is not None
-    assert retrieved.peak_stress == 68
-    assert retrieved.peak_tier == 3
-
-
-def test_get_events_returns_peak_stress(tmp_path):
-    """get_events includes peak_stress and peak_tier in results."""
-    from pause_monitor.storage import get_event_by_id, get_events
-
-    db_path = tmp_path / "test.db"
-    init_database(db_path)
-    conn = sqlite3.connect(db_path)
-
-    event_id = create_test_event(conn, peak_stress=35, peak_tier=2)
-    assert event_id > 0
-
-    events = get_events(conn, limit=1)
-    assert len(events) == 1
-    assert events[0].peak_stress == 35
-    assert events[0].peak_tier == 2
-
-    # Also verify get_event_by_id reads peak_stress
-    event_by_id = get_event_by_id(conn, event_id)
-    assert event_by_id is not None
-    assert event_by_id.peak_stress == 35
-    assert event_by_id.peak_tier == 2
-
-    conn.close()
-
-
-# --- Schema v7: JSON Blob Storage Tests ---
-
-
-def test_schema_version_8(initialized_db: Path):
-    """Schema version should be 8."""
-    from pause_monitor.storage import get_connection
-
-    conn = get_connection(initialized_db)
-    version = get_schema_version(conn)
-    conn.close()
-    assert version == 8
-
-
-def test_insert_process_sample_json(initialized_db: Path):
+def test_insert_process_sample(initialized_db: Path):
     """Process sample should be stored as JSON."""
     from pause_monitor.collector import ProcessSamples, ProcessScore
     from pause_monitor.storage import (
@@ -491,8 +97,7 @@ def test_insert_process_sample_json(initialized_db: Path):
 
     conn = get_connection(initialized_db)
 
-    event_id = create_event(conn, datetime.now())
-
+    now = time.time()
     samples = ProcessSamples(
         timestamp=datetime.now(),
         elapsed_ms=1050,
@@ -517,9 +122,9 @@ def test_insert_process_sample_json(initialized_db: Path):
         ],
     )
 
-    insert_process_sample(conn, event_id, tier=2, samples=samples)
+    insert_process_sample(conn, now, samples)
 
-    retrieved = get_process_samples(conn, event_id)
+    retrieved = get_process_samples(conn)
     conn.close()
 
     assert len(retrieved) == 1
@@ -527,46 +132,20 @@ def test_insert_process_sample_json(initialized_db: Path):
     assert retrieved[0].data.rogues[0].command == "test"
 
 
-def test_process_sample_record_dataclass():
-    """ProcessSampleRecord has correct fields."""
-    from pause_monitor.collector import ProcessSamples
-    from pause_monitor.storage import ProcessSampleRecord
-
-    samples = ProcessSamples(
-        timestamp=datetime.now(),
-        elapsed_ms=500,
-        process_count=100,
-        max_score=50,
-        rogues=[],
-    )
-    record = ProcessSampleRecord(
-        id=1,
-        event_id=10,
-        tier=2,
-        data=samples,
-    )
-    assert record.id == 1
-    assert record.event_id == 10
-    assert record.tier == 2
-    assert record.data.max_score == 50
-
-
 def test_get_process_samples_empty(initialized_db: Path):
     """get_process_samples returns empty list when no samples exist."""
     from pause_monitor.storage import get_connection, get_process_samples
 
     conn = get_connection(initialized_db)
-    event_id = create_event(conn, datetime.now())
-
-    samples = get_process_samples(conn, event_id)
+    samples = get_process_samples(conn)
     conn.close()
 
     assert samples == []
 
 
-def test_insert_multiple_process_samples(initialized_db: Path):
-    """Multiple process samples can be inserted and retrieved."""
-    from pause_monitor.collector import ProcessSamples, ProcessScore
+def test_get_process_samples_time_filter(initialized_db: Path):
+    """get_process_samples filters by time range."""
+    from pause_monitor.collector import ProcessSamples
     from pause_monitor.storage import (
         get_connection,
         get_process_samples,
@@ -574,41 +153,170 @@ def test_insert_multiple_process_samples(initialized_db: Path):
     )
 
     conn = get_connection(initialized_db)
-    event_id = create_event(conn, datetime.now())
 
-    for i in range(3):
+    base_time = 1000000.0
+    for i in range(5):
         samples = ProcessSamples(
             timestamp=datetime.now(),
-            elapsed_ms=100 * (i + 1),
-            process_count=100 + i,
-            max_score=50 + i * 10,
-            rogues=[
-                ProcessScore(
-                    pid=i + 1,
-                    command=f"proc{i}",
-                    cpu=float(i * 10),
-                    state="running",
-                    mem=1000,
-                    cmprs=0,
-                    pageins=0,
-                    csw=10,
-                    sysbsd=5,
-                    threads=2,
-                    score=50 + i * 10,
-                    categories=frozenset({"cpu"}),
-                    captured_at=1706000000.0 + i,
-                ),
-            ],
+            elapsed_ms=100,
+            process_count=100,
+            max_score=10 + i,
+            rogues=[],
         )
-        insert_process_sample(conn, event_id, tier=2, samples=samples)
+        insert_process_sample(conn, base_time + i * 100, samples)
 
-    retrieved = get_process_samples(conn, event_id)
+    # Get middle samples
+    retrieved = get_process_samples(conn, start_time=base_time + 100, end_time=base_time + 300)
     conn.close()
 
     assert len(retrieved) == 3
-    assert retrieved[0].data.elapsed_ms == 100
-    assert retrieved[1].data.elapsed_ms == 200
-    assert retrieved[2].data.elapsed_ms == 300
+
+
+# --- Prune Tests ---
+
+
+def test_prune_rejects_zero_days(initialized_db: Path):
+    """prune_old_data raises ValueError when days < 1."""
+    from pause_monitor.storage import get_connection, prune_old_data
+
+    conn = get_connection(initialized_db)
+
+    with pytest.raises(ValueError, match="Retention days must be >= 1"):
+        prune_old_data(conn, samples_days=0, events_days=90)
+
+    conn.close()
+
+
+def test_prune_rejects_negative_days(initialized_db: Path):
+    """prune_old_data raises ValueError for negative retention days."""
+    from pause_monitor.storage import get_connection, prune_old_data
+
+    conn = get_connection(initialized_db)
+
+    with pytest.raises(ValueError, match="Retention days must be >= 1"):
+        prune_old_data(conn, samples_days=30, events_days=-5)
+
+    conn.close()
+
+
+def test_prune_deletes_old_samples(initialized_db: Path):
+    """prune_old_data deletes old samples."""
+    from pause_monitor.collector import ProcessSamples
+    from pause_monitor.storage import (
+        get_connection,
+        get_process_samples,
+        insert_process_sample,
+        prune_old_data,
+    )
+
+    conn = get_connection(initialized_db)
+
+    # Insert old sample (100 days ago)
+    old_time = time.time() - 100 * 86400
+    samples = ProcessSamples(
+        timestamp=datetime.now(),
+        elapsed_ms=100,
+        process_count=100,
+        max_score=50,
+        rogues=[],
+    )
+    insert_process_sample(conn, old_time, samples)
+
+    # Insert recent sample
+    recent_time = time.time() - 10 * 86400
+    insert_process_sample(conn, recent_time, samples)
+
+    # Prune (30 day retention)
+    samples_deleted, events_deleted = prune_old_data(conn, samples_days=30, events_days=90)
+
+    remaining = get_process_samples(conn)
+    conn.close()
+
+    assert samples_deleted == 1
+    assert len(remaining) == 1
+
+
+def test_prune_deletes_old_events(initialized_db: Path):
+    """prune_old_data deletes old closed process events."""
+    from pause_monitor.storage import (
+        close_process_event,
+        create_process_event,
+        get_connection,
+        prune_old_data,
+    )
+
+    conn = get_connection(initialized_db)
+
+    # Create old closed event (100 days ago)
+    old_entry = time.time() - 100 * 86400
+    old_exit = old_entry + 60
+    event_id = create_process_event(
+        conn,
+        pid=123,
+        command="old_proc",
+        boot_time=1000000,
+        entry_time=old_entry,
+        entry_band="elevated",
+        peak_score=50,
+        peak_band="elevated",
+        peak_snapshot="{}",
+    )
+    close_process_event(conn, event_id, old_exit)
+
+    # Create recent closed event (10 days ago)
+    recent_entry = time.time() - 10 * 86400
+    recent_exit = recent_entry + 60
+    event_id2 = create_process_event(
+        conn,
+        pid=456,
+        command="recent_proc",
+        boot_time=1000000,
+        entry_time=recent_entry,
+        entry_band="elevated",
+        peak_score=50,
+        peak_band="elevated",
+        peak_snapshot="{}",
+    )
+    close_process_event(conn, event_id2, recent_exit)
+
+    # Prune (30 day retention)
+    samples_deleted, events_deleted = prune_old_data(conn, samples_days=30, events_days=30)
+
+    remaining = conn.execute("SELECT COUNT(*) FROM process_events").fetchone()[0]
+    conn.close()
+
+    assert events_deleted == 1
+    assert remaining == 1
+
+
+def test_prune_preserves_open_events(initialized_db: Path):
+    """prune_old_data does not delete open events regardless of age."""
+    from pause_monitor.storage import create_process_event, get_connection, prune_old_data
+
+    conn = get_connection(initialized_db)
+
+    # Create old OPEN event (100 days ago, never closed)
+    old_entry = time.time() - 100 * 86400
+    create_process_event(
+        conn,
+        pid=123,
+        command="old_open_proc",
+        boot_time=1000000,
+        entry_time=old_entry,
+        entry_band="elevated",
+        peak_score=50,
+        peak_band="elevated",
+        peak_snapshot="{}",
+    )
+
+    # Prune (1 day retention)
+    samples_deleted, events_deleted = prune_old_data(conn, samples_days=1, events_days=1)
+
+    remaining = conn.execute("SELECT COUNT(*) FROM process_events").fetchone()[0]
+    conn.close()
+
+    assert events_deleted == 0
+    assert remaining == 1
 
 
 # --- Daemon State Tests ---
@@ -747,6 +455,16 @@ def test_process_snapshots_table_structure(tmp_path):
 
     expected = {"id", "event_id", "snapshot_type", "snapshot"}
     assert expected.issubset(columns)
+
+
+def test_schema_version_8(initialized_db: Path):
+    """Schema version should be 8."""
+    from pause_monitor.storage import get_connection
+
+    conn = get_connection(initialized_db)
+    version = get_schema_version(conn)
+    conn.close()
+    assert version == 8
 
 
 # --- Process Event CRUD Tests ---

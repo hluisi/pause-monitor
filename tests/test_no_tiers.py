@@ -22,10 +22,10 @@ def test_no_tier_imports():
             pass  # Skip files with syntax errors
 
 
-def test_sentinel_has_no_tier_classes():
-    """sentinel.py does not export Tier, TierAction, or TierManager."""
-    import pause_monitor.sentinel as sentinel
+def test_sentinel_module_deleted():
+    """sentinel.py should be deleted (tier system replaced by ProcessTracker)."""
+    from pathlib import Path
 
-    assert not hasattr(sentinel, "Tier")
-    assert not hasattr(sentinel, "TierAction")
-    assert not hasattr(sentinel, "TierManager")
+    src_dir = Path("src/pause_monitor")
+    sentinel_path = src_dir / "sentinel.py"
+    assert not sentinel_path.exists(), "sentinel.py should be deleted"

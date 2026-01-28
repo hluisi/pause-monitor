@@ -1,7 +1,7 @@
 """Integration tests for per-process scoring feature.
 
 Tests the end-to-end data flow:
-  TopCollector → ProcessSamples → RingBuffer → Storage → Socket
+  TopCollector -> ProcessSamples -> RingBuffer -> Storage -> Socket
 
 These tests use mocks where appropriate to avoid running actual system commands.
 """
@@ -10,6 +10,7 @@ import asyncio
 import json
 import sqlite3
 import tempfile
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -20,7 +21,6 @@ from pause_monitor.config import Config
 from pause_monitor.ringbuffer import RingBuffer
 from pause_monitor.socket_server import SocketServer
 from pause_monitor.storage import (
-    create_event,
     get_process_samples,
     insert_process_sample,
 )
@@ -58,8 +58,6 @@ def short_tmp_path():
 
 def make_test_process_score(**kwargs) -> ProcessScore:
     """Create ProcessScore with sensible defaults for testing."""
-    import time
-
     defaults = {
         "pid": 1,
         "command": "test_proc",
@@ -92,7 +90,7 @@ def make_test_samples(**kwargs) -> ProcessSamples:
     return ProcessSamples(**defaults)
 
 
-# --- Integration Test: TopCollector → ProcessSamples ---
+# --- Integration Test: TopCollector -> ProcessSamples ---
 
 
 @pytest.mark.asyncio
@@ -152,15 +150,12 @@ async def test_collector_scoring_produces_differentiated_scores(monkeypatch, sam
         assert scores_by_command["kernel_task"] >= 15  # State weight contributes
 
 
-# --- Integration Test: ProcessSamples → Storage → Retrieval ---
+# --- Integration Test: ProcessSamples -> Storage -> Retrieval ---
 
 
 def test_process_samples_storage_roundtrip(initialized_db):
     """ProcessSamples should be stored and retrieved correctly via JSON blob storage."""
     conn = sqlite3.connect(initialized_db)
-
-    # Create an event
-    event_id = create_event(conn, datetime.now())
 
     # Create ProcessSamples with multiple rogues
     original_samples = ProcessSamples(
@@ -202,17 +197,16 @@ def test_process_samples_storage_roundtrip(initialized_db):
         ],
     )
 
-    # Store at tier 2
-    insert_process_sample(conn, event_id, tier=2, samples=original_samples)
+    # Store sample
+    now = time.time()
+    insert_process_sample(conn, now, original_samples)
 
     # Retrieve and verify
-    records = get_process_samples(conn, event_id)
+    records = get_process_samples(conn)
     conn.close()
 
     assert len(records) == 1
     record = records[0]
-    assert record.tier == 2
-    assert record.event_id == event_id
 
     retrieved = record.data
     assert retrieved.timestamp == original_samples.timestamp
@@ -236,43 +230,7 @@ def test_process_samples_storage_roundtrip(initialized_db):
     assert "stuck" in kernel.categories
 
 
-def test_multiple_tier_samples_per_event(initialized_db):
-    """Multiple ProcessSamples at different tiers should be stored correctly."""
-    conn = sqlite3.connect(initialized_db)
-
-    event_id = create_event(conn, datetime.now())
-
-    # Store tier 2 peak sample
-    tier2_samples = make_test_samples(
-        max_score=65,
-        rogues=[make_test_process_score(pid=100, command="tier2_proc", score=65)],
-    )
-    insert_process_sample(conn, event_id, tier=2, samples=tier2_samples)
-
-    # Store multiple tier 3 continuous samples
-    for i in range(3):
-        tier3_samples = make_test_samples(
-            max_score=80 + i,
-            rogues=[make_test_process_score(pid=200 + i, command=f"tier3_proc_{i}", score=80 + i)],
-        )
-        insert_process_sample(conn, event_id, tier=3, samples=tier3_samples)
-
-    records = get_process_samples(conn, event_id)
-    conn.close()
-
-    assert len(records) == 4
-
-    tier2_records = [r for r in records if r.tier == 2]
-    tier3_records = [r for r in records if r.tier == 3]
-
-    assert len(tier2_records) == 1
-    assert len(tier3_records) == 3
-
-    assert tier2_records[0].data.rogues[0].command == "tier2_proc"
-    assert all(r.data.rogues[0].command.startswith("tier3_proc_") for r in tier3_records)
-
-
-# --- Integration Test: ProcessSamples → RingBuffer → Freeze ---
+# --- Integration Test: ProcessSamples -> RingBuffer -> Freeze ---
 
 
 def test_ring_buffer_stores_process_samples():
@@ -344,7 +302,7 @@ def test_ring_buffer_respects_max_samples():
 
 @pytest.mark.asyncio
 async def test_full_collection_to_socket_cycle(monkeypatch, short_tmp_path, sample_top_output):
-    """Test complete collection → buffer → socket broadcast cycle."""
+    """Test complete collection -> buffer -> socket broadcast cycle."""
     socket_path = short_tmp_path / "test.sock"
     buffer = RingBuffer(max_samples=30)
 
@@ -408,7 +366,7 @@ async def test_full_collection_to_socket_cycle(monkeypatch, short_tmp_path, samp
 
 @pytest.mark.asyncio
 async def test_collection_storage_retrieval_cycle(monkeypatch, initialized_db, sample_top_output):
-    """Test collection → storage → retrieval cycle."""
+    """Test collection -> storage -> retrieval cycle."""
     conn = sqlite3.connect(initialized_db)
 
     config = Config()
@@ -419,46 +377,31 @@ async def test_collection_storage_retrieval_cycle(monkeypatch, initialized_db, s
 
     monkeypatch.setattr(collector, "_run_top", mock_run_top)
 
-    # Create event
-    event_id = create_event(conn, datetime.now())
-
     # Collect samples
     samples = await collector.collect()
+    now = time.time()
 
-    # Determine tier based on max_score (thresholds: 35/65)
-    if samples.max_score >= 65:
-        tier = 3
-    elif samples.max_score >= 35:
-        tier = 2
-    else:
-        tier = 1
-
-    # Store (only tier 2+ would normally be stored)
-    if tier >= 2:
-        insert_process_sample(conn, event_id, tier=tier, samples=samples)
+    # Store sample
+    insert_process_sample(conn, now, samples)
 
     # Retrieve
-    records = get_process_samples(conn, event_id)
+    records = get_process_samples(conn)
     conn.close()
 
-    if tier >= 2:
-        assert len(records) == 1
-        retrieved = records[0].data
+    assert len(records) == 1
+    retrieved = records[0].data
 
-        # Verify data integrity
-        assert retrieved.max_score == samples.max_score
-        assert retrieved.process_count == samples.process_count
-        assert len(retrieved.rogues) == len(samples.rogues)
+    # Verify data integrity
+    assert retrieved.max_score == samples.max_score
+    assert retrieved.process_count == samples.process_count
+    assert len(retrieved.rogues) == len(samples.rogues)
 
-        # Verify rogues match
-        for orig, retr in zip(samples.rogues, retrieved.rogues):
-            assert orig.pid == retr.pid
-            assert orig.command == retr.command
-            assert orig.score == retr.score
-            assert orig.categories == retr.categories
-    else:
-        # Tier 1 samples are not stored
-        assert len(records) == 0
+    # Verify rogues match
+    for orig, retr in zip(samples.rogues, retrieved.rogues):
+        assert orig.pid == retr.pid
+        assert orig.command == retr.command
+        assert orig.score == retr.score
+        assert orig.categories == retr.categories
 
 
 # --- Integration Test: Tier Determination ---
@@ -547,7 +490,7 @@ async def test_tier_determination_from_max_score(
 
 @pytest.mark.asyncio
 async def test_process_categories_preserved_through_cycle(monkeypatch, initialized_db):
-    """Process categories should be preserved through collection → storage → retrieval."""
+    """Process categories should be preserved through collection -> storage -> retrieval."""
     conn = sqlite3.connect(initialized_db)
 
     config = Config()
@@ -576,10 +519,10 @@ PID    COMMAND          %CPU STATE    MEM    CMPRS  #TH    CSW        SYSBSD    
     assert "cpu" in original_categories  # 90% CPU
 
     # Store and retrieve
-    event_id = create_event(conn, datetime.now())
-    insert_process_sample(conn, event_id, tier=2, samples=samples)
+    now = time.time()
+    insert_process_sample(conn, now, samples)
 
-    records = get_process_samples(conn, event_id)
+    records = get_process_samples(conn)
     conn.close()
 
     retrieved_rogue = records[0].data.rogues[0]
@@ -612,8 +555,6 @@ def test_empty_process_samples_storage(initialized_db):
     """Empty ProcessSamples should be stored and retrieved correctly."""
     conn = sqlite3.connect(initialized_db)
 
-    event_id = create_event(conn, datetime.now())
-
     empty_samples = ProcessSamples(
         timestamp=datetime.now(),
         elapsed_ms=1000,
@@ -622,9 +563,10 @@ def test_empty_process_samples_storage(initialized_db):
         rogues=[],
     )
 
-    insert_process_sample(conn, event_id, tier=1, samples=empty_samples)
+    now = time.time()
+    insert_process_sample(conn, now, empty_samples)
 
-    records = get_process_samples(conn, event_id)
+    records = get_process_samples(conn)
     conn.close()
 
     assert len(records) == 1

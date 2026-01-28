@@ -113,17 +113,6 @@ def test_daemon_state_update_sample():
     assert state.last_sample_time is not None
 
 
-def test_daemon_state_elevated_duration():
-    """DaemonState tracks elevated duration."""
-    state = DaemonState()
-
-    state.enter_elevated()
-    assert state.elevated_since is not None
-
-    duration = state.elevated_duration
-    assert duration >= 0
-
-
 def test_daemon_init_creates_components():
     """Daemon initializes all required components."""
     config = Config()
