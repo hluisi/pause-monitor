@@ -4,7 +4,6 @@ import asyncio
 import os
 import signal
 import sqlite3
-import time
 from contextlib import ExitStack
 from datetime import datetime
 from pathlib import Path
@@ -17,8 +16,6 @@ from pause_monitor.collector import ProcessSamples, ProcessScore, TopCollector
 from pause_monitor.config import Config
 from pause_monitor.daemon import Daemon, DaemonState
 from pause_monitor.ringbuffer import RingBuffer
-from pause_monitor.sentinel import TierAction
-from pause_monitor.storage import get_events
 
 # === Test Fixtures ===
 
@@ -132,7 +129,6 @@ def test_daemon_init_creates_components():
     assert daemon.config is config
     assert daemon.state is not None
     assert daemon.notifier is not None
-    assert daemon.tier_manager is not None
     assert daemon.ring_buffer is not None
     assert daemon.collector is not None
 
@@ -441,7 +437,7 @@ async def test_auto_prune_uses_config_retention_days(patched_config_paths):
         )
 
 
-# === Tier Management Tests ===
+# === Main Loop Tests ===
 
 
 @pytest.mark.asyncio
@@ -505,106 +501,9 @@ async def test_daemon_handles_pause_with_forensics(patched_config_paths):
             assert call_args.kwargs.get("duration") == 2.5  # Converted to seconds
 
 
-@pytest.mark.asyncio
-async def test_daemon_tier_change_updates_state(patched_config_paths):
-    """Daemon updates state on tier changes from sentinel."""
-    config = Config()
-    daemon = Daemon(config)
-
-    # Initially not elevated
-    assert daemon.state.elevated_since is None
-
-    # Trigger tier2_entry - should enter elevated
-    await daemon._handle_tier_change(TierAction.TIER2_ENTRY, 2)
-    assert daemon.state.elevated_since is not None
-
-    # Trigger tier2_exit - should exit elevated
-    await daemon._handle_tier_change(TierAction.TIER2_EXIT, 1)
-    assert daemon.state.elevated_since is None
-
-    # Trigger tier3_entry - should enter both elevated and critical
-    await daemon._handle_tier_change(TierAction.TIER3_ENTRY, 3)
-    assert daemon.state.elevated_since is not None
-    assert daemon.state.critical_since is not None
-
-    # Trigger tier3_exit - should exit critical but stay elevated
-    await daemon._handle_tier_change(TierAction.TIER3_EXIT, 2)
-    assert daemon.state.elevated_since is not None
-    assert daemon.state.critical_since is None
-
-
-def test_daemon_has_tier_manager(patched_config_paths):
-    """Daemon should have TierManager for tier transitions."""
-    config = Config()
-    daemon = Daemon(config)
-
-    assert hasattr(daemon, "tier_manager")
-    # current_tier returns int directly, not Tier enum
-    assert daemon.tier_manager.current_tier == 1  # SENTINEL
-
-
-@pytest.mark.asyncio
-async def test_daemon_handles_tier2_exit_writes_bookmark(patched_config_paths):
-    """Daemon should write bookmark to DB on tier2_exit."""
-    config = Config()
-    daemon = Daemon(config)
-    await daemon._init_database()
-
-    # Trigger tier2 entry with ProcessSamples
-    entry_samples = ProcessSamples(
-        timestamp=datetime.now(),
-        elapsed_ms=1000,
-        process_count=100,
-        max_score=35,
-        rogues=[
-            ProcessScore(
-                pid=123,
-                command="test_proc",
-                cpu=50.0,
-                state="running",
-                mem=1024 * 1024 * 100,
-                cmprs=0,
-                pageins=10,
-                csw=500,
-                sysbsd=200,
-                threads=5,
-                score=35,
-                categories=frozenset(["cpu"]),
-                captured_at=1706000000.0,
-            )
-        ],
-    )
-    await daemon._handle_tier_action(TierAction.TIER2_ENTRY, entry_samples)
-
-    # Simulate time passing by manipulating daemon's entry time
-    daemon._tier2_entry_time = time.monotonic() - 60  # Simulate 60s ago
-
-    # Handle tier2_exit with lower score samples
-    exit_samples = ProcessSamples(
-        timestamp=datetime.now(),
-        elapsed_ms=1000,
-        process_count=100,
-        max_score=15,
-        rogues=[],
-    )
-    await daemon._handle_tier_action(TierAction.TIER2_EXIT, exit_samples)
-
-    # Verify event was written with peak_stress (now peak_score) and peak_tier
-    events = get_events(daemon._conn, limit=1)
-    assert len(events) == 1
-    assert events[0].peak_stress == 35  # Peak from entry sample
-    assert events[0].peak_tier == 2
-    assert events[0].end_timestamp is not None  # Event was finalized
-    # Entry time should be cleared after exit
-    assert daemon._tier2_entry_time is None
-
-
-# Note: Tests for old PowermetricsResult/StressBreakdown API were removed in Task 10.
-# The new per-process scoring via TopCollector is tested in:
-# - test_daemon_main_loop_collects_samples
-# - test_daemon_main_loop_updates_tier_manager
-# - test_daemon_main_loop_handles_pause_detection
-# Peak tracking is tested in test_tier_manager.py.
+# Note: Per-process tracking via ProcessTracker replaces the tier system.
+# ProcessTracker is tested in test_tracker.py.
+# ProcessTracker integration with daemon is in Task 8.
 
 
 # === Socket Server Integration Tests ===
@@ -750,62 +649,6 @@ async def test_daemon_main_loop_collects_samples(patched_config_paths, monkeypat
     assert len(pushed_samples) == 2
     assert pushed_samples[0][0].max_score == 25
     assert pushed_samples[1][0].max_score == 45
-
-
-@pytest.mark.asyncio
-async def test_daemon_main_loop_updates_tier_manager(patched_config_paths, monkeypatch):
-    """Main loop should update TierManager with max_score."""
-    from pause_monitor.storage import init_database
-
-    config = Config()
-    daemon = Daemon(config)
-
-    init_database(config.db_path)
-    daemon._conn = sqlite3.connect(config.db_path)
-
-    # Create a sample with high score that should trigger tier 2
-    high_score_sample = ProcessSamples(
-        timestamp=datetime.now(),
-        elapsed_ms=1000,
-        process_count=100,
-        max_score=50,  # Above default elevated_threshold (35)
-        rogues=[
-            ProcessScore(
-                pid=123,
-                command="heavy_proc",
-                cpu=90.0,
-                state="running",
-                mem=1024**3,
-                cmprs=0,
-                pageins=500,
-                csw=10000,
-                sysbsd=5000,
-                threads=50,
-                score=50,
-                categories=frozenset(["cpu", "pageins"]),
-                captured_at=1706000000.0,
-            )
-        ],
-    )
-
-    call_count = 0
-
-    async def mock_collect():
-        nonlocal call_count
-        call_count += 1
-        if call_count > 1:
-            daemon._shutdown_event.set()
-        return high_score_sample
-
-    monkeypatch.setattr(daemon.collector, "collect", mock_collect)
-
-    # Run main loop
-    await daemon._main_loop()
-
-    # TierManager should have been updated with the score
-    assert daemon.tier_manager.peak_score == 50
-    # Should have entered tier 2 (elevated)
-    assert daemon.tier_manager.current_tier == 2
 
 
 @pytest.mark.asyncio

@@ -4,13 +4,12 @@ import asyncio
 import os
 import signal
 import sqlite3
-import time
 from dataclasses import dataclass
 from datetime import datetime
 
 import structlog
 
-from pause_monitor.collector import ProcessSamples, TopCollector
+from pause_monitor.collector import TopCollector
 from pause_monitor.config import Config
 from pause_monitor.forensics import (
     ForensicsCapture,
@@ -18,14 +17,10 @@ from pause_monitor.forensics import (
 )
 from pause_monitor.notifications import Notifier
 from pause_monitor.ringbuffer import BufferContents, RingBuffer
-from pause_monitor.sentinel import TierAction, TierManager
 from pause_monitor.sleepwake import was_recently_asleep
 from pause_monitor.socket_server import SocketServer
 from pause_monitor.storage import (
-    create_event,
-    finalize_event,
     init_database,
-    insert_process_sample,
     prune_old_data,
 )
 
@@ -99,19 +94,7 @@ class Daemon:
         max_samples = config.sentinel.ring_buffer_seconds
         self.ring_buffer = RingBuffer(max_samples=max_samples)
 
-        # Tier management
-        self.tier_manager = TierManager(
-            elevated_threshold=config.bands.tracking_threshold,
-            critical_threshold=config.bands.forensics_threshold,
-        )
-
-        # Event tracking (tier-based saving)
-        self._current_event_id: int | None = None  # Active event ID (tier 2+)
-        self._current_peak_tier: int = 1  # Highest tier reached in current event
-        self._current_peak_score: int = 0  # Peak score in current event
-
-        # Entry time tracking (for notifications)
-        self._tier2_entry_time: float | None = None
+        # Note: Per-process tracking is handled by ProcessTracker (Task 8 integration)
 
         # Will be initialized on start
         self._conn: sqlite3.Connection | None = None
@@ -302,8 +285,7 @@ class Daemon:
     async def _run_forensics(self, contents: BufferContents, *, duration: float) -> None:
         """Run full forensics capture.
 
-        Note: This does NOT create an event - events are created by tier transitions.
-        This just captures forensics data (ring buffer, spindump, tailspin, logs).
+        Captures forensics data (ring buffer, spindump, tailspin, logs) for pause events.
 
         Args:
             contents: Frozen ring buffer contents
@@ -341,8 +323,6 @@ class Daemon:
                 "peak_score": peak_score,
                 "culprits": culprit_names,
                 "sample_count": len(contents.samples),
-                "tier": self.tier_manager.current_tier,
-                "event_id": self._current_event_id,
             }
         )
 
@@ -359,164 +339,6 @@ class Daemon:
         self.notifier.pause_detected(duration=duration, event_dir=event_dir)
 
         log.info("forensics_started", event_dir=str(event_dir), culprits=culprit_names)
-
-    # === Tier Callbacks ===
-
-    async def _handle_tier_change(self, action: TierAction, tier: int) -> None:
-        """Handle tier state changes from TierManager.
-
-        Args:
-            action: The tier action (TIER2_ENTRY, TIER2_EXIT, TIER3_ENTRY, TIER3_EXIT, TIER2_PEAK)
-            tier: The current tier (1, 2, or 3)
-        """
-        log.info("tier_change", action=action, tier=tier)
-
-        # Update state based on tier
-        if action == TierAction.TIER2_ENTRY or action == TierAction.TIER3_ENTRY:
-            self.state.enter_elevated()
-            if action == TierAction.TIER3_ENTRY:
-                self.state.enter_critical()
-        elif action == TierAction.TIER2_EXIT:
-            self.state.exit_elevated()
-        elif action == TierAction.TIER3_EXIT:
-            self.state.exit_critical()
-
-        # Send notifications for tier changes
-        if action == TierAction.TIER2_ENTRY:
-            self.notifier.elevated_entered(self.tier_manager.peak_score)
-        elif action == TierAction.TIER3_ENTRY:
-            # Critical score notification
-            self.notifier.critical_stress(
-                self.tier_manager.peak_score,
-                0.0,  # Just entered, no duration yet
-            )
-
-    def _save_event_sample(self, samples: ProcessSamples, tier: int) -> None:
-        """Save a sample to the current event.
-
-        Args:
-            samples: Current ProcessSamples with rogues
-            tier: Current tier (2 or 3)
-        """
-        if self._current_event_id is None or self._conn is None:
-            return
-
-        record_id = insert_process_sample(
-            self._conn,
-            self._current_event_id,
-            tier,
-            samples,
-        )
-
-        log.debug(
-            "event_sample_saved",
-            event_id=self._current_event_id,
-            record_id=record_id,
-            tier=tier,
-            max_score=samples.max_score,
-            rogue_count=len(samples.rogues),
-        )
-
-    async def _handle_tier_action(self, action: TierAction, samples: ProcessSamples) -> None:
-        """Handle tier transition actions.
-
-        Requires: _init_database() must have been called (self._conn must be set).
-
-        Args:
-            action: The tier action to handle
-            samples: Current ProcessSamples with rogues and max_score
-        """
-        score = samples.max_score
-
-        # Handle state updates and notifications for tier changes
-        await self._handle_tier_change(action, self.tier_manager.current_tier)
-
-        if action == TierAction.TIER2_ENTRY:
-            # Create new event on first escalation from tier 1
-            self._current_event_id = create_event(self._conn, datetime.now())
-            self._current_peak_tier = 2
-            self._current_peak_score = score
-            self._tier2_entry_time = time.monotonic()
-
-            # Save entry sample
-            self._save_event_sample(samples, tier=2)
-
-            log.info(
-                "tier2_entered",
-                event_id=self._current_event_id,
-                score=score,
-                rogue_count=len(samples.rogues),
-                top_rogue=samples.rogues[0].command if samples.rogues else None,
-            )
-
-        elif action == TierAction.TIER2_PEAK:
-            if score > self._current_peak_score:
-                self._current_peak_score = score
-
-            # Save peak sample
-            self._save_event_sample(samples, tier=2)
-
-            log.info(
-                "tier2_new_peak",
-                event_id=self._current_event_id,
-                score=score,
-                rogue_count=len(samples.rogues),
-                top_rogue=samples.rogues[0].command if samples.rogues else None,
-            )
-
-        elif action == TierAction.TIER2_EXIT:
-            # Finalize event when returning to tier 1
-            if self._current_event_id is not None:
-                finalize_event(
-                    self._conn,
-                    self._current_event_id,
-                    end_timestamp=datetime.now(),
-                    peak_stress=self._current_peak_score,  # Field name kept for compatibility
-                    peak_tier=self._current_peak_tier,
-                )
-                self.state.event_count += 1
-
-                entry_time = self._tier2_entry_time
-                duration = time.monotonic() - entry_time if entry_time else 0.0
-
-                log.info(
-                    "tier2_exited",
-                    event_id=self._current_event_id,
-                    duration=duration,
-                    peak_score=self._current_peak_score,
-                    peak_tier=self._current_peak_tier,
-                )
-
-            # Reset event tracking
-            self._current_event_id = None
-            self._current_peak_tier = 1
-            self._current_peak_score = 0
-            self._tier2_entry_time = None
-
-        elif action == TierAction.TIER3_ENTRY:
-            # If entering tier 3 directly from tier 1, create event first
-            if self._current_event_id is None:
-                self._current_event_id = create_event(self._conn, datetime.now())
-                self._tier2_entry_time = time.monotonic()
-
-            self._current_peak_tier = 3
-            if score > self._current_peak_score:
-                self._current_peak_score = score
-
-            # Save entry sample
-            self._save_event_sample(samples, tier=3)
-
-            log.warning(
-                "tier3_entered",
-                event_id=self._current_event_id,
-                score=score,
-                rogue_count=len(samples.rogues),
-                top_rogue=samples.rogues[0].command if samples.rogues else None,
-            )
-
-        elif action == TierAction.TIER3_EXIT:
-            # De-escalating to tier 2 - event continues
-            log.info("tier3_exited", event_id=self._current_event_id, score=score)
 
     async def _handle_pause(self, elapsed_ms: int, expected_ms: int) -> None:
         """Handle detected pause - run full forensics.
@@ -563,10 +385,10 @@ class Daemon:
         Each iteration:
         1. Collect samples via TopCollector
         2. Push to ring buffer
-        3. Update tier manager with max_score
-        4. Handle tier transitions
-        5. Check for pause (elapsed_ms > threshold)
-        6. Broadcast to socket for TUI
+        3. Check for pause (elapsed_ms > threshold)
+        4. Broadcast to socket for TUI
+
+        Note: Per-process tracking via ProcessTracker is added in Task 8.
 
         The loop runs until shutdown event is set.
         """
@@ -581,30 +403,16 @@ class Daemon:
                 if self._shutdown_event.is_set():
                     break
 
-                # Get current tier for the sample
-                tier = self.tier_manager.current_tier
-
-                # Push to ring buffer
-                self.ring_buffer.push(samples, tier)
-
-                # Update tier manager with max score
-                action = self.tier_manager.update(samples.max_score)
-                if action:
-                    await self._handle_tier_action(action, samples)
-
-                # Tier 3 continuous saving (every sample)
-                tier = self.tier_manager.current_tier
-                if tier == 3 and action != TierAction.TIER3_ENTRY:
-                    # TIER3_ENTRY already saves, avoid duplicate
-                    self._save_event_sample(samples, tier=3)
+                # Push to ring buffer (tier=1 placeholder until ProcessTracker integration)
+                self.ring_buffer.push(samples, tier=1)
 
                 # Check for pause (elapsed_ms much larger than expected)
                 if samples.elapsed_ms > expected_ms * pause_threshold:
                     await self._handle_pause(samples.elapsed_ms, expected_ms)
 
-                # Broadcast to TUI clients
+                # Broadcast to TUI clients (tier=1 placeholder until ProcessTracker integration)
                 if self._socket_server and self._socket_server.has_clients:
-                    await self._socket_server.broadcast(samples, tier)
+                    await self._socket_server.broadcast(samples, tier=1)
 
                 # Update daemon state
                 self.state.update_sample(samples.max_score)
