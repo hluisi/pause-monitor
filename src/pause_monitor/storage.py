@@ -170,8 +170,11 @@ def get_schema_version(conn: sqlite3.Connection) -> int:
 
 def get_daemon_state(conn: sqlite3.Connection, key: str) -> str | None:
     """Get a value from daemon_state table."""
-    row = conn.execute("SELECT value FROM daemon_state WHERE key = ?", (key,)).fetchone()
-    return row[0] if row else None
+    try:
+        row = conn.execute("SELECT value FROM daemon_state WHERE key = ?", (key,)).fetchone()
+        return row[0] if row else None
+    except sqlite3.OperationalError:
+        return None
 
 
 def set_daemon_state(conn: sqlite3.Connection, key: str, value: str) -> None:

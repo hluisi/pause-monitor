@@ -650,3 +650,15 @@ def test_set_daemon_state_overwrites(tmp_path):
     value = get_daemon_state(conn, "boot_time")
     conn.close()
     assert value == "2000"
+
+
+def test_get_daemon_state_no_table(tmp_path):
+    """get_daemon_state returns None when table doesn't exist."""
+    from pause_monitor.storage import get_daemon_state
+
+    # Create empty database without schema
+    db_path = tmp_path / "empty.db"
+    conn = sqlite3.connect(db_path)
+    value = get_daemon_state(conn, "any_key")
+    conn.close()
+    assert value is None
