@@ -72,9 +72,10 @@ def test_init_database_creates_tables(tmp_path: Path):
     conn.close()
 
     table_names = [t[0] for t in tables]
-    assert "samples" in table_names
-    assert "process_samples" in table_names
-    assert "events" in table_names
+    # Schema v8: new per-process event tables
+    assert "process_events" in table_names
+    assert "process_snapshots" in table_names
+    assert "process_sample_records" in table_names
     assert "daemon_state" in table_names
 
 
@@ -469,14 +470,14 @@ def test_get_events_returns_peak_stress(tmp_path):
 # --- Schema v7: JSON Blob Storage Tests ---
 
 
-def test_schema_version_7(initialized_db: Path):
-    """Schema version should be 7."""
+def test_schema_version_8(initialized_db: Path):
+    """Schema version should be 8."""
     from pause_monitor.storage import get_connection
 
     conn = get_connection(initialized_db)
     version = get_schema_version(conn)
     conn.close()
-    assert version == 7
+    assert version == 8
 
 
 def test_insert_process_sample_json(initialized_db: Path):
@@ -662,3 +663,87 @@ def test_get_daemon_state_no_table(tmp_path):
     value = get_daemon_state(conn, "any_key")
     conn.close()
     assert value is None
+
+
+# --- Schema v8: Per-Process Event Tables ---
+
+
+def test_schema_has_process_events_table(tmp_path):
+    """Schema includes process_events table."""
+    from pause_monitor.storage import get_connection, init_database
+
+    db_path = tmp_path / "test.db"
+    init_database(db_path)
+    conn = get_connection(db_path)
+    cursor = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='process_events'"
+    )
+    assert cursor.fetchone() is not None
+    conn.close()
+
+
+def test_schema_has_process_snapshots_table(tmp_path):
+    """Schema includes process_snapshots table."""
+    from pause_monitor.storage import get_connection, init_database
+
+    db_path = tmp_path / "test.db"
+    init_database(db_path)
+    conn = get_connection(db_path)
+    cursor = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='process_snapshots'"
+    )
+    assert cursor.fetchone() is not None
+    conn.close()
+
+
+def test_schema_no_legacy_events_table(tmp_path):
+    """Schema does not have legacy events table."""
+    from pause_monitor.storage import get_connection, init_database
+
+    db_path = tmp_path / "test.db"
+    init_database(db_path)
+    conn = get_connection(db_path)
+    cursor = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='events'")
+    assert cursor.fetchone() is None
+    conn.close()
+
+
+def test_process_events_table_structure(tmp_path):
+    """process_events has expected columns."""
+    from pause_monitor.storage import get_connection, init_database
+
+    db_path = tmp_path / "test.db"
+    init_database(db_path)
+    conn = get_connection(db_path)
+    cursor = conn.execute("PRAGMA table_info(process_events)")
+    columns = {row[1] for row in cursor.fetchall()}
+    conn.close()
+
+    expected = {
+        "id",
+        "pid",
+        "command",
+        "boot_time",
+        "entry_time",
+        "exit_time",
+        "entry_band",
+        "peak_band",
+        "peak_score",
+        "peak_snapshot",
+    }
+    assert expected.issubset(columns)
+
+
+def test_process_snapshots_table_structure(tmp_path):
+    """process_snapshots has expected columns."""
+    from pause_monitor.storage import get_connection, init_database
+
+    db_path = tmp_path / "test.db"
+    init_database(db_path)
+    conn = get_connection(db_path)
+    cursor = conn.execute("PRAGMA table_info(process_snapshots)")
+    columns = {row[1] for row in cursor.fetchall()}
+    conn.close()
+
+    expected = {"id", "event_id", "snapshot_type", "snapshot"}
+    assert expected.issubset(columns)

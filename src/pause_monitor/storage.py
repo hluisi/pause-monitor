@@ -12,119 +12,55 @@ from pause_monitor.collector import ProcessSamples
 
 log = structlog.get_logger()
 
-SCHEMA_VERSION = 7  # Added JSON blob storage for process samples
+SCHEMA_VERSION = 8  # Per-process event tracking with process_events and process_snapshots
 
-# Valid event status values
+# Valid event status values (legacy, kept for backward compatibility)
 VALID_EVENT_STATUSES = frozenset({"unreviewed", "reviewed", "pinned", "dismissed"})
 
 SCHEMA = """
--- Escalation events (one row per tier 1 → elevated → tier 1 episode)
-CREATE TABLE IF NOT EXISTS events (
-    id              INTEGER PRIMARY KEY,
-    start_timestamp REAL NOT NULL,
-    end_timestamp   REAL,              -- NULL if ongoing
-    peak_stress     INTEGER,
-    peak_tier       INTEGER,           -- Highest tier reached (2 or 3)
-    status          TEXT DEFAULT 'unreviewed',
-    notes           TEXT
+CREATE TABLE IF NOT EXISTS schema_version (
+    version INTEGER PRIMARY KEY
 );
 
-CREATE INDEX IF NOT EXISTS idx_events_start ON events(start_timestamp);
-
--- Event samples (captured during escalation events)
--- Tier 2: peaks only, Tier 3: every sample at 1Hz
-CREATE TABLE IF NOT EXISTS event_samples (
-    id              INTEGER PRIMARY KEY,
-    event_id        INTEGER NOT NULL REFERENCES events(id),
-    timestamp       REAL NOT NULL,
-    tier            INTEGER NOT NULL,  -- 2=peak save, 3=continuous save
-    -- Metrics from PowermetricsResult
-    elapsed_ns      INTEGER,
-    throttled       INTEGER,
-    cpu_power       REAL,
-    gpu_pct         REAL,
-    gpu_power       REAL,
-    io_read_per_s   REAL,
-    io_write_per_s  REAL,
-    wakeups_per_s   REAL,
-    pageins_per_s   REAL,
-    -- Stress breakdown (8 factors)
-    stress_total    INTEGER,
-    stress_load     INTEGER,
-    stress_memory   INTEGER,
-    stress_thermal  INTEGER,
-    stress_latency  INTEGER,
-    stress_io       INTEGER,
-    stress_gpu      INTEGER,
-    stress_wakeups  INTEGER,
-    stress_pageins  INTEGER,
-    -- Top 5 processes (JSON arrays)
-    top_cpu_procs       TEXT,
-    top_pagein_procs    TEXT,
-    top_wakeup_procs    TEXT,
-    top_diskio_procs    TEXT
-);
-
-CREATE INDEX IF NOT EXISTS idx_event_samples_event ON event_samples(event_id);
-CREATE INDEX IF NOT EXISTS idx_event_samples_timestamp ON event_samples(timestamp);
-
--- Daemon state (persisted across restarts)
 CREATE TABLE IF NOT EXISTS daemon_state (
-    key             TEXT PRIMARY KEY,
-    value           TEXT NOT NULL,
-    updated_at      REAL NOT NULL
+    key TEXT PRIMARY KEY,
+    value TEXT,
+    updated_at REAL
 );
 
--- Legacy tables kept for backward compatibility (not used by tier-based saving)
-CREATE TABLE IF NOT EXISTS samples (
-    id              INTEGER PRIMARY KEY,
-    timestamp       REAL NOT NULL,
-    interval        REAL NOT NULL,
-    load_avg        REAL,
-    mem_pressure    INTEGER,
-    throttled       INTEGER,
-    cpu_power       REAL,
-    gpu_pct         REAL,
-    gpu_power       REAL,
-    io_read_per_s   REAL,
-    io_write_per_s  REAL,
-    wakeups_per_s   REAL,
-    pageins_per_s   REAL,
-    stress_total    INTEGER,
-    stress_load     INTEGER,
-    stress_memory   INTEGER,
-    stress_thermal  INTEGER,
-    stress_latency  INTEGER,
-    stress_io       INTEGER,
-    stress_gpu      INTEGER,
-    stress_wakeups  INTEGER,
-    stress_pageins  INTEGER
-);
-
-CREATE TABLE IF NOT EXISTS process_samples (
-    id              INTEGER PRIMARY KEY,
-    sample_id       INTEGER NOT NULL REFERENCES samples(id),
-    pid             INTEGER NOT NULL,
-    name            TEXT NOT NULL,
-    cpu_pct         REAL,
-    mem_pct         REAL,
-    io_read         INTEGER,
-    io_write        INTEGER,
-    energy_impact   REAL,
-    is_suspect      INTEGER DEFAULT 0
-);
-
--- New v7: Process sample records with JSON blob storage
--- Stores ProcessSamples (scored processes) as a single JSON blob per tier/event
 CREATE TABLE IF NOT EXISTS process_sample_records (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    event_id        INTEGER NOT NULL,
-    tier            INTEGER NOT NULL,
-    data            TEXT NOT NULL,
-    FOREIGN KEY (event_id) REFERENCES events(id) ON DELETE CASCADE
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp REAL NOT NULL,
+    data TEXT NOT NULL
 );
 
-CREATE INDEX IF NOT EXISTS idx_process_sample_records_event ON process_sample_records(event_id);
+CREATE TABLE IF NOT EXISTS process_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    pid INTEGER NOT NULL,
+    command TEXT NOT NULL,
+    boot_time INTEGER NOT NULL,
+    entry_time REAL NOT NULL,
+    exit_time REAL,
+    entry_band TEXT NOT NULL,
+    peak_band TEXT NOT NULL,
+    peak_score INTEGER NOT NULL,
+    peak_snapshot TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS process_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_id INTEGER NOT NULL,
+    snapshot_type TEXT NOT NULL,
+    snapshot TEXT NOT NULL,
+    FOREIGN KEY (event_id) REFERENCES process_events(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_process_events_pid_boot
+    ON process_events(pid, boot_time);
+CREATE INDEX IF NOT EXISTS idx_process_events_open
+    ON process_events(exit_time) WHERE exit_time IS NULL;
+CREATE INDEX IF NOT EXISTS idx_process_snapshots_event
+    ON process_snapshots(event_id);
 """
 
 
