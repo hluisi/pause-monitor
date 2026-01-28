@@ -99,8 +99,8 @@ class Daemon:
         # Boot time for process tracking (stable across daemon restarts)
         self.boot_time = get_boot_time()
 
-        # Database connection and tracker
-        # Created here if DB exists with correct schema, otherwise in _init_database
+        # Database connection and tracker. Initialized eagerly if DB exists and has
+        # compatible schema; deferred to _init_database() otherwise.
         self._conn: sqlite3.Connection | None = None
         self.tracker: ProcessTracker | None = None
         if config.db_path.exists():
@@ -202,10 +202,11 @@ class Daemon:
         # Stop caffeinate
         await self._stop_caffeinate()
 
-        # Close database
+        # Close database and tracker
         if self._conn:
             self._conn.close()
             self._conn = None
+        self.tracker = None
 
         self._remove_pid_file()
 

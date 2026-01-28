@@ -17,6 +17,9 @@ from pause_monitor.config import Config
 from pause_monitor.daemon import Daemon, DaemonState
 from pause_monitor.ringbuffer import RingBuffer
 
+# Test constants
+TEST_TIMESTAMP = 1706000000.0  # 2024-01-23 UTC
+
 # === Test Fixtures ===
 
 
@@ -552,13 +555,21 @@ def test_daemon_uses_top_collector(patched_config_paths):
 
 @pytest.mark.asyncio
 async def test_daemon_main_loop_collects_samples(patched_config_paths, monkeypatch):
-    """Main loop should collect and process samples via TopCollector."""
+    """Main loop should collect and process samples via TopCollector.
+
+    This explicitly tests the "no tracker" case: daemon is created before DB exists,
+    so tracker remains None. The main loop should still work without tracker.update().
+    Tracker integration is tested separately in test_daemon_main_loop_updates_tracker.
+    """
     from pause_monitor.storage import init_database
 
     config = Config()
     daemon = Daemon(config)
 
-    # Initialize database to prevent NoneType errors
+    # Verify tracker is None (DB didn't exist at daemon init time)
+    assert daemon.tracker is None
+
+    # Initialize database to prevent NoneType errors in other code paths
     init_database(config.db_path)
     daemon._conn = sqlite3.connect(config.db_path)
 
@@ -593,7 +604,7 @@ async def test_daemon_main_loop_collects_samples(patched_config_paths, monkeypat
                     threads=5,
                     score=25,
                     categories=frozenset(["cpu"]),
-                    captured_at=1706000000.0,  # 2024-01-23 UTC
+                    captured_at=TEST_TIMESTAMP,
                 )
             ],
         ),
@@ -616,7 +627,7 @@ async def test_daemon_main_loop_collects_samples(patched_config_paths, monkeypat
                     threads=20,
                     score=45,
                     categories=frozenset(["cpu", "mem"]),
-                    captured_at=1706000000.0,  # 2024-01-23 UTC
+                    captured_at=TEST_TIMESTAMP,
                 )
             ],
         ),
@@ -661,13 +672,12 @@ def test_daemon_initializes_tracker(patched_config_paths, monkeypatch):
     config = Config()
     init_database(config.db_path)
 
-    # 1706000000 = 2024-01-23 UTC
-    monkeypatch.setattr("pause_monitor.daemon.get_boot_time", lambda: 1706000000)
+    monkeypatch.setattr("pause_monitor.daemon.get_boot_time", lambda: int(TEST_TIMESTAMP))
 
     daemon = Daemon(config)
 
     assert daemon.tracker is not None
-    assert daemon.boot_time == 1706000000
+    assert daemon.boot_time == int(TEST_TIMESTAMP)
 
 
 @pytest.mark.asyncio
@@ -682,8 +692,7 @@ async def test_daemon_schema_mismatch_recovery(patched_config_paths, monkeypatch
     conn.execute("CREATE TABLE fake_table (id INTEGER)")
     conn.close()
 
-    # 1706000000 = 2024-01-23 UTC
-    monkeypatch.setattr("pause_monitor.daemon.get_boot_time", lambda: 1706000000)
+    monkeypatch.setattr("pause_monitor.daemon.get_boot_time", lambda: int(TEST_TIMESTAMP))
 
     # Daemon __init__ should catch the OperationalError and leave tracker as None
     daemon = Daemon(config)
@@ -705,7 +714,7 @@ async def test_daemon_main_loop_updates_tracker(patched_config_paths, monkeypatc
     config = Config()
     init_database(config.db_path)
 
-    monkeypatch.setattr("pause_monitor.daemon.get_boot_time", lambda: 1706000000)
+    monkeypatch.setattr("pause_monitor.daemon.get_boot_time", lambda: int(TEST_TIMESTAMP))
 
     daemon = Daemon(config)
 
@@ -739,7 +748,7 @@ async def test_daemon_main_loop_updates_tracker(patched_config_paths, monkeypatc
                 threads=5,
                 score=25,
                 categories=frozenset(["cpu"]),
-                captured_at=1706000000.0,
+                captured_at=TEST_TIMESTAMP,
             )
         ],
     )
