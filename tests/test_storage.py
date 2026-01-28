@@ -747,3 +747,168 @@ def test_process_snapshots_table_structure(tmp_path):
 
     expected = {"id", "event_id", "snapshot_type", "snapshot"}
     assert expected.issubset(columns)
+
+
+# --- Process Event CRUD Tests ---
+
+
+def test_create_process_event(tmp_path):
+    """create_process_event inserts and returns event ID."""
+    from pause_monitor.storage import create_process_event, get_connection, init_database
+
+    db_path = tmp_path / "test.db"
+    init_database(db_path)
+    conn = get_connection(db_path)
+
+    event_id = create_process_event(
+        conn,
+        pid=123,
+        command="test_cmd",
+        boot_time=1706000000,
+        entry_time=1706000100.5,
+        entry_band="elevated",
+        peak_score=45,
+        peak_band="elevated",
+        peak_snapshot='{"pid": 123, "score": 45}',
+    )
+
+    assert event_id is not None
+    assert isinstance(event_id, int)
+    conn.close()
+
+
+def test_get_open_events(tmp_path):
+    """get_open_events returns events with no exit_time."""
+    from pause_monitor.storage import (
+        create_process_event,
+        get_connection,
+        get_open_events,
+        init_database,
+    )
+
+    db_path = tmp_path / "test.db"
+    init_database(db_path)
+    conn = get_connection(db_path)
+
+    create_process_event(
+        conn,
+        pid=123,
+        command="open",
+        boot_time=1706000000,
+        entry_time=1706000100.5,
+        entry_band="elevated",
+        peak_score=45,
+        peak_band="elevated",
+        peak_snapshot="{}",
+    )
+
+    events = get_open_events(conn, boot_time=1706000000)
+    assert len(events) == 1
+    assert events[0]["pid"] == 123
+    conn.close()
+
+
+def test_close_process_event(tmp_path):
+    """close_process_event sets exit_time."""
+    from pause_monitor.storage import (
+        close_process_event,
+        create_process_event,
+        get_connection,
+        get_open_events,
+        init_database,
+    )
+
+    db_path = tmp_path / "test.db"
+    init_database(db_path)
+    conn = get_connection(db_path)
+
+    event_id = create_process_event(
+        conn,
+        pid=123,
+        command="test",
+        boot_time=1706000000,
+        entry_time=1706000100.5,
+        entry_band="elevated",
+        peak_score=45,
+        peak_band="elevated",
+        peak_snapshot="{}",
+    )
+
+    close_process_event(conn, event_id, exit_time=1706000200.5)
+
+    events = get_open_events(conn, boot_time=1706000000)
+    assert len(events) == 0
+    conn.close()
+
+
+def test_update_process_event_peak(tmp_path):
+    """update_process_event_peak updates peak fields."""
+    from pause_monitor.storage import (
+        create_process_event,
+        get_connection,
+        init_database,
+        update_process_event_peak,
+    )
+
+    db_path = tmp_path / "test.db"
+    init_database(db_path)
+    conn = get_connection(db_path)
+
+    event_id = create_process_event(
+        conn,
+        pid=123,
+        command="test",
+        boot_time=1706000000,
+        entry_time=1706000100.5,
+        entry_band="elevated",
+        peak_score=45,
+        peak_band="elevated",
+        peak_snapshot='{"score": 45}',
+    )
+
+    update_process_event_peak(
+        conn, event_id, peak_score=80, peak_band="critical", peak_snapshot='{"score": 80}'
+    )
+
+    row = conn.execute(
+        "SELECT peak_score, peak_band FROM process_events WHERE id = ?", (event_id,)
+    ).fetchone()
+    assert row[0] == 80
+    assert row[1] == "critical"
+    conn.close()
+
+
+def test_insert_process_snapshot(tmp_path):
+    """insert_process_snapshot adds snapshot to event."""
+    from pause_monitor.storage import (
+        create_process_event,
+        get_connection,
+        init_database,
+        insert_process_snapshot,
+    )
+
+    db_path = tmp_path / "test.db"
+    init_database(db_path)
+    conn = get_connection(db_path)
+
+    event_id = create_process_event(
+        conn,
+        pid=123,
+        command="test",
+        boot_time=1706000000,
+        entry_time=1706000100.5,
+        entry_band="elevated",
+        peak_score=45,
+        peak_band="elevated",
+        peak_snapshot="{}",
+    )
+
+    insert_process_snapshot(conn, event_id, snapshot_type="entry", snapshot='{"score": 45}')
+
+    row = conn.execute(
+        "SELECT snapshot_type, snapshot FROM process_snapshots WHERE event_id = ?",
+        (event_id,),
+    ).fetchone()
+    assert row[0] == "entry"
+    assert row[1] == '{"score": 45}'
+    conn.close()

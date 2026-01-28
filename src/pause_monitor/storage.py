@@ -396,3 +396,90 @@ def prune_old_data(
     log.info("prune_complete", events_deleted=events_deleted)
 
     return events_deleted
+
+
+# --- Process Event CRUD Functions ---
+
+
+def create_process_event(
+    conn: sqlite3.Connection,
+    pid: int,
+    command: str,
+    boot_time: int,
+    entry_time: float,
+    entry_band: str,
+    peak_score: int,
+    peak_band: str,
+    peak_snapshot: str,
+) -> int:
+    """Create a new process event. Returns event ID."""
+    cursor = conn.execute(
+        """INSERT INTO process_events
+           (pid, command, boot_time, entry_time, entry_band, peak_score, peak_band, peak_snapshot)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+        (pid, command, boot_time, entry_time, entry_band, peak_score, peak_band, peak_snapshot),
+    )
+    conn.commit()
+    result = cursor.lastrowid
+    assert result is not None
+    return result
+
+
+def get_open_events(conn: sqlite3.Connection, boot_time: int) -> list[dict]:
+    """Get all open events (no exit_time) for current boot."""
+    cursor = conn.execute(
+        """SELECT id, pid, command, entry_time, entry_band, peak_score, peak_band
+           FROM process_events
+           WHERE boot_time = ? AND exit_time IS NULL""",
+        (boot_time,),
+    )
+    return [
+        {
+            "id": r[0],
+            "pid": r[1],
+            "command": r[2],
+            "entry_time": r[3],
+            "entry_band": r[4],
+            "peak_score": r[5],
+            "peak_band": r[6],
+        }
+        for r in cursor.fetchall()
+    ]
+
+
+def close_process_event(conn: sqlite3.Connection, event_id: int, exit_time: float) -> None:
+    """Close an event by setting exit_time."""
+    conn.execute(
+        "UPDATE process_events SET exit_time = ? WHERE id = ?",
+        (exit_time, event_id),
+    )
+    conn.commit()
+
+
+def update_process_event_peak(
+    conn: sqlite3.Connection,
+    event_id: int,
+    peak_score: int,
+    peak_band: str,
+    peak_snapshot: str,
+) -> None:
+    """Update peak score/band/snapshot for an event."""
+    conn.execute(
+        "UPDATE process_events SET peak_score = ?, peak_band = ?, peak_snapshot = ? WHERE id = ?",
+        (peak_score, peak_band, peak_snapshot, event_id),
+    )
+    conn.commit()
+
+
+def insert_process_snapshot(
+    conn: sqlite3.Connection,
+    event_id: int,
+    snapshot_type: str,
+    snapshot: str,
+) -> None:
+    """Insert a snapshot for an event."""
+    conn.execute(
+        "INSERT INTO process_snapshots (event_id, snapshot_type, snapshot) VALUES (?, ?, ?)",
+        (event_id, snapshot_type, snapshot),
+    )
+    conn.commit()
