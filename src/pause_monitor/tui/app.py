@@ -12,10 +12,87 @@ from textual.css.query import NoMatches
 from textual.screen import Screen
 from textual.widgets import DataTable, Footer, Header, Label, Static
 
+from pause_monitor.boottime import get_boot_time
 from pause_monitor.config import Config
 from pause_monitor.socket_client import SocketClient
 
 log = logging.getLogger(__name__)
+
+
+def _get_process_events(
+    conn: sqlite3.Connection, limit: int = 100, boot_time: int | None = None
+) -> list[dict]:
+    """Get process events from database.
+
+    Args:
+        conn: Database connection
+        limit: Maximum number of events to return
+        boot_time: Optional boot_time filter (if None, gets all)
+
+    Returns:
+        List of event dicts with id, pid, command, entry_time, exit_time,
+        entry_band, peak_band, peak_score
+    """
+    if boot_time is not None:
+        cursor = conn.execute(
+            """SELECT id, pid, command, entry_time, exit_time, entry_band, peak_band, peak_score
+               FROM process_events
+               WHERE boot_time = ?
+               ORDER BY entry_time DESC
+               LIMIT ?""",
+            (boot_time, limit),
+        )
+    else:
+        cursor = conn.execute(
+            """SELECT id, pid, command, entry_time, exit_time, entry_band, peak_band, peak_score
+               FROM process_events
+               ORDER BY entry_time DESC
+               LIMIT ?""",
+            (limit,),
+        )
+    return [
+        {
+            "id": r[0],
+            "pid": r[1],
+            "command": r[2],
+            "entry_time": r[3],
+            "exit_time": r[4],
+            "entry_band": r[5],
+            "peak_band": r[6],
+            "peak_score": r[7],
+        }
+        for r in cursor.fetchall()
+    ]
+
+
+def _get_process_event_by_id(conn: sqlite3.Connection, event_id: int) -> dict | None:
+    """Get a single process event by ID.
+
+    Returns:
+        Event dict with all fields, or None if not found
+    """
+    row = conn.execute(
+        """SELECT id, pid, command, boot_time, entry_time, exit_time,
+                  entry_band, peak_band, peak_score, peak_snapshot
+           FROM process_events WHERE id = ?""",
+        (event_id,),
+    ).fetchone()
+
+    if not row:
+        return None
+
+    return {
+        "id": row[0],
+        "pid": row[1],
+        "command": row[2],
+        "boot_time": row[3],
+        "entry_time": row[4],
+        "exit_time": row[5],
+        "entry_band": row[6],
+        "peak_band": row[7],
+        "peak_score": row[8],
+        "peak_snapshot": row[9],
+    }
 
 
 class StressGauge(Static):
@@ -199,7 +276,7 @@ class ProcessesPanel(Static):
 
 
 class EventsTable(DataTable):
-    """Table showing recent pause events."""
+    """Table showing recent process events."""
 
     DEFAULT_CSS = """
     EventsTable {
@@ -209,30 +286,18 @@ class EventsTable(DataTable):
     """
 
     def on_mount(self) -> None:
-        """Set up table columns."""
-        self.add_column("Status", width=3)
-        self.add_column("Time", width=20)
+        """Set up table columns for process events."""
+        self.add_column("Command", width=15)
+        self.add_column("Band", width=10)
         self.add_column("Duration", width=10)
-        self.add_column("Stress", width=8)
-
-
-# Status icons for event display
-STATUS_ICONS = {
-    "unreviewed": "○",
-    "reviewed": "✓",
-    "pinned": "📌",
-    "dismissed": "✗",
-}
+        self.add_column("Score", width=6)
 
 
 class EventDetailScreen(Screen):
-    """Screen showing details of a single event."""
+    """Screen showing details of a single process event."""
 
     BINDINGS = [
         Binding("escape", "pop_screen", "Back"),
-        Binding("r", "mark_reviewed", "Reviewed"),
-        Binding("p", "mark_pinned", "Pin"),
-        Binding("d", "mark_dismissed", "Dismiss"),
     ]
 
     DEFAULT_CSS = """
@@ -259,15 +324,11 @@ class EventDetailScreen(Screen):
         color: $text-muted;
     }
 
-    EventDetailScreen .culprit-list {
-        margin-left: 2;
-        height: auto;
-        max-height: 10;
-    }
-
-    EventDetailScreen .notes {
+    EventDetailScreen .snapshot {
         margin-left: 2;
         color: $text-muted;
+        height: auto;
+        max-height: 15;
     }
     """
 
@@ -275,13 +336,14 @@ class EventDetailScreen(Screen):
         super().__init__()
         self.event_id = event_id
         self._conn = conn
-        self._event: Any = None
+        self._event: dict | None = None
 
     def compose(self) -> ComposeResult:
         """Build the detail view layout."""
-        from pause_monitor.storage import get_event_by_id, get_process_samples
+        import json
+        from datetime import datetime
 
-        self._event = get_event_by_id(self._conn, self.event_id)
+        self._event = _get_process_event_by_id(self._conn, self.event_id)
         if not self._event:
             yield Vertical(
                 Label("Event not found", classes="title"),
@@ -289,87 +351,56 @@ class EventDetailScreen(Screen):
             return
 
         event = self._event
-        status_icon = STATUS_ICONS.get(event.status, "?")
+        entry_time = datetime.fromtimestamp(event["entry_time"])
+        exit_time = datetime.fromtimestamp(event["exit_time"]) if event["exit_time"] else None
 
         # Calculate duration
-        if event.end_timestamp:
-            duration = (event.end_timestamp - event.start_timestamp).total_seconds()
+        if exit_time:
+            duration = (exit_time - entry_time).total_seconds()
             duration_str = f"{duration:.1f}s"
-            end_time_str = event.end_timestamp.strftime("%Y-%m-%d %H:%M:%S")
+            end_time_str = exit_time.strftime("%Y-%m-%d %H:%M:%S")
         else:
             duration_str = "ongoing"
             end_time_str = "(ongoing)"
 
-        # Get rogue processes from stored samples
-        samples = get_process_samples(self._conn, self.event_id)
-        rogues: list[str] = []
-        if samples:
-            # Collect unique rogues across all samples, sorted by max score
-            rogue_map: dict[tuple[int, str], int] = {}  # (pid, command) -> max_score
-            for sample in samples:
-                for rogue in sample.data.rogues:
-                    key = (rogue.pid, rogue.command)
-                    if key not in rogue_map or rogue.score > rogue_map[key]:
-                        rogue_map[key] = rogue.score
-            # Sort by score descending
-            sorted_rogues = sorted(rogue_map.items(), key=lambda x: x[1], reverse=True)
-            rogues = [f"{cmd} (PID {pid}, score {score})" for (pid, cmd), score in sorted_rogues]
+        # Parse peak snapshot
+        snapshot_lines: list[str] = []
+        if event["peak_snapshot"]:
+            try:
+                snapshot = json.loads(event["peak_snapshot"])
+                for key, val in snapshot.items():
+                    snapshot_lines.append(f"  {key}: {val}")
+            except json.JSONDecodeError:
+                snapshot_lines.append(f"  {event['peak_snapshot']}")
 
         yield Vertical(
-            Label(f"Event #{event.id} {status_icon}", classes="title"),
-            Label(f"Start: {event.start_timestamp.strftime('%Y-%m-%d %H:%M:%S')}"),
-            Label(f"End: {end_time_str}"),
+            Label(f"Process Event #{event['id']}", classes="title"),
+            Label(f"Command: {event['command']}"),
+            Label(f"PID: {event['pid']}"),
+            Label(f"Entry: {entry_time.strftime('%Y-%m-%d %H:%M:%S')} ({event['entry_band']})"),
+            Label(f"Exit: {end_time_str}"),
             Label(f"Duration: {duration_str}"),
-            Label(f"Status: {event.status}"),
-            Label(f"Peak Tier: {event.peak_tier or '-'}"),
-            Label(f"Peak Score: {event.peak_stress or '-'}"),
-            Label("Top Rogues:", classes="section"),
+            Label(f"Peak Band: {event['peak_band']}"),
+            Label(f"Peak Score: {event['peak_score']}"),
+            Label("Peak Snapshot:", classes="section"),
             VerticalScroll(
-                *([Label(f"  {r}") for r in rogues] if rogues else [Label("  (none)")]),
-                classes="culprit-list",
+                *(
+                    [Label(line) for line in snapshot_lines]
+                    if snapshot_lines
+                    else [Label("  (none)")]
+                ),
+                classes="snapshot",
             ),
-            Label("Notes:", classes="section"),
-            Label(f"  {event.notes or '(none)'}", classes="notes"),
         )
-
-    def _update_status(self, new_status: str) -> None:
-        """Update event status and refresh."""
-        if not self._conn:
-            self.app.notify("Database connection lost", severity="error")
-            return
-
-        from pause_monitor.storage import update_event_status
-
-        try:
-            update_event_status(self._conn, self.event_id, new_status)
-            self.app.pop_screen()
-            self.app.notify(f"Event #{self.event_id} marked as {new_status}")
-        except Exception as e:
-            self.app.notify(f"Failed to update status: {e}", severity="error")
-
-    def action_mark_reviewed(self) -> None:
-        """Mark event as reviewed."""
-        self._update_status("reviewed")
-
-    def action_mark_pinned(self) -> None:
-        """Mark event as pinned."""
-        self._update_status("pinned")
-
-    def action_mark_dismissed(self) -> None:
-        """Mark event as dismissed."""
-        self._update_status("dismissed")
 
 
 class EventsScreen(Screen):
-    """Full-screen events list with filtering and selection."""
+    """Full-screen process events list with selection."""
 
     BINDINGS = [
         Binding("escape", "pop_screen", "Back"),
         Binding("enter", "select_event", "View"),
-        Binding("r", "mark_reviewed", "Reviewed"),
-        Binding("p", "mark_pinned", "Pin"),
-        Binding("d", "mark_dismissed", "Dismiss"),
-        Binding("u", "filter_unreviewed", "Unreviewed"),
+        Binding("o", "filter_open", "Open Only"),
         Binding("a", "filter_all", "All"),
     ]
 
@@ -396,8 +427,8 @@ class EventsScreen(Screen):
     def __init__(self, conn: sqlite3.Connection):
         super().__init__()
         self._conn = conn
-        self._filter_status: str | None = None
-        self._events: list = []
+        self._open_only: bool = False
+        self._events: list[dict] = []
 
     def compose(self) -> ComposeResult:
         """Build the events list layout."""
@@ -413,53 +444,63 @@ class EventsScreen(Screen):
         table = self.query_one("#events-list", DataTable)
         table.cursor_type = "row"
         table.add_column("ID", width=5)
-        table.add_column("Status", width=3)
-        table.add_column("Time", width=20)
+        table.add_column("Command", width=20)
+        table.add_column("PID", width=8)
+        table.add_column("Peak Band", width=10)
         table.add_column("Duration", width=10)
-        table.add_column("Stress", width=8)
+        table.add_column("Score", width=6)
         self._refresh_events()
 
     def _refresh_events(self) -> None:
         """Refresh the events list from database."""
-        from pause_monitor.storage import get_events
+        import time
 
-        self._events = get_events(self._conn, limit=100, status=self._filter_status)
+        boot_time = get_boot_time()
+
+        if self._open_only:
+            # Use get_open_events for open-only filter
+            from pause_monitor.storage import get_open_events
+
+            self._events = get_open_events(self._conn, boot_time)
+        else:
+            # Get all events from current boot
+            self._events = _get_process_events(self._conn, limit=100, boot_time=boot_time)
 
         table = self.query_one("#events-list", DataTable)
         table.clear()
 
+        now = time.time()
         for event in self._events:
-            status_icon = STATUS_ICONS.get(event.status, "?")
-            # Calculate duration from timestamps
-            if event.end_timestamp:
-                duration = (event.end_timestamp - event.start_timestamp).total_seconds()
+            # Calculate duration
+            if event.get("exit_time"):
+                duration = event["exit_time"] - event["entry_time"]
                 duration_str = f"{duration:.1f}s"
             else:
-                duration_str = "ongoing"
-            # Use peak_stress instead of stress.total
-            stress_str = str(event.peak_stress) if event.peak_stress else "-"
+                duration = now - event["entry_time"]
+                duration_str = f"{duration:.0f}s*"  # * means ongoing
 
             table.add_row(
-                str(event.id),
-                status_icon,
-                event.start_timestamp.strftime("%Y-%m-%d %H:%M:%S"),
+                str(event["id"]),
+                event["command"][:20],
+                str(event["pid"]),
+                event["peak_band"],
                 duration_str,
-                stress_str,
-                key=str(event.id),
+                str(event["peak_score"]),
+                key=str(event["id"]),
             )
 
         # Update filter label
         filter_label = self.query_one("#filter-label", Static)
-        if self._filter_status:
-            filter_label.update(f"Filter: {self._filter_status}")
+        if self._open_only:
+            filter_label.update("Filter: Open events only")
         else:
-            filter_label.update("Filter: All events")
+            filter_label.update("Filter: All events (current boot)")
 
     def _get_selected_event_id(self) -> int | None:
         """Get the ID of the currently selected event."""
         table = self.query_one("#events-list", DataTable)
         if table.cursor_row is not None and 0 <= table.cursor_row < len(self._events):
-            return self._events[table.cursor_row].id
+            return self._events[table.cursor_row]["id"]
         return None
 
     def action_select_event(self) -> None:
@@ -468,43 +509,14 @@ class EventsScreen(Screen):
         if event_id:
             self.app.push_screen(EventDetailScreen(event_id, self._conn))
 
-    def _update_selected_status(self, new_status: str) -> None:
-        """Update selected event's status."""
-        if not self._conn:
-            self.notify("Database connection lost", severity="error")
-            return
-
-        from pause_monitor.storage import update_event_status
-
-        event_id = self._get_selected_event_id()
-        if event_id:
-            try:
-                update_event_status(self._conn, event_id, new_status)
-                self._refresh_events()
-                self.notify(f"Event #{event_id} marked as {new_status}")
-            except Exception as e:
-                self.notify(f"Failed to update status: {e}", severity="error")
-
-    def action_mark_reviewed(self) -> None:
-        """Mark selected event as reviewed."""
-        self._update_selected_status("reviewed")
-
-    def action_mark_pinned(self) -> None:
-        """Mark selected event as pinned."""
-        self._update_selected_status("pinned")
-
-    def action_mark_dismissed(self) -> None:
-        """Mark selected event as dismissed."""
-        self._update_selected_status("dismissed")
-
-    def action_filter_unreviewed(self) -> None:
-        """Filter to show only unreviewed events."""
-        self._filter_status = "unreviewed"
+    def action_filter_open(self) -> None:
+        """Filter to show only open events."""
+        self._open_only = True
         self._refresh_events()
 
     def action_filter_all(self) -> None:
-        """Show all events."""
-        self._filter_status = None
+        """Show all events from current boot."""
+        self._open_only = False
         self._refresh_events()
 
 
@@ -743,31 +755,33 @@ class PauseMonitorApp(App):
 
     def _refresh_events(self) -> None:
         """Refresh events table from database."""
+        import time
+
         if not self._conn:
             return
 
-        from pause_monitor.storage import get_events
+        # Get recent process events from current boot
+        boot_time = get_boot_time()
+        events = _get_process_events(self._conn, limit=10, boot_time=boot_time)
 
-        # Update events table
-        events = get_events(self._conn, limit=10)
         try:
             events_table = self.query_one("#events", EventsTable)
             events_table.clear()
+            now = time.time()
             for event in events:
-                status_icon = STATUS_ICONS.get(event.status, "?")
-                # Calculate duration from timestamps
-                if event.end_timestamp:
-                    duration = (event.end_timestamp - event.start_timestamp).total_seconds()
+                # Calculate duration
+                if event.get("exit_time"):
+                    duration = event["exit_time"] - event["entry_time"]
                     duration_str = f"{duration:.1f}s"
                 else:
-                    duration_str = "ongoing"
-                # Use peak_stress instead of stress.total
-                stress_str = str(event.peak_stress) if event.peak_stress else "-"
+                    duration = now - event["entry_time"]
+                    duration_str = f"{duration:.0f}s*"  # * means ongoing
+
                 events_table.add_row(
-                    status_icon,
-                    event.start_timestamp.strftime("%Y-%m-%d %H:%M:%S"),
+                    event["command"][:15],
+                    event["peak_band"],
                     duration_str,
-                    stress_str,
+                    str(event["peak_score"]),
                 )
         except NoMatches:
             pass
