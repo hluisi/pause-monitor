@@ -3,10 +3,40 @@
 
 import json
 
+from pause_monitor.collector import ProcessScore
+
+
+def make_score(
+    pid: int = 123,
+    command: str = "test",
+    score: int = 50,
+    captured_at: float = 1706000100.0,
+    **kwargs,
+) -> ProcessScore:
+    """Create ProcessScore with sensible defaults for testing."""
+    defaults = {
+        "cpu": 50.0,
+        "state": "running",
+        "mem": 1000,
+        "cmprs": 0,
+        "pageins": 0,
+        "csw": 10,
+        "sysbsd": 5,
+        "threads": 2,
+        "categories": frozenset(["cpu"]) if score >= 40 else frozenset(),
+    }
+    defaults.update(kwargs)
+    return ProcessScore(
+        pid=pid,
+        command=command,
+        score=score,
+        captured_at=captured_at,
+        **defaults,
+    )
+
 
 def test_tracker_creates_event_on_threshold_crossing(tmp_path):
     """ProcessTracker creates event when score crosses tracking threshold."""
-    from pause_monitor.collector import ProcessScore
     from pause_monitor.config import BandsConfig
     from pause_monitor.storage import get_connection, get_open_events, init_database
     from pause_monitor.tracker import ProcessTracker
@@ -19,41 +49,11 @@ def test_tracker_creates_event_on_threshold_crossing(tmp_path):
     tracker = ProcessTracker(conn, bands, boot_time=1706000000)
 
     # Score below threshold — no event
-    score_low = ProcessScore(
-        pid=123,
-        command="test",
-        cpu=10.0,
-        state="running",
-        mem=1000,
-        cmprs=0,
-        pageins=0,
-        csw=10,
-        sysbsd=5,
-        threads=2,
-        score=30,
-        categories=frozenset(),
-        captured_at=1706000100.0,
-    )
-    tracker.update([score_low])
+    tracker.update([make_score(pid=123, score=30, captured_at=1706000100.0)])
     assert len(get_open_events(conn, 1706000000)) == 0
 
     # Score above threshold — event created
-    score_high = ProcessScore(
-        pid=123,
-        command="test",
-        cpu=50.0,
-        state="running",
-        mem=1000,
-        cmprs=0,
-        pageins=0,
-        csw=10,
-        sysbsd=5,
-        threads=2,
-        score=50,
-        categories=frozenset(["cpu"]),
-        captured_at=1706000101.0,
-    )
-    tracker.update([score_high])
+    tracker.update([make_score(pid=123, score=50, captured_at=1706000101.0)])
     events = get_open_events(conn, 1706000000)
     assert len(events) == 1
     assert events[0]["pid"] == 123
@@ -63,7 +63,6 @@ def test_tracker_creates_event_on_threshold_crossing(tmp_path):
 
 def test_tracker_closes_event_when_score_drops(tmp_path):
     """ProcessTracker closes event when score drops below threshold."""
-    from pause_monitor.collector import ProcessScore
     from pause_monitor.config import BandsConfig
     from pause_monitor.storage import get_connection, get_open_events, init_database
     from pause_monitor.tracker import ProcessTracker
@@ -76,41 +75,11 @@ def test_tracker_closes_event_when_score_drops(tmp_path):
     tracker = ProcessTracker(conn, bands, boot_time=1706000000)
 
     # Enter bad state
-    score_high = ProcessScore(
-        pid=123,
-        command="test",
-        cpu=50.0,
-        state="running",
-        mem=1000,
-        cmprs=0,
-        pageins=0,
-        csw=10,
-        sysbsd=5,
-        threads=2,
-        score=50,
-        categories=frozenset(["cpu"]),
-        captured_at=1706000100.0,
-    )
-    tracker.update([score_high])
+    tracker.update([make_score(pid=123, score=50, captured_at=1706000100.0)])
     assert len(get_open_events(conn, 1706000000)) == 1
 
     # Exit bad state
-    score_low = ProcessScore(
-        pid=123,
-        command="test",
-        cpu=10.0,
-        state="running",
-        mem=1000,
-        cmprs=0,
-        pageins=0,
-        csw=10,
-        sysbsd=5,
-        threads=2,
-        score=30,
-        categories=frozenset(),
-        captured_at=1706000200.0,
-    )
-    tracker.update([score_low])
+    tracker.update([make_score(pid=123, score=30, captured_at=1706000200.0)])
     assert len(get_open_events(conn, 1706000000)) == 0
 
     conn.close()
@@ -118,7 +87,6 @@ def test_tracker_closes_event_when_score_drops(tmp_path):
 
 def test_tracker_updates_peak(tmp_path):
     """ProcessTracker updates peak when score increases."""
-    from pause_monitor.collector import ProcessScore
     from pause_monitor.config import BandsConfig
     from pause_monitor.storage import get_connection, init_database
     from pause_monitor.tracker import ProcessTracker
@@ -131,40 +99,10 @@ def test_tracker_updates_peak(tmp_path):
     tracker = ProcessTracker(conn, bands, boot_time=1706000000)
 
     # Enter at 50
-    score1 = ProcessScore(
-        pid=123,
-        command="test",
-        cpu=50.0,
-        state="running",
-        mem=1000,
-        cmprs=0,
-        pageins=0,
-        csw=10,
-        sysbsd=5,
-        threads=2,
-        score=50,
-        categories=frozenset(["cpu"]),
-        captured_at=1706000100.0,
-    )
-    tracker.update([score1])
+    tracker.update([make_score(pid=123, score=50, captured_at=1706000100.0)])
 
     # Peak at 80
-    score2 = ProcessScore(
-        pid=123,
-        command="test",
-        cpu=80.0,
-        state="running",
-        mem=1000,
-        cmprs=0,
-        pageins=0,
-        csw=10,
-        sysbsd=5,
-        threads=2,
-        score=80,
-        categories=frozenset(["cpu"]),
-        captured_at=1706000101.0,
-    )
-    tracker.update([score2])
+    tracker.update([make_score(pid=123, score=80, captured_at=1706000101.0)])
 
     row = conn.execute(
         "SELECT peak_score, peak_band FROM process_events WHERE pid = 123"
@@ -177,7 +115,6 @@ def test_tracker_updates_peak(tmp_path):
 
 def test_tracker_closes_missing_pids(tmp_path):
     """ProcessTracker closes events for PIDs no longer in scores."""
-    from pause_monitor.collector import ProcessScore
     from pause_monitor.config import BandsConfig
     from pause_monitor.storage import get_connection, get_open_events, init_database
     from pause_monitor.tracker import ProcessTracker
@@ -190,22 +127,7 @@ def test_tracker_closes_missing_pids(tmp_path):
     tracker = ProcessTracker(conn, bands, boot_time=1706000000)
 
     # PID 123 enters bad state
-    score = ProcessScore(
-        pid=123,
-        command="test",
-        cpu=50.0,
-        state="running",
-        mem=1000,
-        cmprs=0,
-        pageins=0,
-        csw=10,
-        sysbsd=5,
-        threads=2,
-        score=50,
-        categories=frozenset(["cpu"]),
-        captured_at=1706000100.0,
-    )
-    tracker.update([score])
+    tracker.update([make_score(pid=123, score=50, captured_at=1706000100.0)])
     assert len(get_open_events(conn, 1706000000)) == 1
 
     # PID 123 disappears from scores (process ended or no longer selected)
@@ -217,7 +139,6 @@ def test_tracker_closes_missing_pids(tmp_path):
 
 def test_tracker_restores_state_from_db(tmp_path):
     """ProcessTracker restores tracking state from open events on init."""
-    from pause_monitor.collector import ProcessScore
     from pause_monitor.config import BandsConfig
     from pause_monitor.storage import (
         create_process_event,
@@ -251,22 +172,7 @@ def test_tracker_restores_state_from_db(tmp_path):
     assert tracker.tracked[456].peak_score == 60
 
     # If we update with that PID still in bad state, it should update peak
-    score = ProcessScore(
-        pid=456,
-        command="preexisting",
-        cpu=85.0,
-        state="running",
-        mem=1000,
-        cmprs=0,
-        pageins=0,
-        csw=10,
-        sysbsd=5,
-        threads=2,
-        score=85,
-        categories=frozenset(["cpu"]),
-        captured_at=1706000200.0,
-    )
-    tracker.update([score])
+    tracker.update([make_score(pid=456, command="preexisting", score=85, captured_at=1706000200.0)])
 
     row = conn.execute(
         "SELECT peak_score, peak_band FROM process_events WHERE pid = 456"
@@ -279,7 +185,6 @@ def test_tracker_restores_state_from_db(tmp_path):
 
 def test_tracker_inserts_entry_snapshot(tmp_path):
     """ProcessTracker inserts entry snapshot when event opens."""
-    from pause_monitor.collector import ProcessScore
     from pause_monitor.config import BandsConfig
     from pause_monitor.storage import get_connection, init_database
     from pause_monitor.tracker import ProcessTracker
@@ -291,20 +196,19 @@ def test_tracker_inserts_entry_snapshot(tmp_path):
     bands = BandsConfig()
     tracker = ProcessTracker(conn, bands, boot_time=1706000000)
 
-    score = ProcessScore(
+    score = make_score(
         pid=789,
         command="snap_test",
+        score=55,
+        captured_at=1706000100.0,
         cpu=60.0,
-        state="running",
         mem=2000,
         cmprs=100,
         pageins=50,
         csw=20,
         sysbsd=10,
         threads=4,
-        score=55,
         categories=frozenset(["cpu", "mem"]),
-        captured_at=1706000100.0,
     )
     tracker.update([score])
 
@@ -322,5 +226,171 @@ def test_tracker_inserts_entry_snapshot(tmp_path):
     assert snapshot["pid"] == 789
     assert snapshot["command"] == "snap_test"
     assert snapshot["score"] == 55
+
+    conn.close()
+
+
+def test_tracker_inserts_exit_snapshot_on_score_drop(tmp_path):
+    """ProcessTracker inserts exit snapshot when score drops below threshold."""
+    from pause_monitor.config import BandsConfig
+    from pause_monitor.storage import get_connection, init_database
+    from pause_monitor.tracker import ProcessTracker
+
+    db_path = tmp_path / "test.db"
+    init_database(db_path)
+    conn = get_connection(db_path)
+
+    bands = BandsConfig()
+    tracker = ProcessTracker(conn, bands, boot_time=1706000000)
+
+    # Enter bad state
+    tracker.update([make_score(pid=123, score=50, captured_at=1706000100.0)])
+    event_id = tracker.tracked[123].event_id
+
+    # Exit bad state with score drop
+    tracker.update([make_score(pid=123, score=30, captured_at=1706000200.0)])
+
+    # Check both entry and exit snapshots exist
+    rows = conn.execute(
+        """SELECT snapshot_type, snapshot FROM process_snapshots
+        WHERE event_id = ? ORDER BY snapshot_type""",
+        (event_id,),
+    ).fetchall()
+    assert len(rows) == 2
+    types = {row[0] for row in rows}
+    assert types == {"entry", "exit"}
+
+    # Verify exit snapshot has the low score
+    exit_row = [row for row in rows if row[0] == "exit"][0]
+    exit_snapshot = json.loads(exit_row[1])
+    assert exit_snapshot["score"] == 30
+
+    conn.close()
+
+
+def test_tracker_no_exit_snapshot_for_disappeared_pid(tmp_path):
+    """ProcessTracker does NOT insert exit snapshot when PID disappears."""
+    from pause_monitor.config import BandsConfig
+    from pause_monitor.storage import get_connection, init_database
+    from pause_monitor.tracker import ProcessTracker
+
+    db_path = tmp_path / "test.db"
+    init_database(db_path)
+    conn = get_connection(db_path)
+
+    bands = BandsConfig()
+    tracker = ProcessTracker(conn, bands, boot_time=1706000000)
+
+    # Enter bad state
+    tracker.update([make_score(pid=123, score=50, captured_at=1706000100.0)])
+    event_id = tracker.tracked[123].event_id
+
+    # PID disappears (empty update)
+    tracker.update([])
+
+    # Only entry snapshot should exist (no exit snapshot since we don't have final state)
+    rows = conn.execute(
+        "SELECT snapshot_type FROM process_snapshots WHERE event_id = ?",
+        (event_id,),
+    ).fetchall()
+    assert len(rows) == 1
+    assert rows[0][0] == "entry"
+
+    conn.close()
+
+
+def test_tracker_does_not_update_peak_for_equal_score(tmp_path):
+    """ProcessTracker does NOT update peak when new score equals current peak."""
+    from pause_monitor.config import BandsConfig
+    from pause_monitor.storage import get_connection, init_database
+    from pause_monitor.tracker import ProcessTracker
+
+    db_path = tmp_path / "test.db"
+    init_database(db_path)
+    conn = get_connection(db_path)
+
+    bands = BandsConfig()
+    tracker = ProcessTracker(conn, bands, boot_time=1706000000)
+
+    # Enter at 50
+    tracker.update([make_score(pid=123, score=50, captured_at=1706000100.0)])
+
+    # Get initial peak_snapshot
+    initial_snapshot = conn.execute(
+        "SELECT peak_snapshot FROM process_events WHERE pid = 123"
+    ).fetchone()[0]
+
+    # Update with same score (different timestamp)
+    tracker.update([make_score(pid=123, score=50, captured_at=1706000200.0)])
+
+    # Peak snapshot should be unchanged (same object, not updated)
+    new_snapshot = conn.execute(
+        "SELECT peak_snapshot FROM process_events WHERE pid = 123"
+    ).fetchone()[0]
+    assert initial_snapshot == new_snapshot
+    # Verify timestamp in snapshot is still the original
+    snapshot_data = json.loads(new_snapshot)
+    assert snapshot_data["captured_at"] == 1706000100.0
+
+    conn.close()
+
+
+def test_tracker_handles_multiple_simultaneous_processes(tmp_path):
+    """ProcessTracker tracks multiple PIDs simultaneously."""
+    from pause_monitor.config import BandsConfig
+    from pause_monitor.storage import get_connection, get_open_events, init_database
+    from pause_monitor.tracker import ProcessTracker
+
+    db_path = tmp_path / "test.db"
+    init_database(db_path)
+    conn = get_connection(db_path)
+
+    bands = BandsConfig()
+    tracker = ProcessTracker(conn, bands, boot_time=1706000000)
+
+    # Three processes enter bad state at once
+    tracker.update(
+        [
+            make_score(pid=100, command="proc_a", score=50, captured_at=1706000100.0),
+            make_score(pid=200, command="proc_b", score=60, captured_at=1706000100.0),
+            make_score(pid=300, command="proc_c", score=70, captured_at=1706000100.0),
+        ]
+    )
+
+    events = get_open_events(conn, 1706000000)
+    assert len(events) == 3
+    tracked_pids = {e["pid"] for e in events}
+    assert tracked_pids == {100, 200, 300}
+
+    # PID 200 drops below threshold, others remain
+    tracker.update(
+        [
+            make_score(pid=100, command="proc_a", score=55, captured_at=1706000200.0),
+            make_score(pid=200, command="proc_b", score=30, captured_at=1706000200.0),
+            make_score(pid=300, command="proc_c", score=80, captured_at=1706000200.0),
+        ]
+    )
+
+    events = get_open_events(conn, 1706000000)
+    assert len(events) == 2
+    tracked_pids = {e["pid"] for e in events}
+    assert tracked_pids == {100, 300}
+
+    # Verify PID 300's peak was updated
+    row = conn.execute(
+        "SELECT peak_score FROM process_events WHERE pid = 300 AND exit_time IS NULL"
+    ).fetchone()
+    assert row[0] == 80
+
+    # PID 100 disappears, PID 300 stays
+    tracker.update(
+        [
+            make_score(pid=300, command="proc_c", score=75, captured_at=1706000300.0),
+        ]
+    )
+
+    events = get_open_events(conn, 1706000000)
+    assert len(events) == 1
+    assert events[0]["pid"] == 300
 
     conn.close()
