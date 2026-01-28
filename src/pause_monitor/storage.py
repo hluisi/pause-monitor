@@ -14,14 +14,8 @@ log = structlog.get_logger()
 
 SCHEMA_VERSION = 8  # Per-process event tracking with process_events and process_snapshots
 
-# Valid event status values (legacy, kept for backward compatibility)
-VALID_EVENT_STATUSES = frozenset({"unreviewed", "reviewed", "pinned", "dismissed"})
 
 SCHEMA = """
-CREATE TABLE IF NOT EXISTS schema_version (
-    version INTEGER PRIMARY KEY
-);
-
 CREATE TABLE IF NOT EXISTS daemon_state (
     key TEXT PRIMARY KEY,
     value TEXT,
@@ -137,10 +131,9 @@ class Event:
 
 @dataclass
 class ProcessSampleRecord:
-    """Process sample record with JSON blob storage (v7)."""
+    """Process sample record - ring buffer entry for 1Hz collection."""
 
-    event_id: int
-    tier: int
+    timestamp: float
     data: ProcessSamples
     id: int | None = None
 
@@ -245,22 +238,21 @@ def get_event_by_id(conn: sqlite3.Connection, event_id: int) -> Event | None:
 
 
 def insert_process_sample(
-    conn: sqlite3.Connection, event_id: int, tier: int, samples: ProcessSamples
+    conn: sqlite3.Connection, timestamp: float, samples: ProcessSamples
 ) -> int:
-    """Insert process sample as JSON blob.
+    """Insert process sample into ring buffer.
 
     Args:
         conn: Database connection
-        event_id: The event ID to associate with
-        tier: Tier level (2=peak save, 3=continuous save)
+        timestamp: Unix timestamp of the sample
         samples: ProcessSamples to serialize and store
 
     Returns:
         The ID of the inserted record
     """
     cursor = conn.execute(
-        "INSERT INTO process_sample_records (event_id, tier, data) VALUES (?, ?, ?)",
-        (event_id, tier, samples.to_json()),
+        "INSERT INTO process_sample_records (timestamp, data) VALUES (?, ?)",
+        (timestamp, samples.to_json()),
     )
     conn.commit()
     result = cursor.lastrowid
@@ -268,28 +260,47 @@ def insert_process_sample(
     return result
 
 
-def get_process_samples(conn: sqlite3.Connection, event_id: int) -> list[ProcessSampleRecord]:
-    """Retrieve and deserialize process samples for an event.
+def get_process_samples(
+    conn: sqlite3.Connection,
+    start_time: float | None = None,
+    end_time: float | None = None,
+    limit: int = 1000,
+) -> list[ProcessSampleRecord]:
+    """Retrieve process samples from ring buffer, optionally filtered by time range.
 
     Args:
         conn: Database connection
-        event_id: The event ID to get samples for
+        start_time: Optional start timestamp (inclusive)
+        end_time: Optional end timestamp (inclusive)
+        limit: Maximum records to return (default 1000)
 
     Returns:
-        List of ProcessSampleRecord with deserialized data
+        List of ProcessSampleRecord with deserialized data, ordered by timestamp
     """
-    rows = conn.execute(
-        """SELECT id, event_id, tier, data
-        FROM process_sample_records WHERE event_id = ? ORDER BY id""",
-        (event_id,),
-    ).fetchall()
+    query = "SELECT id, timestamp, data FROM process_sample_records"
+    params: list[float | int] = []
+    conditions = []
+
+    if start_time is not None:
+        conditions.append("timestamp >= ?")
+        params.append(start_time)
+    if end_time is not None:
+        conditions.append("timestamp <= ?")
+        params.append(end_time)
+
+    if conditions:
+        query += " WHERE " + " AND ".join(conditions)
+
+    query += " ORDER BY timestamp DESC LIMIT ?"
+    params.append(limit)
+
+    rows = conn.execute(query, params).fetchall()
 
     return [
         ProcessSampleRecord(
             id=row[0],
-            event_id=row[1],
-            tier=row[2],
-            data=ProcessSamples.from_json(row[3]),
+            timestamp=row[1],
+            data=ProcessSamples.from_json(row[2]),
         )
         for row in rows
     ]
@@ -303,6 +314,9 @@ def update_event_status(
 ) -> None:
     """Update event status and optionally notes.
 
+    Note: This is legacy code for the old events table which no longer exists.
+    Kept for backward compatibility until full cleanup.
+
     Args:
         conn: Database connection
         event_id: The event ID to update
@@ -312,10 +326,9 @@ def update_event_status(
     Raises:
         ValueError: If status is not a valid event status
     """
-    if status not in VALID_EVENT_STATUSES:
-        raise ValueError(
-            f"Invalid status '{status}'. Must be one of: {sorted(VALID_EVENT_STATUSES)}"
-        )
+    valid_statuses = frozenset({"unreviewed", "reviewed", "pinned", "dismissed"})
+    if status not in valid_statuses:
+        raise ValueError(f"Invalid status '{status}'. Must be one of: {sorted(valid_statuses)}")
     if notes is not None:
         conn.execute(
             "UPDATE events SET status = ?, notes = ? WHERE id = ?",
@@ -371,8 +384,8 @@ def prune_old_data(
     # Delete event samples first (foreign key)
     conn.execute(f"DELETE FROM event_samples WHERE event_id IN ({placeholders})", ids)
 
-    # Delete process sample records (v7 JSON blob storage)
-    conn.execute(f"DELETE FROM process_sample_records WHERE event_id IN ({placeholders})", ids)
+    # Note: process_sample_records is now a time-based ring buffer without event_id
+    # Pruning is handled separately by prune_process_samples()
 
     # Delete events
     cursor = conn.execute(f"DELETE FROM events WHERE id IN ({placeholders})", ids)
