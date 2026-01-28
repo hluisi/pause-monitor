@@ -404,7 +404,7 @@ class Daemon:
 
         Each iteration:
         1. Collect samples via TopCollector
-        2. Update ProcessTracker with rogue processes
+        2. Update per-process tracking with rogue processes
         3. Push to ring buffer
         4. Check for pause (elapsed_ms > threshold)
         5. Broadcast to socket for TUI
@@ -426,14 +426,14 @@ class Daemon:
                 if self.tracker is not None:
                     self.tracker.update(samples.rogues)
 
-                # Push to ring buffer (tier=1 placeholder until ProcessTracker integration)
+                # Push to ring buffer
                 self.ring_buffer.push(samples, tier=1)
 
                 # Check for pause (elapsed_ms much larger than expected)
                 if samples.elapsed_ms > expected_ms * pause_threshold:
                     await self._handle_pause(samples.elapsed_ms, expected_ms)
 
-                # Broadcast to TUI clients (tier=1 placeholder until ProcessTracker integration)
+                # Broadcast to TUI clients
                 if self._socket_server and self._socket_server.has_clients:
                     await self._socket_server.broadcast(samples, tier=1)
 

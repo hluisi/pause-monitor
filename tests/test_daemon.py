@@ -593,7 +593,7 @@ async def test_daemon_main_loop_collects_samples(patched_config_paths, monkeypat
                     threads=5,
                     score=25,
                     categories=frozenset(["cpu"]),
-                    captured_at=1706000000.0,
+                    captured_at=1706000000.0,  # 2024-01-23 UTC
                 )
             ],
         ),
@@ -616,7 +616,7 @@ async def test_daemon_main_loop_collects_samples(patched_config_paths, monkeypat
                     threads=20,
                     score=45,
                     categories=frozenset(["cpu", "mem"]),
-                    captured_at=1706000000.0,
+                    captured_at=1706000000.0,  # 2024-01-23 UTC
                 )
             ],
         ),
@@ -661,12 +661,40 @@ def test_daemon_initializes_tracker(patched_config_paths, monkeypatch):
     config = Config()
     init_database(config.db_path)
 
+    # 1706000000 = 2024-01-23 UTC
     monkeypatch.setattr("pause_monitor.daemon.get_boot_time", lambda: 1706000000)
 
     daemon = Daemon(config)
 
     assert daemon.tracker is not None
     assert daemon.boot_time == 1706000000
+
+
+@pytest.mark.asyncio
+async def test_daemon_schema_mismatch_recovery(patched_config_paths, monkeypatch):
+    """Daemon handles incompatible DB schema: tracker=None at init, created in _init_database."""
+    config = Config()
+
+    # Create a DB with incompatible schema (missing required tables)
+    db_path = config.db_path
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(db_path)
+    conn.execute("CREATE TABLE fake_table (id INTEGER)")
+    conn.close()
+
+    # 1706000000 = 2024-01-23 UTC
+    monkeypatch.setattr("pause_monitor.daemon.get_boot_time", lambda: 1706000000)
+
+    # Daemon __init__ should catch the OperationalError and leave tracker as None
+    daemon = Daemon(config)
+    assert daemon.tracker is None
+    assert daemon._conn is None
+
+    # _init_database should recreate DB and properly initialize tracker
+    await daemon._init_database()
+
+    assert daemon._conn is not None
+    assert daemon.tracker is not None
 
 
 @pytest.mark.asyncio
