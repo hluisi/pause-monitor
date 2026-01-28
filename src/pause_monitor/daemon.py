@@ -9,6 +9,7 @@ from datetime import datetime
 
 import structlog
 
+from pause_monitor.boottime import get_boot_time
 from pause_monitor.collector import TopCollector
 from pause_monitor.config import Config
 from pause_monitor.forensics import (
@@ -23,6 +24,7 @@ from pause_monitor.storage import (
     init_database,
     prune_old_data,
 )
+from pause_monitor.tracker import ProcessTracker
 
 log = structlog.get_logger()
 
@@ -94,10 +96,23 @@ class Daemon:
         max_samples = config.sentinel.ring_buffer_seconds
         self.ring_buffer = RingBuffer(max_samples=max_samples)
 
-        # Note: Per-process tracking is handled by ProcessTracker (Task 8 integration)
+        # Boot time for process tracking (stable across daemon restarts)
+        self.boot_time = get_boot_time()
 
-        # Will be initialized on start
+        # Database connection and tracker
+        # Created here if DB exists with correct schema, otherwise in _init_database
         self._conn: sqlite3.Connection | None = None
+        self.tracker: ProcessTracker | None = None
+        if config.db_path.exists():
+            try:
+                self._conn = sqlite3.connect(config.db_path)
+                self.tracker = ProcessTracker(self._conn, config.bands, self.boot_time)
+            except sqlite3.OperationalError:
+                # DB exists but wrong schema; will be recreated in _init_database
+                if self._conn:
+                    self._conn.close()
+                    self._conn = None
+
         self._caffeinate_proc: asyncio.subprocess.Process | None = None
         self._shutdown_event = asyncio.Event()
         self._auto_prune_task: asyncio.Task | None = None
@@ -111,7 +126,12 @@ class Daemon:
         """
         self.config.data_dir.mkdir(parents=True, exist_ok=True)
         init_database(self.config.db_path)  # Handles version check + recreate
-        self._conn = sqlite3.connect(self.config.db_path)
+
+        # Create connection and tracker if not already initialized in __init__
+        if self._conn is None:
+            self._conn = sqlite3.connect(self.config.db_path)
+        if self.tracker is None:
+            self.tracker = ProcessTracker(self._conn, self.config.bands, self.boot_time)
 
     async def start(self) -> None:
         """Start the daemon."""
@@ -384,11 +404,10 @@ class Daemon:
 
         Each iteration:
         1. Collect samples via TopCollector
-        2. Push to ring buffer
-        3. Check for pause (elapsed_ms > threshold)
-        4. Broadcast to socket for TUI
-
-        Note: Per-process tracking via ProcessTracker is added in Task 8.
+        2. Update ProcessTracker with rogue processes
+        3. Push to ring buffer
+        4. Check for pause (elapsed_ms > threshold)
+        5. Broadcast to socket for TUI
 
         The loop runs until shutdown event is set.
         """
@@ -402,6 +421,10 @@ class Daemon:
 
                 if self._shutdown_event.is_set():
                     break
+
+                # Update per-process tracking
+                if self.tracker is not None:
+                    self.tracker.update(samples.rogues)
 
                 # Push to ring buffer (tier=1 placeholder until ProcessTracker integration)
                 self.ring_buffer.push(samples, tier=1)

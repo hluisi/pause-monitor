@@ -651,6 +651,91 @@ async def test_daemon_main_loop_collects_samples(patched_config_paths, monkeypat
     assert pushed_samples[1][0].max_score == 45
 
 
+# === Task 8: ProcessTracker Integration Tests ===
+
+
+def test_daemon_initializes_tracker(patched_config_paths, monkeypatch):
+    """Daemon creates ProcessTracker on startup."""
+    from pause_monitor.storage import init_database
+
+    config = Config()
+    init_database(config.db_path)
+
+    monkeypatch.setattr("pause_monitor.daemon.get_boot_time", lambda: 1706000000)
+
+    daemon = Daemon(config)
+
+    assert daemon.tracker is not None
+    assert daemon.boot_time == 1706000000
+
+
+@pytest.mark.asyncio
+async def test_daemon_main_loop_updates_tracker(patched_config_paths, monkeypatch):
+    """Main loop should call tracker.update() with rogues from samples."""
+    from pause_monitor.storage import init_database
+
+    config = Config()
+    init_database(config.db_path)
+
+    monkeypatch.setattr("pause_monitor.daemon.get_boot_time", lambda: 1706000000)
+
+    daemon = Daemon(config)
+
+    # Track update calls
+    update_calls = []
+    original_update = daemon.tracker.update
+
+    def track_update(scores):
+        update_calls.append(scores)
+        return original_update(scores)
+
+    monkeypatch.setattr(daemon.tracker, "update", track_update)
+
+    # Create mock samples
+    mock_samples = ProcessSamples(
+        timestamp=datetime.now(),
+        elapsed_ms=1000,
+        process_count=100,
+        max_score=25,
+        rogues=[
+            ProcessScore(
+                pid=123,
+                command="test_proc",
+                cpu=50.0,
+                state="running",
+                mem=1024 * 1024 * 100,
+                cmprs=0,
+                pageins=10,
+                csw=500,
+                sysbsd=200,
+                threads=5,
+                score=25,
+                categories=frozenset(["cpu"]),
+                captured_at=1706000000.0,
+            )
+        ],
+    )
+
+    # Mock collector.collect() to return sample then stop
+    call_count = 0
+
+    async def mock_collect():
+        nonlocal call_count
+        call_count += 1
+        if call_count > 1:
+            daemon._shutdown_event.set()
+        return mock_samples
+
+    monkeypatch.setattr(daemon.collector, "collect", mock_collect)
+
+    # Run main loop
+    await daemon._main_loop()
+
+    # Should have called tracker.update with the rogues
+    assert len(update_calls) == 1
+    assert update_calls[0] == mock_samples.rogues
+
+
 @pytest.mark.asyncio
 async def test_daemon_main_loop_handles_pause_detection(patched_config_paths, monkeypatch):
     """Main loop should detect pauses from elapsed_ms."""
