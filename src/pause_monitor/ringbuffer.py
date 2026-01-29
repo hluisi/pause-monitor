@@ -47,6 +47,11 @@ class RingBuffer:
         return len(self._samples) == 0
 
     @property
+    def capacity(self) -> int:
+        """Return maximum number of samples the buffer can hold."""
+        return self._samples.maxlen or 0
+
+    @property
     def samples(self) -> list[RingSample]:
         """Read-only access to samples (returns a copy)."""
         return list(self._samples)

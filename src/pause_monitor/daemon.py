@@ -469,7 +469,7 @@ class Daemon:
                         max_score=heartbeat_max_score,
                         avg_score=round(heartbeat_score_sum / heartbeat_count),
                         tracked=tracked_count,
-                        buffer=f"{buffer_size}/{self.ring_buffer.max_samples}",
+                        buffer=f"{buffer_size}/{self.ring_buffer.capacity}",
                         clients=client_count,
                     )
 
