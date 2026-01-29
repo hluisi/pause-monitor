@@ -5,6 +5,7 @@ import os
 import resource
 import signal
 import sqlite3
+import time
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -23,7 +24,9 @@ from pause_monitor.ringbuffer import BufferContents, RingBuffer
 from pause_monitor.sleepwake import was_recently_asleep
 from pause_monitor.socket_server import SocketServer
 from pause_monitor.storage import (
+    get_last_system_sample_time,
     init_database,
+    insert_system_sample,
     prune_old_data,
 )
 from pause_monitor.tracker import ProcessTracker
@@ -84,7 +87,9 @@ class Daemon:
         self._caffeinate_proc: asyncio.subprocess.Process | None = None
         self._shutdown_event = asyncio.Event()
         self._auto_prune_task: asyncio.Task | None = None
+        self._hourly_sample_task: asyncio.Task | None = None
         self._socket_server: SocketServer | None = None
+        self._last_forensics_time: float = 0.0  # For score-based forensics debouncing
 
     async def _init_database(self) -> None:
         """Initialize database connection.
@@ -169,6 +174,9 @@ class Daemon:
         # Start auto-prune task
         self._auto_prune_task = asyncio.create_task(self._auto_prune())
 
+        # Start hourly system sampling task
+        self._hourly_sample_task = asyncio.create_task(self._hourly_system_sample())
+
         # Run main loop (TopCollector -> stress -> ring buffer -> tiers)
         await self._main_loop()
 
@@ -190,6 +198,15 @@ class Daemon:
             except asyncio.CancelledError:
                 pass
             self._auto_prune_task = None
+
+        # Cancel hourly sample task
+        if self._hourly_sample_task:
+            self._hourly_sample_task.cancel()
+            try:
+                await self._hourly_sample_task
+            except asyncio.CancelledError:
+                pass
+            self._hourly_sample_task = None
 
         # Stop caffeinate
         await self._stop_caffeinate()
@@ -276,11 +293,67 @@ class Daemon:
                 # Run prune
                 if self._conn:
                     log.info("auto_prune_starting")
-                    deleted = prune_old_data(
+                    events_deleted, samples_deleted = prune_old_data(
                         self._conn,
                         events_days=self.config.retention.events_days,
                     )
-                    log.info("auto_prune_completed", events_deleted=deleted)
+                    log.info(
+                        "auto_prune_completed",
+                        events_deleted=events_deleted,
+                        samples_deleted=samples_deleted,
+                    )
+
+    async def _hourly_system_sample(self) -> None:
+        """Save full system sample hourly for trend analysis."""
+        HOUR_SECONDS = 3600
+
+        while not self._shutdown_event.is_set():
+            try:
+                # Check when the last sample was taken
+                last_time = None
+                if self._conn:
+                    last_time = get_last_system_sample_time(self._conn)
+
+                # Calculate time until next sample
+                now = time.time()
+                if last_time is None:
+                    # No previous sample — take one immediately
+                    wait_seconds = 0.0
+                else:
+                    elapsed = now - last_time
+                    wait_seconds = max(0.0, HOUR_SECONDS - elapsed)
+
+                if wait_seconds > 0:
+                    # Wait for the next hour (or shutdown)
+                    try:
+                        await asyncio.wait_for(
+                            self._shutdown_event.wait(),
+                            timeout=wait_seconds,
+                        )
+                        break  # Shutdown requested
+                    except asyncio.TimeoutError:
+                        pass  # Time to sample
+
+                # Take a fresh sample and save it
+                if self._conn and not self._shutdown_event.is_set():
+                    samples = await self.collector.collect()
+                    insert_system_sample(self._conn, samples.to_json())
+                    log.info(
+                        "system_sample_saved",
+                        max_score=samples.max_score,
+                        process_count=samples.process_count,
+                    )
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                log.error("hourly_sample_failed", error=str(e))
+                # Wait a bit before retrying
+                try:
+                    await asyncio.wait_for(self._shutdown_event.wait(), timeout=60.0)
+                    break
+                except asyncio.TimeoutError:
+                    pass
 
     async def _run_heavy_capture(self, capture: ForensicsCapture) -> None:
         """Run heavy forensics capture (spindump, tailspin, logs) and notify on completion."""
@@ -294,7 +367,9 @@ class Daemon:
                 error=str(e),
             )
 
-    async def _run_forensics(self, contents: BufferContents, *, duration: float) -> None:
+    async def _run_forensics(
+        self, contents: BufferContents, *, duration: float, trigger: str = "pause"
+    ) -> None:
         """Run full forensics capture.
 
         Captures forensics data (ring buffer, spindump, tailspin, logs) for pause events.
@@ -302,6 +377,7 @@ class Daemon:
         Args:
             contents: Frozen ring buffer contents
             duration: Pause duration in seconds
+            trigger: What triggered this capture ("pause" or "score")
         """
         # Create event directory
         timestamp = datetime.now()
@@ -331,6 +407,7 @@ class Daemon:
         capture.write_metadata(
             {
                 "timestamp": timestamp.isoformat(),
+                "trigger": trigger,
                 "duration": duration,
                 "peak_score": peak_score,
                 "culprits": culprit_names,
@@ -491,6 +568,20 @@ class Daemon:
                         ratio=round(timing_ratio, 2),
                         threshold=pause_threshold,
                     )
+
+                # Score-based forensics trigger (critical band = 80+)
+                if samples.max_score >= self.config.bands.high:
+                    now = time.time()
+                    cooldown = self.config.bands.forensics_cooldown
+                    if now - self._last_forensics_time > cooldown:
+                        contents = self.ring_buffer.freeze()
+                        await self._run_forensics(contents, duration=0.0, trigger="score")
+                        self._last_forensics_time = now
+                        log.info(
+                            "score_based_forensics_trigger",
+                            max_score=samples.max_score,
+                            threshold=self.config.bands.high,
+                        )
 
                 # Broadcast to TUI clients
                 if self._socket_server and self._socket_server.has_clients:

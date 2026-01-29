@@ -316,11 +316,14 @@ async def test_auto_prune_runs_on_timeout(patched_config_paths):
     daemon._conn = sqlite3.connect(config.db_path)
 
     # Patch prune_old_data to track calls and signal shutdown after first call
-    with patch("pause_monitor.daemon.prune_old_data", return_value=0) as mock_prune:
-        mock_prune.side_effect = lambda *args, **kwargs: (
-            daemon._shutdown_event.set(),
-            0,
-        )[1]
+    # Returns tuple (events_deleted, samples_deleted)
+    with patch("pause_monitor.daemon.prune_old_data", return_value=(0, 0)) as mock_prune:
+
+        def prune_side_effect(*args, **kwargs):
+            daemon._shutdown_event.set()
+            return (0, 0)
+
+        mock_prune.side_effect = prune_side_effect
 
         # Create a side effect that properly closes the unawaited coroutine
         call_count = 0
@@ -398,11 +401,14 @@ async def test_auto_prune_uses_config_retention_days(patched_config_paths):
     daemon._conn = sqlite3.connect(config.db_path)
 
     # Patch prune_old_data to track calls and signal shutdown after first call
-    with patch("pause_monitor.daemon.prune_old_data", return_value=0) as mock_prune:
-        mock_prune.side_effect = lambda *args, **kwargs: (
-            daemon._shutdown_event.set(),
-            0,
-        )[1]
+    # Returns tuple (events_deleted, samples_deleted)
+    with patch("pause_monitor.daemon.prune_old_data", return_value=(0, 0)) as mock_prune:
+
+        def prune_side_effect(*args, **kwargs):
+            daemon._shutdown_event.set()
+            return (0, 0)
+
+        mock_prune.side_effect = prune_side_effect
 
         # Create a side effect that properly closes the unawaited coroutine
         call_count = 0

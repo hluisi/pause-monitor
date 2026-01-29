@@ -394,3 +394,62 @@ def test_tracker_handles_multiple_simultaneous_processes(tmp_path):
     assert events[0]["pid"] == 300
 
     conn.close()
+
+
+def test_tracker_inserts_checkpoint_snapshots(tmp_path):
+    """ProcessTracker inserts checkpoint snapshots periodically while tracking."""
+    from pause_monitor.config import BandsConfig
+    from pause_monitor.storage import get_connection, init_database
+    from pause_monitor.tracker import SNAPSHOT_CHECKPOINT, ProcessTracker
+
+    db_path = tmp_path / "test.db"
+    init_database(db_path)
+    conn = get_connection(db_path)
+
+    # Use short checkpoint interval for testing
+    bands = BandsConfig(checkpoint_interval=10)  # 10 seconds
+    tracker = ProcessTracker(conn, bands, boot_time=1706000000)
+
+    # Enter bad state at t=100
+    tracker.update([make_score(pid=123, score=50, captured_at=1706000100.0)])
+    event_id = tracker.tracked[123].event_id
+
+    # Update at t=105 (only 5 seconds - no checkpoint yet)
+    tracker.update([make_score(pid=123, score=52, captured_at=1706000105.0)])
+
+    # Check no checkpoint snapshot yet
+    rows = conn.execute(
+        "SELECT snapshot_type FROM process_snapshots WHERE event_id = ?",
+        (event_id,),
+    ).fetchall()
+    types = [row[0] for row in rows]
+    assert SNAPSHOT_CHECKPOINT not in types
+
+    # Update at t=115 (15 seconds since entry - checkpoint should trigger)
+    tracker.update([make_score(pid=123, score=53, captured_at=1706000115.0)])
+
+    # Now we should have a checkpoint snapshot
+    rows = conn.execute(
+        "SELECT snapshot_type FROM process_snapshots WHERE event_id = ?",
+        (event_id,),
+    ).fetchall()
+    types = [row[0] for row in rows]
+    assert SNAPSHOT_CHECKPOINT in types
+
+    # Verify checkpoint count
+    checkpoint_count = conn.execute(
+        "SELECT COUNT(*) FROM process_snapshots WHERE event_id = ? AND snapshot_type = ?",
+        (event_id, SNAPSHOT_CHECKPOINT),
+    ).fetchone()[0]
+    assert checkpoint_count == 1
+
+    # Another update at t=130 (should trigger another checkpoint)
+    tracker.update([make_score(pid=123, score=54, captured_at=1706000130.0)])
+
+    checkpoint_count = conn.execute(
+        "SELECT COUNT(*) FROM process_snapshots WHERE event_id = ? AND snapshot_type = ?",
+        (event_id, SNAPSHOT_CHECKPOINT),
+    ).fetchone()[0]
+    assert checkpoint_count == 2
+
+    conn.close()

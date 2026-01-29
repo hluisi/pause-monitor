@@ -299,14 +299,15 @@ PID    COMMAND          %CPU STATE    MEM    CMPRS  #TH    CSW        SYSBSD    
         id="low-stress",
     ),
     pytest.param(
-        # Medium stress (35 <= score < 65)
-        # 100% cpu = 25, 500 pageins = 7.5, 4GB mem = 7.5, 100k csw = 10 = ~50
+        # Medium stress (35 <= score < 65 without category bonus)
+        # 100% cpu = 25, 500 pageins = 7.5, 4GB mem = 7.5, 100k csw = 10 = ~50 base
+        # With multi-category bonus (7 categories): 1.5x multiplier → ~75-85
         """
 PID    COMMAND          %CPU STATE    MEM    CMPRS  #TH    CSW        SYSBSD     PAGEINS
 1      medium           100.0 running 4G     200M   50     100000     50000      500
 """,
-        35,
-        64,
+        70,
+        90,
         id="medium-stress",
     ),
     pytest.param(

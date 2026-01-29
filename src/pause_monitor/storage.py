@@ -10,7 +10,7 @@ import structlog
 
 log = structlog.get_logger()
 
-SCHEMA_VERSION = 8  # Per-process event tracking with process_events and process_snapshots
+SCHEMA_VERSION = 9  # Added system_samples for trend analysis
 
 
 SCHEMA = """
@@ -47,6 +47,15 @@ CREATE INDEX IF NOT EXISTS idx_process_events_open
     ON process_events(exit_time) WHERE exit_time IS NULL;
 CREATE INDEX IF NOT EXISTS idx_process_snapshots_event
     ON process_snapshots(event_id);
+
+CREATE TABLE IF NOT EXISTS system_samples (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    captured_at REAL NOT NULL,
+    data TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_system_samples_captured
+    ON system_samples(captured_at);
 """
 
 
@@ -153,23 +162,26 @@ def set_daemon_state(conn: sqlite3.Connection, key: str, value: str) -> None:
 def prune_old_data(
     conn: sqlite3.Connection,
     events_days: int = 90,
-) -> int:
-    """Delete old closed process events.
+    system_samples_days: int = 7,
+) -> tuple[int, int]:
+    """Delete old closed process events and system samples.
 
     Args:
         conn: Database connection
         events_days: Delete closed process_events older than this
+        system_samples_days: Delete system_samples older than this (default 7)
 
     Returns:
-        Number of events deleted
+        Tuple of (events_deleted, samples_deleted)
 
     Raises:
         ValueError: If retention days < 1
     """
-    if events_days < 1:
+    if events_days < 1 or system_samples_days < 1:
         raise ValueError("Retention days must be >= 1")
 
     cutoff_events = time.time() - (events_days * 86400)
+    cutoff_samples = time.time() - (system_samples_days * 86400)
 
     # Delete old closed process events (cascades to snapshots)
     cursor = conn.execute(
@@ -181,11 +193,18 @@ def prune_old_data(
     )
     events_deleted = cursor.rowcount
 
+    # Delete old system samples
+    cursor = conn.execute(
+        "DELETE FROM system_samples WHERE captured_at < ?",
+        (cutoff_samples,),
+    )
+    samples_deleted = cursor.rowcount
+
     conn.commit()
 
-    log.info("prune_complete", events_deleted=events_deleted)
+    log.info("prune_complete", events_deleted=events_deleted, samples_deleted=samples_deleted)
 
-    return events_deleted
+    return events_deleted, samples_deleted
 
 
 # --- Process Event CRUD Functions ---
@@ -362,3 +381,52 @@ def insert_process_snapshot(
         (event_id, snapshot_type, snapshot),
     )
     conn.commit()
+
+
+def insert_system_sample(
+    conn: sqlite3.Connection,
+    data: str,
+) -> None:
+    """Insert a periodic system sample for trend analysis.
+
+    Args:
+        conn: Database connection
+        data: JSON-serialized ProcessSamples data
+    """
+    conn.execute(
+        "INSERT INTO system_samples (captured_at, data) VALUES (?, ?)",
+        (time.time(), data),
+    )
+    conn.commit()
+
+
+def prune_system_samples(
+    conn: sqlite3.Connection,
+    days: int = 7,
+) -> int:
+    """Delete system samples older than specified days.
+
+    Args:
+        conn: Database connection
+        days: Delete samples older than this (default 7)
+
+    Returns:
+        Number of samples deleted
+    """
+    cutoff = time.time() - (days * 86400)
+    cursor = conn.execute(
+        "DELETE FROM system_samples WHERE captured_at < ?",
+        (cutoff,),
+    )
+    deleted = cursor.rowcount
+    conn.commit()
+    return deleted
+
+
+def get_last_system_sample_time(conn: sqlite3.Connection) -> float | None:
+    """Get timestamp of most recent system sample, or None if no samples exist."""
+    cursor = conn.execute(
+        "SELECT captured_at FROM system_samples ORDER BY captured_at DESC LIMIT 1"
+    )
+    row = cursor.fetchone()
+    return row[0] if row else None

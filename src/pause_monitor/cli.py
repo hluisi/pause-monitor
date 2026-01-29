@@ -325,11 +325,11 @@ def prune(events_days: int | None, dry_run: bool, force: bool) -> None:
 
     conn = get_connection(config.db_path)
     try:
-        events_deleted = prune_old_data(conn, events_days=events_days)
+        events_deleted, samples_deleted = prune_old_data(conn, events_days=events_days)
     finally:
         conn.close()
 
-    click.echo(f"Deleted {events_deleted} events")
+    click.echo(f"Deleted {events_deleted} events and {samples_deleted} system samples")
 
 
 @main.group()

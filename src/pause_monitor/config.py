@@ -84,6 +84,8 @@ class BandsConfig:
     critical: int = 100
     tracking_band: str = "elevated"
     forensics_band: str = "high"
+    checkpoint_interval: int = 30  # Seconds between checkpoint snapshots while tracking
+    forensics_cooldown: int = 60  # Seconds between score-based forensics triggers
 
     def get_band(self, score: int) -> str:
         """Return band name for a given score."""

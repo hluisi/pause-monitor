@@ -26,6 +26,7 @@ log = structlog.get_logger()
 # Snapshot types
 SNAPSHOT_ENTRY = "entry"
 SNAPSHOT_EXIT = "exit"
+SNAPSHOT_CHECKPOINT = "checkpoint"
 
 
 @dataclass
@@ -36,6 +37,7 @@ class TrackedProcess:
     pid: int
     command: str
     peak_score: int
+    last_checkpoint: float = 0.0  # Timestamp of last checkpoint snapshot
 
 
 class ProcessTracker:
@@ -87,7 +89,10 @@ class ProcessTracker:
                 if in_bad_state:
                     if score.score > tracked.peak_score:
                         self._update_peak(score)
-                    # Note: if score == peak_score, we don't update (already captured)
+                    # Checkpoint: periodic snapshot while in bad state
+                    checkpoint_interval = self.bands.checkpoint_interval
+                    if score.captured_at - tracked.last_checkpoint >= checkpoint_interval:
+                        self._insert_checkpoint(score, tracked)
                 else:
                     # Score dropped below threshold — capture exit state
                     self._close_event(score.pid, score.captured_at, exit_score=score)
@@ -120,6 +125,7 @@ class ProcessTracker:
             pid=score.pid,
             command=score.command,
             peak_score=score.score,
+            last_checkpoint=score.captured_at,  # Start checkpoint timer from entry
         )
 
         msg = (
@@ -200,5 +206,22 @@ class ProcessTracker:
         log.debug(
             f"tracking_peak: {colored(score.command, 'cyan')} "
             f"{colored(f'({old_score}→{score.score})', 'yellow')} "
+            f"{colored(f'pid={score.pid}', 'dark_grey')}"
+        )
+
+    def _insert_checkpoint(self, score: ProcessScore, tracked: TrackedProcess) -> None:
+        """Insert periodic checkpoint snapshot for a tracked process."""
+        snapshot_json = json.dumps(score.to_dict())
+        insert_process_snapshot(
+            self.conn,
+            tracked.event_id,
+            SNAPSHOT_CHECKPOINT,
+            snapshot_json,
+        )
+        tracked.last_checkpoint = score.captured_at
+
+        log.debug(
+            f"tracking_checkpoint: {colored(score.command, 'cyan')} "
+            f"{colored(f'({score.score})', 'yellow')} "
             f"{colored(f'pid={score.pid}', 'dark_grey')}"
         )

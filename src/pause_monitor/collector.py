@@ -281,7 +281,12 @@ class TopCollector:
 
         # Apply state multiplier (discount for currently-inactive processes)
         state_mult = multipliers.get(proc["state"])
-        score = min(100, int(base_score * state_mult))
+
+        # Multi-category bonus: processes triggering 3+ categories are more suspicious
+        category_count = len(proc["_categories"])
+        category_bonus = 1.0 + (0.1 * max(0, category_count - 2))
+
+        score = min(100, int(base_score * state_mult * category_bonus))
 
         return ProcessScore(
             pid=proc["pid"],

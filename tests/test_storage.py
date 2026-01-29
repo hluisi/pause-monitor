@@ -131,12 +131,13 @@ def test_prune_deletes_old_events(initialized_db: Path):
     close_process_event(conn, event_id2, recent_exit)
 
     # Prune (30 day retention)
-    events_deleted = prune_old_data(conn, events_days=30)
+    events_deleted, samples_deleted = prune_old_data(conn, events_days=30)
 
     remaining = conn.execute("SELECT COUNT(*) FROM process_events").fetchone()[0]
     conn.close()
 
     assert events_deleted == 1
+    assert samples_deleted == 0
     assert remaining == 1
 
 
@@ -161,12 +162,13 @@ def test_prune_preserves_open_events(initialized_db: Path):
     )
 
     # Prune (1 day retention)
-    events_deleted = prune_old_data(conn, events_days=1)
+    events_deleted, samples_deleted = prune_old_data(conn, events_days=1)
 
     remaining = conn.execute("SELECT COUNT(*) FROM process_events").fetchone()[0]
     conn.close()
 
     assert events_deleted == 0
+    assert samples_deleted == 0
     assert remaining == 1
 
 
@@ -308,14 +310,14 @@ def test_process_snapshots_table_structure(tmp_path):
     assert expected.issubset(columns)
 
 
-def test_schema_version_8(initialized_db: Path):
-    """Schema version should be 8."""
+def test_schema_version_9(initialized_db: Path):
+    """Schema version should be 9."""
     from pause_monitor.storage import get_connection
 
     conn = get_connection(initialized_db)
     version = get_schema_version(conn)
     conn.close()
-    assert version == 8
+    assert version == 9
 
 
 # --- Process Event CRUD Tests ---
@@ -480,4 +482,81 @@ def test_insert_process_snapshot(tmp_path):
     ).fetchone()
     assert row[0] == "entry"
     assert row[1] == '{"score": 45}'
+    conn.close()
+
+
+# --- System Samples Tests ---
+
+
+def test_insert_and_get_system_sample(tmp_path):
+    """insert_system_sample and get_last_system_sample_time work correctly."""
+    from pause_monitor.storage import (
+        get_connection,
+        get_last_system_sample_time,
+        init_database,
+        insert_system_sample,
+    )
+
+    db_path = tmp_path / "test.db"
+    init_database(db_path)
+    conn = get_connection(db_path)
+
+    # No samples yet
+    assert get_last_system_sample_time(conn) is None
+
+    # Insert a sample
+    insert_system_sample(conn, '{"max_score": 42}')
+
+    # Now we should have a timestamp
+    last_time = get_last_system_sample_time(conn)
+    assert last_time is not None
+    assert last_time > 0
+
+    # Verify data stored
+    row = conn.execute("SELECT data FROM system_samples").fetchone()
+    assert row[0] == '{"max_score": 42}'
+
+    conn.close()
+
+
+def test_system_samples_pruning(tmp_path):
+    """prune_old_data deletes old system samples."""
+    import time
+
+    from pause_monitor.storage import (
+        get_connection,
+        init_database,
+        prune_old_data,
+    )
+
+    db_path = tmp_path / "test.db"
+    init_database(db_path)
+    conn = get_connection(db_path)
+
+    # Insert old sample (10 days ago)
+    old_time = time.time() - 10 * 86400
+    conn.execute(
+        "INSERT INTO system_samples (captured_at, data) VALUES (?, ?)",
+        (old_time, '{"old": true}'),
+    )
+    conn.commit()
+
+    # Insert recent sample (1 day ago)
+    recent_time = time.time() - 1 * 86400
+    conn.execute(
+        "INSERT INTO system_samples (captured_at, data) VALUES (?, ?)",
+        (recent_time, '{"recent": true}'),
+    )
+    conn.commit()
+
+    # Prune with 7 day retention
+    events_deleted, samples_deleted = prune_old_data(conn, system_samples_days=7)
+
+    assert samples_deleted == 1  # Old one deleted
+
+    # Verify only recent sample remains
+    rows = conn.execute("SELECT data FROM system_samples").fetchall()
+    assert len(rows) == 1
+    assert rows[0][0] == '{"recent": true}'
+
     conn.close()

@@ -1,8 +1,8 @@
 # Implementation Guide
 
-> **Phase 7 COMPLETE (2026-01-24).** Per-process scoring; SCHEMA_VERSION=7.
+> **Phase 8 COMPLETE (2026-01-29).** Enhanced scoring and data persistence; SCHEMA_VERSION=9.
 
-**Last updated:** 2026-01-25
+**Last updated:** 2026-01-29
 
 This document describes the actual implementation. For design spec, see `design_spec`. For gaps, see `unimplemented_features`.
 
@@ -93,7 +93,7 @@ Methods:
 - `sysbsd` (5): syscalls / 100k
 - `threads` (0): disabled by default
 
-Score = sum(normalized × weight), capped at 100, then multiplied by state multiplier.
+Score = sum(normalized × weight), capped at 100, then multiplied by state multiplier, then multiplied by multi-category bonus (1.0 + 0.1 × max(0, category_count - 2)).
 
 ---
 
@@ -163,21 +163,24 @@ Manages transitions with 5s hysteresis for de-escalation.
 **Purpose:** SQLite with WAL mode.
 
 ### Constants
-- `SCHEMA_VERSION = 7`
+- `SCHEMA_VERSION = 9`
 - `VALID_EVENT_STATUSES = {"unreviewed", "reviewed", "pinned", "dismissed"}`
 
-### Tables (v7)
+### Tables (v9)
 
-**events** — One row per escalation:
-- `id`, `start_timestamp`, `end_timestamp`
-- `peak_stress` (stores max_score), `peak_tier`
-- `status`, `notes`
+**daemon_state** — Key-value store for daemon state.
 
-**process_sample_records** — ProcessSamples as JSON:
-- `id`, `event_id`, `tier`
-- `data` (TEXT JSON blob)
+**process_events** — One row per process tracking event:
+- `id`, `pid`, `command`, `boot_time`
+- `entry_time`, `exit_time`
+- `entry_band`, `peak_band`, `peak_score`, `peak_snapshot`
 
-**Legacy (unused):** `event_samples`, `samples`, `process_samples`
+**process_snapshots** — Snapshots during tracking:
+- `id`, `event_id`, `snapshot_type` (entry/exit/checkpoint), `snapshot`
+
+**system_samples** — Hourly full system samples for trend analysis:
+- `id`, `captured_at`, `data` (JSON ProcessSamples)
+- Pruned after 7 days
 
 ### Dataclasses
 - `Event` — Escalation event
@@ -200,9 +203,12 @@ Manages transitions with 5s hysteresis for de-escalation.
 - Each category: enabled, count, threshold
 - State selection: enabled, count, states list
 
-**TiersConfig:**
-- elevated_threshold = 50
-- critical_threshold = 75
+**BandsConfig:**
+- low=20, medium=40, elevated=60, high=80, critical=100
+- `tracking_band` = "elevated" (threshold for tracking)
+- `forensics_band` = "high" (threshold for forensics)
+- `checkpoint_interval` = 30 (seconds between checkpoint snapshots)
+- `forensics_cooldown` = 60 (seconds between score-based forensics)
 
 ### Config Paths
 - config: `~/.config/pause-monitor/config.toml`
@@ -254,6 +260,10 @@ Newline-delimited JSON over Unix socket.
 ### Functions
 - `capture_spindump()`, `capture_tailspin()`, `capture_system_logs()`
 - `identify_culprits(contents)` — Top rogues from buffer
+
+### Triggers
+- **Pause detection:** When timing ratio exceeds threshold
+- **Score-based:** When max_score >= 80 (critical band), with 60s cooldown
 
 ---
 
