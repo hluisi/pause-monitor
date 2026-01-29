@@ -316,10 +316,10 @@ async def test_auto_prune_runs_on_timeout(patched_config_paths):
     daemon._conn = sqlite3.connect(config.db_path)
 
     # Patch prune_old_data to track calls and signal shutdown after first call
-    with patch("pause_monitor.daemon.prune_old_data", return_value=(0, 0)) as mock_prune:
+    with patch("pause_monitor.daemon.prune_old_data", return_value=0) as mock_prune:
         mock_prune.side_effect = lambda *args, **kwargs: (
             daemon._shutdown_event.set(),
-            (0, 0),
+            0,
         )[1]
 
         # Create a side effect that properly closes the unawaited coroutine
@@ -341,7 +341,6 @@ async def test_auto_prune_runs_on_timeout(patched_config_paths):
 
         mock_prune.assert_called_once_with(
             daemon._conn,
-            samples_days=config.retention.samples_days,
             events_days=config.retention.events_days,
         )
 
@@ -391,7 +390,7 @@ async def test_auto_prune_uses_config_retention_days(patched_config_paths):
     from pause_monitor.storage import init_database
 
     config = Config(
-        retention=RetentionConfig(samples_days=7, events_days=14),
+        retention=RetentionConfig(events_days=14),
     )
     daemon = Daemon(config)
 
@@ -399,10 +398,10 @@ async def test_auto_prune_uses_config_retention_days(patched_config_paths):
     daemon._conn = sqlite3.connect(config.db_path)
 
     # Patch prune_old_data to track calls and signal shutdown after first call
-    with patch("pause_monitor.daemon.prune_old_data", return_value=(0, 0)) as mock_prune:
+    with patch("pause_monitor.daemon.prune_old_data", return_value=0) as mock_prune:
         mock_prune.side_effect = lambda *args, **kwargs: (
             daemon._shutdown_event.set(),
-            (0, 0),
+            0,
         )[1]
 
         # Create a side effect that properly closes the unawaited coroutine
@@ -424,7 +423,6 @@ async def test_auto_prune_uses_config_retention_days(patched_config_paths):
 
         mock_prune.assert_called_once_with(
             daemon._conn,
-            samples_days=7,
             events_days=14,
         )
 

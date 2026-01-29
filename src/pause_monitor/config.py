@@ -18,7 +18,6 @@ class SamplingConfig:
 class RetentionConfig:
     """Data retention configuration."""
 
-    samples_days: int = 30
     events_days: int = 90
 
 
@@ -334,7 +333,6 @@ class Config:
                 elevated_interval=sampling_data.get("elevated_interval", 1),
             ),
             retention=RetentionConfig(
-                samples_days=retention_data.get("samples_days", 30),
                 events_days=retention_data.get("events_days", 90),
             ),
             alerts=AlertsConfig(

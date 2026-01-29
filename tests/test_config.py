@@ -22,7 +22,6 @@ def test_sampling_config_defaults():
 def test_retention_config_defaults():
     """RetentionConfig has correct defaults."""
     config = RetentionConfig()
-    assert config.samples_days == 30
     assert config.events_days == 90
 
 
@@ -51,7 +50,7 @@ def test_full_config_defaults():
     """Full Config object has correct nested defaults."""
     config = Config()
     assert config.sampling.normal_interval == 5
-    assert config.retention.samples_days == 30
+    assert config.retention.events_days == 90
     assert config.alerts.enabled is True
     assert config.learning_mode is False
 

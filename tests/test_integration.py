@@ -8,7 +8,6 @@ These tests use mocks where appropriate to avoid running actual system commands.
 
 import asyncio
 import json
-import sqlite3
 import tempfile
 import time
 from datetime import datetime
@@ -20,10 +19,6 @@ from pause_monitor.collector import ProcessSamples, ProcessScore, TopCollector
 from pause_monitor.config import Config
 from pause_monitor.ringbuffer import RingBuffer
 from pause_monitor.socket_server import SocketServer
-from pause_monitor.storage import (
-    get_process_samples,
-    insert_process_sample,
-)
 
 # --- Test Fixtures ---
 
@@ -151,83 +146,6 @@ async def test_collector_scoring_produces_differentiated_scores(monkeypatch, sam
 
 
 # --- Integration Test: ProcessSamples -> Storage -> Retrieval ---
-
-
-def test_process_samples_storage_roundtrip(initialized_db):
-    """ProcessSamples should be stored and retrieved correctly via JSON blob storage."""
-    conn = sqlite3.connect(initialized_db)
-
-    # Create ProcessSamples with multiple rogues
-    original_samples = ProcessSamples(
-        timestamp=datetime(2026, 1, 24, 12, 0, 0),
-        elapsed_ms=1050,
-        process_count=500,
-        max_score=75,
-        rogues=[
-            ProcessScore(
-                pid=7229,
-                command="chrome",
-                cpu=85.1,
-                state="running",
-                mem=1024 * 1024 * 1024,  # 1GB
-                cmprs=50 * 1024 * 1024,  # 50MB
-                pageins=500,
-                csw=1134810,
-                sysbsd=3961273,
-                threads=38,
-                score=75,
-                categories=frozenset({"cpu", "pageins", "mem"}),
-                captured_at=1706000000.0,
-            ),
-            ProcessScore(
-                pid=0,
-                command="kernel_task",
-                cpu=18.1,
-                state="stuck",
-                mem=43 * 1024 * 1024,
-                cmprs=0,
-                pageins=0,
-                csw=793476910,
-                sysbsd=0,
-                threads=870,
-                score=25,
-                categories=frozenset({"stuck", "threads"}),
-                captured_at=1706000000.0,
-            ),
-        ],
-    )
-
-    # Store sample
-    now = time.time()
-    insert_process_sample(conn, now, original_samples)
-
-    # Retrieve and verify
-    records = get_process_samples(conn)
-    conn.close()
-
-    assert len(records) == 1
-    record = records[0]
-
-    retrieved = record.data
-    assert retrieved.timestamp == original_samples.timestamp
-    assert retrieved.elapsed_ms == 1050
-    assert retrieved.process_count == 500
-    assert retrieved.max_score == 75
-
-    assert len(retrieved.rogues) == 2
-
-    chrome = next(r for r in retrieved.rogues if r.command == "chrome")
-    assert chrome.pid == 7229
-    assert chrome.cpu == 85.1
-    assert chrome.pageins == 500
-    assert chrome.score == 75
-    assert "cpu" in chrome.categories
-
-    kernel = next(r for r in retrieved.rogues if r.command == "kernel_task")
-    assert kernel.pid == 0
-    assert kernel.state == "stuck"
-    assert kernel.score == 25
-    assert "stuck" in kernel.categories
 
 
 # --- Integration Test: ProcessSamples -> RingBuffer -> Freeze ---
@@ -361,46 +279,6 @@ async def test_full_collection_to_socket_cycle(monkeypatch, short_tmp_path, samp
         await server.stop()
 
 
-@pytest.mark.asyncio
-async def test_collection_storage_retrieval_cycle(monkeypatch, initialized_db, sample_top_output):
-    """Test collection -> storage -> retrieval cycle."""
-    conn = sqlite3.connect(initialized_db)
-
-    config = Config()
-    collector = TopCollector(config)
-
-    async def mock_run_top():
-        return sample_top_output
-
-    monkeypatch.setattr(collector, "_run_top", mock_run_top)
-
-    # Collect samples
-    samples = await collector.collect()
-    now = time.time()
-
-    # Store sample
-    insert_process_sample(conn, now, samples)
-
-    # Retrieve
-    records = get_process_samples(conn)
-    conn.close()
-
-    assert len(records) == 1
-    retrieved = records[0].data
-
-    # Verify data integrity
-    assert retrieved.max_score == samples.max_score
-    assert retrieved.process_count == samples.process_count
-    assert len(retrieved.rogues) == len(samples.rogues)
-
-    # Verify rogues match
-    for orig, retr in zip(samples.rogues, retrieved.rogues):
-        assert orig.pid == retr.pid
-        assert orig.command == retr.command
-        assert orig.score == retr.score
-        assert orig.categories == retr.categories
-
-
 # --- Integration Test: Score Range Verification ---
 
 
@@ -465,50 +343,6 @@ async def test_score_ranges(monkeypatch, top_output, min_score, max_score):
     )
 
 
-# --- Integration Test: Process Categories Tracking ---
-
-
-@pytest.mark.asyncio
-async def test_process_categories_preserved_through_cycle(monkeypatch, initialized_db):
-    """Process categories should be preserved through collection -> storage -> retrieval."""
-    conn = sqlite3.connect(initialized_db)
-
-    config = Config()
-    collector = TopCollector(config)
-
-    # Output with process triggering multiple categories
-    top_output = """
-PID    COMMAND          %CPU STATE    MEM    CMPRS  #TH    CSW        SYSBSD     PAGEINS
-1      multi_stress     90.0 running  4G     100M   500    50000      25000      800
-"""
-
-    async def mock_run_top():
-        return top_output
-
-    monkeypatch.setattr(collector, "_run_top", mock_run_top)
-
-    # Collect
-    samples = await collector.collect()
-    assert len(samples.rogues) >= 1
-
-    rogue = samples.rogues[0]
-    original_categories = rogue.categories
-
-    # Should have multiple categories
-    assert len(original_categories) > 1, f"Expected multiple categories, got {original_categories}"
-    assert "cpu" in original_categories  # 90% CPU
-
-    # Store and retrieve
-    now = time.time()
-    insert_process_sample(conn, now, samples)
-
-    records = get_process_samples(conn)
-    conn.close()
-
-    retrieved_rogue = records[0].data.rogues[0]
-    assert retrieved_rogue.categories == original_categories
-
-
 # --- Integration Test: Empty/Edge Cases ---
 
 
@@ -529,27 +363,3 @@ async def test_empty_top_output_handling(monkeypatch):
     assert samples.process_count == 0
     assert samples.max_score == 0
     assert len(samples.rogues) == 0
-
-
-def test_empty_process_samples_storage(initialized_db):
-    """Empty ProcessSamples should be stored and retrieved correctly."""
-    conn = sqlite3.connect(initialized_db)
-
-    empty_samples = ProcessSamples(
-        timestamp=datetime.now(),
-        elapsed_ms=1000,
-        process_count=0,
-        max_score=0,
-        rogues=[],
-    )
-
-    now = time.time()
-    insert_process_sample(conn, now, empty_samples)
-
-    records = get_process_samples(conn)
-    conn.close()
-
-    assert len(records) == 1
-    assert records[0].data.process_count == 0
-    assert records[0].data.max_score == 0
-    assert len(records[0].data.rogues) == 0

@@ -3,13 +3,10 @@
 import sqlite3
 import time
 from contextlib import contextmanager
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Generator
 
 import structlog
-
-from pause_monitor.collector import ProcessSamples
 
 log = structlog.get_logger()
 
@@ -21,12 +18,6 @@ CREATE TABLE IF NOT EXISTS daemon_state (
     key TEXT PRIMARY KEY,
     value TEXT,
     updated_at REAL
-);
-
-CREATE TABLE IF NOT EXISTS process_sample_records (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    timestamp REAL NOT NULL,
-    data TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS process_events (
@@ -159,116 +150,28 @@ def set_daemon_state(conn: sqlite3.Connection, key: str, value: str) -> None:
     conn.commit()
 
 
-@dataclass
-class ProcessSampleRecord:
-    """Process sample record - ring buffer entry for 1Hz collection."""
-
-    timestamp: float
-    data: ProcessSamples
-    id: int | None = None
-
-
-def insert_process_sample(
-    conn: sqlite3.Connection, timestamp: float, samples: ProcessSamples
-) -> int:
-    """Insert process sample into ring buffer.
-
-    Args:
-        conn: Database connection
-        timestamp: Unix timestamp of the sample
-        samples: ProcessSamples to serialize and store
-
-    Returns:
-        The ID of the inserted record
-    """
-    cursor = conn.execute(
-        "INSERT INTO process_sample_records (timestamp, data) VALUES (?, ?)",
-        (timestamp, samples.to_json()),
-    )
-    conn.commit()
-    result = cursor.lastrowid
-    assert result is not None
-    return result
-
-
-def get_process_samples(
-    conn: sqlite3.Connection,
-    start_time: float | None = None,
-    end_time: float | None = None,
-    limit: int = 1000,
-) -> list[ProcessSampleRecord]:
-    """Retrieve process samples from ring buffer, optionally filtered by time range.
-
-    Args:
-        conn: Database connection
-        start_time: Optional start timestamp (inclusive)
-        end_time: Optional end timestamp (inclusive)
-        limit: Maximum records to return (default 1000)
-
-    Returns:
-        List of ProcessSampleRecord with deserialized data, ordered by timestamp
-    """
-    query = "SELECT id, timestamp, data FROM process_sample_records"
-    params: list[float | int] = []
-    conditions = []
-
-    if start_time is not None:
-        conditions.append("timestamp >= ?")
-        params.append(start_time)
-    if end_time is not None:
-        conditions.append("timestamp <= ?")
-        params.append(end_time)
-
-    if conditions:
-        query += " WHERE " + " AND ".join(conditions)
-
-    query += " ORDER BY timestamp DESC LIMIT ?"
-    params.append(limit)
-
-    rows = conn.execute(query, params).fetchall()
-
-    return [
-        ProcessSampleRecord(
-            id=row[0],
-            timestamp=row[1],
-            data=ProcessSamples.from_json(row[2]),
-        )
-        for row in rows
-    ]
-
-
 def prune_old_data(
     conn: sqlite3.Connection,
-    samples_days: int = 30,
     events_days: int = 90,
-) -> tuple[int, int]:
-    """Delete old process samples and closed process events.
+) -> int:
+    """Delete old closed process events.
 
     Args:
         conn: Database connection
-        samples_days: Delete process_sample_records older than this
         events_days: Delete closed process_events older than this
 
     Returns:
-        Tuple of (samples_deleted, events_deleted)
+        Number of events deleted
 
     Raises:
         ValueError: If retention days < 1
     """
-    if samples_days < 1 or events_days < 1:
+    if events_days < 1:
         raise ValueError("Retention days must be >= 1")
 
-    cutoff_samples = time.time() - (samples_days * 86400)
     cutoff_events = time.time() - (events_days * 86400)
 
-    # Delete old process samples
-    cursor = conn.execute(
-        "DELETE FROM process_sample_records WHERE timestamp < ?",
-        (cutoff_samples,),
-    )
-    samples_deleted = cursor.rowcount
-
-    # Delete old closed process events (and cascades to snapshots)
+    # Delete old closed process events (cascades to snapshots)
     cursor = conn.execute(
         """
         DELETE FROM process_events
@@ -280,9 +183,9 @@ def prune_old_data(
 
     conn.commit()
 
-    log.info("prune_complete", samples_deleted=samples_deleted, events_deleted=events_deleted)
+    log.info("prune_complete", events_deleted=events_deleted)
 
-    return (samples_deleted, events_deleted)
+    return events_deleted
 
 
 # --- Process Event CRUD Functions ---

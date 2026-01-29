@@ -276,10 +276,9 @@ class Daemon:
                     log.info("auto_prune_starting")
                     deleted = prune_old_data(
                         self._conn,
-                        samples_days=self.config.retention.samples_days,
                         events_days=self.config.retention.events_days,
                     )
-                    log.info("auto_prune_completed", samples=deleted[0], events=deleted[1])
+                    log.info("auto_prune_completed", events_deleted=deleted)
 
     async def _run_heavy_capture(self, capture: ForensicsCapture) -> None:
         """Run heavy forensics capture (spindump, tailspin, logs) and notify on completion."""

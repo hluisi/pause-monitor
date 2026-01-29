@@ -390,13 +390,11 @@ class TestPruneCommand:
         with patch("pause_monitor.config.Config.load") as mock_load:
             mock_config = MagicMock()
             mock_config.db_path = db_path
-            mock_config.retention.samples_days = 30
             mock_config.retention.events_days = 90
             mock_load.return_value = mock_config
             result = runner.invoke(main, ["prune", "--dry-run"])
 
         assert result.exit_code == 0
-        assert "Would prune samples older than 30 days" in result.output
         assert "Would prune closed events older than 90 days" in result.output
 
     def test_prune_with_nothing_to_delete(self, runner: CliRunner, tmp_path: Path) -> None:
@@ -407,13 +405,12 @@ class TestPruneCommand:
         with patch("pause_monitor.config.Config.load") as mock_load:
             mock_config = MagicMock()
             mock_config.db_path = db_path
-            mock_config.retention.samples_days = 30
             mock_config.retention.events_days = 90
             mock_load.return_value = mock_config
             result = runner.invoke(main, ["prune", "--force"])
 
         assert result.exit_code == 0
-        assert "Deleted 0 samples and 0 events" in result.output
+        assert "Deleted 0 events" in result.output
 
     def test_prune_requires_confirmation(self, runner: CliRunner, tmp_path: Path) -> None:
         """prune without --force aborts without confirmation."""
@@ -423,7 +420,6 @@ class TestPruneCommand:
         with patch("pause_monitor.config.Config.load") as mock_load:
             mock_config = MagicMock()
             mock_config.db_path = db_path
-            mock_config.retention.samples_days = 30
             mock_config.retention.events_days = 90
             mock_load.return_value = mock_config
             # Don't confirm (default is 'n')
@@ -440,14 +436,13 @@ class TestPruneCommand:
         with patch("pause_monitor.config.Config.load") as mock_load:
             mock_config = MagicMock()
             mock_config.db_path = db_path
-            mock_config.retention.samples_days = 30
             mock_config.retention.events_days = 90
             mock_load.return_value = mock_config
             result = runner.invoke(main, ["prune"], input="y\n")
 
         assert result.exit_code == 0
-        assert "Delete samples older than 30 days" in result.output
-        assert "Deleted 0 samples and 0 events" in result.output
+        assert "Delete closed events older than 90 days" in result.output
+        assert "Deleted 0 events" in result.output
 
 
 def _make_path_prop(path: Path):
@@ -475,7 +470,6 @@ class TestConfigCommand:
         assert "low = 20" in result.output
         assert "critical = 100" in result.output
         assert "[retention]" in result.output
-        assert "samples_days = 30" in result.output
         assert "events_days = 90" in result.output
         assert "[alerts]" in result.output
         assert "enabled = True" in result.output
@@ -499,7 +493,7 @@ class TestConfigCommand:
                 high=70,
                 critical=90,
             ),
-            retention=RetentionConfig(samples_days=14, events_days=60),
+            retention=RetentionConfig(events_days=60),
             alerts=AlertsConfig(enabled=False, sound=False),
             learning_mode=True,
         )
@@ -514,7 +508,6 @@ class TestConfigCommand:
         assert "elevated_interval = 2" in result.output
         assert "low = 15" in result.output
         assert "critical = 90" in result.output
-        assert "samples_days = 14" in result.output
         assert "events_days = 60" in result.output
         assert "enabled = False" in result.output
         assert "sound = False" in result.output

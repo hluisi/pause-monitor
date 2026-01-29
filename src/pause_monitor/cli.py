@@ -294,14 +294,12 @@ def history(hours: int, fmt: str) -> None:
 
 
 @main.command()
-@click.option("--samples-days", default=None, type=int, help="Override sample retention days")
 @click.option("--events-days", default=None, type=int, help="Override event retention days")
 @click.option("--dry-run", is_flag=True, help="Show what would be deleted")
 @click.option("--force", "-f", is_flag=True, help="Skip confirmation prompt")
-def prune(samples_days: int | None, events_days: int | None, dry_run: bool, force: bool) -> None:
-    """Delete old samples and closed process events.
+def prune(events_days: int | None, dry_run: bool, force: bool) -> None:
+    """Delete old closed process events.
 
-    Prunes process_sample_records older than samples_days.
     Prunes closed process_events older than events_days.
     """
     from pause_monitor.config import Config
@@ -313,30 +311,25 @@ def prune(samples_days: int | None, events_days: int | None, dry_run: bool, forc
         click.echo("Database not found. Run 'pause-monitor daemon' first.")
         return
 
-    samples_days = samples_days or config.retention.samples_days
     events_days = events_days or config.retention.events_days
 
     if dry_run:
-        click.echo(f"Would prune samples older than {samples_days} days")
         click.echo(f"Would prune closed events older than {events_days} days")
         return
 
     if not force:
         click.confirm(
-            f"Delete samples older than {samples_days} days and "
-            f"closed events older than {events_days} days?",
+            f"Delete closed events older than {events_days} days?",
             abort=True,
         )
 
     conn = get_connection(config.db_path)
     try:
-        samples_deleted, events_deleted = prune_old_data(
-            conn, samples_days=samples_days, events_days=events_days
-        )
+        events_deleted = prune_old_data(conn, events_days=events_days)
     finally:
         conn.close()
 
-    click.echo(f"Deleted {samples_deleted} samples and {events_deleted} events")
+    click.echo(f"Deleted {events_deleted} events")
 
 
 @main.group()
@@ -369,7 +362,6 @@ def config_show() -> None:
     click.echo(f"  forensics_band = {cfg.bands.forensics_band}")
     click.echo()
     click.echo("[retention]")
-    click.echo(f"  samples_days = {cfg.retention.samples_days}")
     click.echo(f"  events_days = {cfg.retention.events_days}")
     click.echo()
     click.echo("[alerts]")

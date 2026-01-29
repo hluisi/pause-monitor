@@ -2,7 +2,6 @@
 
 import sqlite3
 import time
-from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -44,10 +43,9 @@ def test_init_database_creates_tables(tmp_path: Path):
     conn.close()
 
     table_names = [t[0] for t in tables]
-    # Schema v8: new per-process event tables
+    # Schema v8: per-process event tables
     assert "process_events" in table_names
     assert "process_snapshots" in table_names
-    assert "process_sample_records" in table_names
     assert "daemon_state" in table_names
 
 
@@ -62,116 +60,6 @@ def test_init_database_sets_schema_version(tmp_path: Path):
     assert version == SCHEMA_VERSION
 
 
-# --- ProcessSampleRecord Tests ---
-
-
-def test_process_sample_record_dataclass():
-    """ProcessSampleRecord has correct fields."""
-    from pause_monitor.collector import ProcessSamples
-    from pause_monitor.storage import ProcessSampleRecord
-
-    samples = ProcessSamples(
-        timestamp=datetime.now(),
-        elapsed_ms=500,
-        process_count=100,
-        max_score=50,
-        rogues=[],
-    )
-    record = ProcessSampleRecord(
-        id=1,
-        timestamp=time.time(),
-        data=samples,
-    )
-    assert record.id == 1
-    assert record.data.max_score == 50
-
-
-def test_insert_process_sample(initialized_db: Path):
-    """Process sample should be stored as JSON."""
-    from pause_monitor.collector import ProcessSamples, ProcessScore
-    from pause_monitor.storage import (
-        get_connection,
-        get_process_samples,
-        insert_process_sample,
-    )
-
-    conn = get_connection(initialized_db)
-
-    now = time.time()
-    samples = ProcessSamples(
-        timestamp=datetime.now(),
-        elapsed_ms=1050,
-        process_count=500,
-        max_score=75,
-        rogues=[
-            ProcessScore(
-                pid=1,
-                command="test",
-                cpu=80.0,
-                state="running",
-                mem=1000,
-                cmprs=0,
-                pageins=0,
-                csw=10,
-                sysbsd=5,
-                threads=2,
-                score=75,
-                categories=frozenset({"cpu"}),
-                captured_at=1706000000.0,
-            ),
-        ],
-    )
-
-    insert_process_sample(conn, now, samples)
-
-    retrieved = get_process_samples(conn)
-    conn.close()
-
-    assert len(retrieved) == 1
-    assert retrieved[0].data.max_score == 75
-    assert retrieved[0].data.rogues[0].command == "test"
-
-
-def test_get_process_samples_empty(initialized_db: Path):
-    """get_process_samples returns empty list when no samples exist."""
-    from pause_monitor.storage import get_connection, get_process_samples
-
-    conn = get_connection(initialized_db)
-    samples = get_process_samples(conn)
-    conn.close()
-
-    assert samples == []
-
-
-def test_get_process_samples_time_filter(initialized_db: Path):
-    """get_process_samples filters by time range."""
-    from pause_monitor.collector import ProcessSamples
-    from pause_monitor.storage import (
-        get_connection,
-        get_process_samples,
-        insert_process_sample,
-    )
-
-    conn = get_connection(initialized_db)
-
-    base_time = 1000000.0
-    for i in range(5):
-        samples = ProcessSamples(
-            timestamp=datetime.now(),
-            elapsed_ms=100,
-            process_count=100,
-            max_score=10 + i,
-            rogues=[],
-        )
-        insert_process_sample(conn, base_time + i * 100, samples)
-
-    # Get middle samples
-    retrieved = get_process_samples(conn, start_time=base_time + 100, end_time=base_time + 300)
-    conn.close()
-
-    assert len(retrieved) == 3
-
-
 # --- Prune Tests ---
 
 
@@ -182,7 +70,7 @@ def test_prune_rejects_zero_days(initialized_db: Path):
     conn = get_connection(initialized_db)
 
     with pytest.raises(ValueError, match="Retention days must be >= 1"):
-        prune_old_data(conn, samples_days=0, events_days=90)
+        prune_old_data(conn, events_days=0)
 
     conn.close()
 
@@ -194,46 +82,9 @@ def test_prune_rejects_negative_days(initialized_db: Path):
     conn = get_connection(initialized_db)
 
     with pytest.raises(ValueError, match="Retention days must be >= 1"):
-        prune_old_data(conn, samples_days=30, events_days=-5)
+        prune_old_data(conn, events_days=-5)
 
     conn.close()
-
-
-def test_prune_deletes_old_samples(initialized_db: Path):
-    """prune_old_data deletes old samples."""
-    from pause_monitor.collector import ProcessSamples
-    from pause_monitor.storage import (
-        get_connection,
-        get_process_samples,
-        insert_process_sample,
-        prune_old_data,
-    )
-
-    conn = get_connection(initialized_db)
-
-    # Insert old sample (100 days ago)
-    old_time = time.time() - 100 * 86400
-    samples = ProcessSamples(
-        timestamp=datetime.now(),
-        elapsed_ms=100,
-        process_count=100,
-        max_score=50,
-        rogues=[],
-    )
-    insert_process_sample(conn, old_time, samples)
-
-    # Insert recent sample
-    recent_time = time.time() - 10 * 86400
-    insert_process_sample(conn, recent_time, samples)
-
-    # Prune (30 day retention)
-    samples_deleted, events_deleted = prune_old_data(conn, samples_days=30, events_days=90)
-
-    remaining = get_process_samples(conn)
-    conn.close()
-
-    assert samples_deleted == 1
-    assert len(remaining) == 1
 
 
 def test_prune_deletes_old_events(initialized_db: Path):
@@ -280,7 +131,7 @@ def test_prune_deletes_old_events(initialized_db: Path):
     close_process_event(conn, event_id2, recent_exit)
 
     # Prune (30 day retention)
-    samples_deleted, events_deleted = prune_old_data(conn, samples_days=30, events_days=30)
+    events_deleted = prune_old_data(conn, events_days=30)
 
     remaining = conn.execute("SELECT COUNT(*) FROM process_events").fetchone()[0]
     conn.close()
@@ -310,7 +161,7 @@ def test_prune_preserves_open_events(initialized_db: Path):
     )
 
     # Prune (1 day retention)
-    samples_deleted, events_deleted = prune_old_data(conn, samples_days=1, events_days=1)
+    events_deleted = prune_old_data(conn, events_days=1)
 
     remaining = conn.execute("SELECT COUNT(*) FROM process_events").fetchone()[0]
     conn.close()
