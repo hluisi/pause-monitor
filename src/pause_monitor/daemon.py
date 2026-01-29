@@ -433,20 +433,14 @@ class Daemon:
                 # New processes entering rogue selection
                 for pid in current_pids - previous_pids:
                     rogue = next(r for r in samples.rogues if r.pid == pid)
+                    cats = ",".join(sorted(rogue.categories))
                     log.info(
-                        "rogue_entered",
-                        command=rogue.command,
-                        score=rogue.score,
-                        pid=pid,
+                        f"rogue_entered: {rogue.command} ({rogue.score}) pid={pid} [{cats}]"
                     )
 
                 # Processes exiting rogue selection
                 for pid in previous_pids - current_pids:
-                    log.info(
-                        "rogue_exited",
-                        command=previous_rogues[pid],
-                        pid=pid,
-                    )
+                    log.info(f"rogue_exited: {previous_rogues[pid]} pid={pid}")
 
                 previous_rogues = current_rogues
 
@@ -461,12 +455,7 @@ class Daemon:
                 elevated_threshold = self.config.bands.elevated
                 if samples.max_score >= elevated_threshold and samples.rogues:
                     top = samples.rogues[0]
-                    log.info(
-                        "elevated_sample",
-                        command=top.command,
-                        score=samples.max_score,
-                        pid=top.pid,
-                    )
+                    log.info(f"elevated_sample: {top.command} ({samples.max_score}) pid={top.pid}")
 
                 # Update heartbeat stats
                 heartbeat_count += 1
