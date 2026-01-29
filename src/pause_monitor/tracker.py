@@ -8,6 +8,8 @@ import sqlite3
 import time
 from dataclasses import dataclass
 
+import structlog
+
 from pause_monitor.collector import ProcessScore
 from pause_monitor.config import BandsConfig
 from pause_monitor.storage import (
@@ -17,6 +19,8 @@ from pause_monitor.storage import (
     insert_process_snapshot,
     update_process_event_peak,
 )
+
+log = structlog.get_logger()
 
 # Snapshot types
 SNAPSHOT_ENTRY = "entry"
@@ -114,6 +118,14 @@ class ProcessTracker:
             peak_score=score.score,
         )
 
+        log.info(
+            "process_tracking_started",
+            pid=score.pid,
+            command=score.command,
+            score=score.score,
+            band=band,
+        )
+
     def _close_event(
         self,
         pid: int,
@@ -141,9 +153,19 @@ class ProcessTracker:
 
         close_process_event(self.conn, tracked.event_id, exit_time)
 
+        # Log with reason for closure
+        reason = "score_dropped" if exit_score is not None else "process_gone"
+        log.info(
+            "process_tracking_ended",
+            pid=pid,
+            peak_score=tracked.peak_score,
+            reason=reason,
+        )
+
     def _update_peak(self, score: ProcessScore) -> None:
         """Update peak for tracked process."""
         tracked = self.tracked[score.pid]
+        old_score = tracked.peak_score
         tracked.peak_score = score.score
 
         snapshot_json = json.dumps(score.to_dict())
@@ -155,4 +177,13 @@ class ProcessTracker:
             peak_score=score.score,
             peak_band=band,
             peak_snapshot=snapshot_json,
+        )
+
+        log.debug(
+            "process_tracking_peak",
+            pid=score.pid,
+            command=score.command,
+            score=score.score,
+            previous=old_score,
+            band=band,
         )

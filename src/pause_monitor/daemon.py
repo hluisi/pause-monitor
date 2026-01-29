@@ -91,6 +91,7 @@ class Daemon:
         No migrations - if schema version mismatches, init_database() deletes and recreates.
         """
         self.config.data_dir.mkdir(parents=True, exist_ok=True)
+        db_existed = self.config.db_path.exists()
         init_database(self.config.db_path)  # Handles version check + recreate
 
         # Create connection and tracker if not already initialized in __init__
@@ -99,16 +100,39 @@ class Daemon:
         if self.tracker is None:
             self.tracker = ProcessTracker(self._conn, self.config.bands, self.boot_time)
 
+        # Log database state
+        restored_count = len(self.tracker.tracked) if self.tracker else 0
+        log.info(
+            "database_ready",
+            existed=db_existed,
+            restored_tracking=restored_count,
+        )
+
     async def start(self) -> None:
         """Start the daemon."""
         from importlib.metadata import version
 
         log.info("daemon_starting", version=version("pause-monitor"))
 
+        # Log configuration for visibility
+        bands = self.config.bands
+        log.info(
+            "daemon_config",
+            sample_interval_ms=self.config.sentinel.sample_interval_ms,
+            pause_threshold_ratio=self.config.sentinel.pause_threshold_ratio,
+            ring_buffer_seconds=self.config.sentinel.ring_buffer_seconds,
+            tracking_threshold=bands.tracking_threshold,
+            tracking_band=bands.tracking_band,
+            band_thresholds=f"low={bands.low}/med={bands.medium}/elev={bands.elevated}/high={bands.high}/crit={bands.critical}",
+            pause_min_duration=self.config.alerts.pause_min_duration,
+        )
+        log.info("daemon_boot_time", boot_time=self.boot_time)
+
         # Set QoS to USER_INITIATED for reliable sampling under load
         # Ensures we get CPU time even when system is busy (when monitoring matters most)
         try:
             os.setpriority(os.PRIO_PROCESS, 0, -10)  # Negative nice = higher priority
+            log.info("daemon_priority_set", nice=-10)
         except PermissionError:
             log.warning("qos_priority_failed", msg="Could not set high priority, running as normal")
 
@@ -381,6 +405,15 @@ class Daemon:
         expected_ms = self.config.sentinel.sample_interval_ms
         pause_threshold = self.config.sentinel.pause_threshold_ratio
 
+        # Heartbeat tracking (log every 60 samples = ~1 minute)
+        heartbeat_interval = 60
+        heartbeat_count = 0
+        heartbeat_max_score = 0
+        heartbeat_score_sum = 0
+
+        # Near-miss threshold: log when ratio exceeds this but is below pause_threshold
+        near_miss_ratio = 2.0
+
         while not self._shutdown_event.is_set():
             try:
                 # Collect samples (this takes ~1 second due to top -l 2)
@@ -394,18 +427,56 @@ class Daemon:
                     self.tracker.update(samples.rogues)
 
                 # Push to ring buffer
-                self.ring_buffer.push(samples, tier=1)
+                self.ring_buffer.push(samples)
+
+                # Update heartbeat stats
+                heartbeat_count += 1
+                heartbeat_score_sum += samples.max_score
+                heartbeat_max_score = max(heartbeat_max_score, samples.max_score)
+
+                # Calculate timing ratio for pause detection
+                timing_ratio = samples.elapsed_ms / expected_ms if expected_ms > 0 else 0
 
                 # Check for pause (elapsed_ms much larger than expected)
-                if samples.elapsed_ms > expected_ms * pause_threshold:
+                if timing_ratio > pause_threshold:
                     await self._handle_pause(samples.elapsed_ms, expected_ms)
+                elif timing_ratio > near_miss_ratio:
+                    # Near-miss: elevated timing but below pause threshold
+                    log.info(
+                        "pause_near_miss",
+                        elapsed_ms=samples.elapsed_ms,
+                        expected_ms=expected_ms,
+                        ratio=round(timing_ratio, 2),
+                        threshold=pause_threshold,
+                    )
 
                 # Broadcast to TUI clients
                 if self._socket_server and self._socket_server.has_clients:
-                    await self._socket_server.broadcast(samples, tier=1)
+                    await self._socket_server.broadcast(samples)
 
                 # Update daemon state
                 self.state.update_sample(samples.max_score)
+
+                # Periodic heartbeat log
+                if heartbeat_count >= heartbeat_interval:
+                    tracked_count = len(self.tracker.tracked) if self.tracker else 0
+                    client_count = len(self._socket_server._clients) if self._socket_server else 0
+                    buffer_size = len(self.ring_buffer)
+
+                    log.info(
+                        "daemon_heartbeat",
+                        samples=heartbeat_count,
+                        max_score=heartbeat_max_score,
+                        avg_score=round(heartbeat_score_sum / heartbeat_count),
+                        tracked=tracked_count,
+                        buffer=f"{buffer_size}/{self.ring_buffer.max_samples}",
+                        clients=client_count,
+                    )
+
+                    # Reset heartbeat counters
+                    heartbeat_count = 0
+                    heartbeat_max_score = 0
+                    heartbeat_score_sum = 0
 
             except asyncio.CancelledError:
                 log.info("main_loop_cancelled")
@@ -417,7 +488,7 @@ class Daemon:
                     await asyncio.wait_for(self._shutdown_event.wait(), timeout=1.0)
                     break
                 except asyncio.TimeoutError:
-                    pass  # Continue with next sample
+                    pass  # Continue with next sample  # Continue with next sample
 
 
 async def run_daemon(config: Config | None = None) -> None:
