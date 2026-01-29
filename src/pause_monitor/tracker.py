@@ -9,6 +9,7 @@ import time
 from dataclasses import dataclass
 
 import structlog
+from termcolor import colored
 
 from pause_monitor.collector import ProcessScore
 from pause_monitor.config import BandsConfig
@@ -33,6 +34,7 @@ class TrackedProcess:
 
     event_id: int
     pid: int
+    command: str
     peak_score: int
 
 
@@ -57,6 +59,7 @@ class ProcessTracker:
             self.tracked[event["pid"]] = TrackedProcess(
                 event_id=event["id"],
                 pid=event["pid"],
+                command=event["command"],
                 peak_score=event["peak_score"],
             )
 
@@ -115,16 +118,17 @@ class ProcessTracker:
         self.tracked[score.pid] = TrackedProcess(
             event_id=event_id,
             pid=score.pid,
+            command=score.command,
             peak_score=score.score,
         )
 
-        log.info(
-            "process_tracking_started",
-            pid=score.pid,
-            command=score.command,
-            score=score.score,
-            band=band,
+        msg = (
+            f"tracking_started: {colored(score.command, 'cyan')} "
+            f"{colored(f'({score.score})', 'yellow')} "
+            f"{colored(f'pid={score.pid}', 'dark_grey')} "
+            f"{colored(f'[{band}]', 'magenta')}"
         )
+        log.info(msg)
 
     def _close_event(
         self,
@@ -155,12 +159,15 @@ class ProcessTracker:
 
         # Log with reason for closure
         reason = "score_dropped" if exit_score is not None else "process_gone"
-        log.info(
-            "process_tracking_ended",
-            pid=pid,
-            peak_score=tracked.peak_score,
-            reason=reason,
+        exit_score_val = exit_score.score if exit_score else None
+        score_info = f"{exit_score_val}→0" if exit_score_val else f"peak={tracked.peak_score}"
+        msg = (
+            f"tracking_ended: {colored(tracked.command, 'cyan')} "
+            f"{colored(f'({score_info})', 'yellow')} "
+            f"{colored(f'pid={pid}', 'dark_grey')} "
+            f"{colored(f'[{reason}]', 'magenta')}"
         )
+        log.info(msg)
 
     def _update_peak(self, score: ProcessScore) -> None:
         """Update peak for tracked process."""
@@ -174,14 +181,13 @@ class ProcessTracker:
 
         # Log band transitions (escalations)
         if band != old_band:
-            log.info(
-                "process_band_changed",
-                pid=score.pid,
-                command=score.command,
-                from_band=old_band,
-                to_band=band,
-                score=score.score,
+            msg = (
+                f"band_changed: {colored(score.command, 'cyan')} "
+                f"{colored(f'({old_score}→{score.score})', 'yellow')} "
+                f"{colored(f'pid={score.pid}', 'dark_grey')} "
+                f"{colored(f'[{old_band}→{band}]', 'magenta')}"
             )
+            log.info(msg)
 
         update_process_event_peak(
             self.conn,
@@ -192,10 +198,7 @@ class ProcessTracker:
         )
 
         log.debug(
-            "process_tracking_peak",
-            pid=score.pid,
-            command=score.command,
-            score=score.score,
-            previous=old_score,
-            band=band,
+            f"tracking_peak: {colored(score.command, 'cyan')} "
+            f"{colored(f'({old_score}→{score.score})', 'yellow')} "
+            f"{colored(f'pid={score.pid}', 'dark_grey')}"
         )
