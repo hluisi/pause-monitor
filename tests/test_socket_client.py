@@ -29,7 +29,7 @@ async def test_socket_client_receives_data(short_tmp_path):
 
     # Start mock server
     async def handle_client(reader, writer):
-        msg = {"samples": [], "tier": 2, "current_stress": {"load": 5}}
+        msg = {"samples": [], "max_score": 50, "current_stress": {"load": 5}}
         writer.write((json.dumps(msg) + "\n").encode())
         await writer.drain()
         await asyncio.sleep(0.5)
@@ -43,7 +43,7 @@ async def test_socket_client_receives_data(short_tmp_path):
 
         # Read one message
         data = await client.read_message()
-        assert data["tier"] == 2
+        assert data["max_score"] == 50
 
         await client.disconnect()
     finally:

@@ -1,6 +1,6 @@
 """Configuration system for pause-monitor."""
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields, is_dataclass
 from pathlib import Path
 
 import tomlkit
@@ -211,6 +211,18 @@ class RogueSelectionConfig:
     state: StateSelection = field(default_factory=StateSelection)
 
 
+def _dataclass_to_table(obj: object) -> tomlkit.items.Table:
+    """Convert a dataclass instance to a tomlkit Table recursively."""
+    table = tomlkit.table()
+    for f in fields(obj):  # type: ignore[arg-type]
+        value = getattr(obj, f.name)
+        if is_dataclass(value) and not isinstance(value, type):
+            table.add(f.name, _dataclass_to_table(value))
+        else:
+            table.add(f.name, value)
+    return table
+
+
 @dataclass
 class Config:
     """Main configuration container."""
@@ -275,151 +287,20 @@ class Config:
         doc.add("learning_mode", self.learning_mode)
         doc.add(tomlkit.nl())
 
-        sampling = tomlkit.table()
-        sampling.add("normal_interval", self.sampling.normal_interval)
-        sampling.add("elevated_interval", self.sampling.elevated_interval)
-        doc.add("sampling", sampling)
-        doc.add(tomlkit.nl())
-
-        retention = tomlkit.table()
-        retention.add("samples_days", self.retention.samples_days)
-        retention.add("events_days", self.retention.events_days)
-        doc.add("retention", retention)
-        doc.add(tomlkit.nl())
-
-        alerts = tomlkit.table()
-        alerts.add("enabled", self.alerts.enabled)
-        alerts.add("pause_detected", self.alerts.pause_detected)
-        alerts.add("pause_min_duration", self.alerts.pause_min_duration)
-        alerts.add("critical_stress", self.alerts.critical_stress)
-        alerts.add("critical_duration", self.alerts.critical_duration)
-        alerts.add("elevated_entered", self.alerts.elevated_entered)
-        alerts.add("forensics_completed", self.alerts.forensics_completed)
-        alerts.add("sound", self.alerts.sound)
-        doc.add("alerts", alerts)
-        doc.add(tomlkit.nl())
-
-        suspects = tomlkit.table()
-        suspects.add("patterns", self.suspects.patterns)
-        doc.add("suspects", suspects)
-        doc.add(tomlkit.nl())
-
-        forensics = tomlkit.table()
-        forensics.add("spindump_timeout", self.forensics.spindump_timeout)
-        forensics.add("tailspin_timeout", self.forensics.tailspin_timeout)
-        forensics.add("logs_timeout", self.forensics.logs_timeout)
-        doc.add("forensics", forensics)
-        doc.add(tomlkit.nl())
-
-        sentinel = tomlkit.table()
-        sentinel.add("fast_interval_ms", self.sentinel.fast_interval_ms)
-        sentinel.add("ring_buffer_seconds", self.sentinel.ring_buffer_seconds)
-        sentinel.add("pause_threshold_ratio", self.sentinel.pause_threshold_ratio)
-        sentinel.add("peak_tracking_seconds", self.sentinel.peak_tracking_seconds)
-        sentinel.add("sample_interval_ms", self.sentinel.sample_interval_ms)
-        sentinel.add("wake_suppress_seconds", self.sentinel.wake_suppress_seconds)
-        doc.add("sentinel", sentinel)
-        doc.add(tomlkit.nl())
-
-        bands = tomlkit.table()
-        bands.add("low", self.bands.low)
-        bands.add("medium", self.bands.medium)
-        bands.add("elevated", self.bands.elevated)
-        bands.add("high", self.bands.high)
-        bands.add("critical", self.bands.critical)
-        bands.add("tracking_band", self.bands.tracking_band)
-        bands.add("forensics_band", self.bands.forensics_band)
-        doc.add("bands", bands)
-        doc.add(tomlkit.nl())
-
-        # Scoring section with nested weights and state multipliers
-        scoring = tomlkit.table()
-        weights = tomlkit.table()
-        weights.add("cpu", self.scoring.weights.cpu)
-        weights.add("state", self.scoring.weights.state)
-        weights.add("pageins", self.scoring.weights.pageins)
-        weights.add("mem", self.scoring.weights.mem)
-        weights.add("cmprs", self.scoring.weights.cmprs)
-        weights.add("csw", self.scoring.weights.csw)
-        weights.add("sysbsd", self.scoring.weights.sysbsd)
-        weights.add("threads", self.scoring.weights.threads)
-        scoring.add("weights", weights)
-
-        state_mult = tomlkit.table()
-        state_mult.add("idle", self.scoring.state_multipliers.idle)
-        state_mult.add("sleeping", self.scoring.state_multipliers.sleeping)
-        state_mult.add("stopped", self.scoring.state_multipliers.stopped)
-        state_mult.add("halted", self.scoring.state_multipliers.halted)
-        state_mult.add("zombie", self.scoring.state_multipliers.zombie)
-        state_mult.add("running", self.scoring.state_multipliers.running)
-        state_mult.add("stuck", self.scoring.state_multipliers.stuck)
-        scoring.add("state_multipliers", state_mult)
-
-        norm = tomlkit.table()
-        norm.add("cpu", self.scoring.normalization.cpu)
-        norm.add("mem_gb", self.scoring.normalization.mem_gb)
-        norm.add("cmprs_gb", self.scoring.normalization.cmprs_gb)
-        norm.add("pageins", self.scoring.normalization.pageins)
-        norm.add("csw", self.scoring.normalization.csw)
-        norm.add("sysbsd", self.scoring.normalization.sysbsd)
-        norm.add("threads", self.scoring.normalization.threads)
-        scoring.add("normalization", norm)
-
-        doc.add("scoring", scoring)
-        doc.add(tomlkit.nl())
-
-        # Rogue selection section with nested category configs
-        rogue = tomlkit.table()
-
-        cpu_sel = tomlkit.table()
-        cpu_sel.add("enabled", self.rogue_selection.cpu.enabled)
-        cpu_sel.add("count", self.rogue_selection.cpu.count)
-        cpu_sel.add("threshold", self.rogue_selection.cpu.threshold)
-        rogue.add("cpu", cpu_sel)
-
-        mem_sel = tomlkit.table()
-        mem_sel.add("enabled", self.rogue_selection.mem.enabled)
-        mem_sel.add("count", self.rogue_selection.mem.count)
-        mem_sel.add("threshold", self.rogue_selection.mem.threshold)
-        rogue.add("mem", mem_sel)
-
-        cmprs_sel = tomlkit.table()
-        cmprs_sel.add("enabled", self.rogue_selection.cmprs.enabled)
-        cmprs_sel.add("count", self.rogue_selection.cmprs.count)
-        cmprs_sel.add("threshold", self.rogue_selection.cmprs.threshold)
-        rogue.add("cmprs", cmprs_sel)
-
-        threads_sel = tomlkit.table()
-        threads_sel.add("enabled", self.rogue_selection.threads.enabled)
-        threads_sel.add("count", self.rogue_selection.threads.count)
-        threads_sel.add("threshold", self.rogue_selection.threads.threshold)
-        rogue.add("threads", threads_sel)
-
-        csw_sel = tomlkit.table()
-        csw_sel.add("enabled", self.rogue_selection.csw.enabled)
-        csw_sel.add("count", self.rogue_selection.csw.count)
-        csw_sel.add("threshold", self.rogue_selection.csw.threshold)
-        rogue.add("csw", csw_sel)
-
-        sysbsd_sel = tomlkit.table()
-        sysbsd_sel.add("enabled", self.rogue_selection.sysbsd.enabled)
-        sysbsd_sel.add("count", self.rogue_selection.sysbsd.count)
-        sysbsd_sel.add("threshold", self.rogue_selection.sysbsd.threshold)
-        rogue.add("sysbsd", sysbsd_sel)
-
-        pageins_sel = tomlkit.table()
-        pageins_sel.add("enabled", self.rogue_selection.pageins.enabled)
-        pageins_sel.add("count", self.rogue_selection.pageins.count)
-        pageins_sel.add("threshold", self.rogue_selection.pageins.threshold)
-        rogue.add("pageins", pageins_sel)
-
-        state_sel = tomlkit.table()
-        state_sel.add("enabled", self.rogue_selection.state.enabled)
-        state_sel.add("count", self.rogue_selection.state.count)
-        state_sel.add("states", self.rogue_selection.state.states)
-        rogue.add("state", state_sel)
-
-        doc.add("rogue_selection", rogue)
+        sections = [
+            "sampling",
+            "retention",
+            "alerts",
+            "suspects",
+            "forensics",
+            "sentinel",
+            "bands",
+            "scoring",
+            "rogue_selection",
+        ]
+        for name in sections:
+            doc.add(name, _dataclass_to_table(getattr(self, name)))
+            doc.add(tomlkit.nl())
 
         path.write_text(tomlkit.dumps(doc))
 
@@ -431,8 +312,11 @@ class Config:
         if not path.exists():
             return config
 
-        with open(path) as f:
-            data = tomlkit.load(f)
+        try:
+            with open(path) as f:
+                data = tomlkit.load(f)
+        except tomlkit.exceptions.TOMLKitError as e:
+            raise ValueError(f"Failed to parse config file {path}: {e}") from e
 
         sampling_data = data.get("sampling", {})
         retention_data = data.get("retention", {})

@@ -566,9 +566,9 @@ async def test_daemon_main_loop_collects_samples(patched_config_paths, monkeypat
     pushed_samples = []
     original_push = daemon.ring_buffer.push
 
-    def track_push(samples, tier):
-        pushed_samples.append((samples, tier))
-        return original_push(samples, tier)
+    def track_push(samples):
+        pushed_samples.append(samples)
+        return original_push(samples)
 
     monkeypatch.setattr(daemon.ring_buffer, "push", track_push)
 
@@ -647,8 +647,8 @@ async def test_daemon_main_loop_collects_samples(patched_config_paths, monkeypat
 
     # Should have pushed 2 samples (the 3rd triggers shutdown)
     assert len(pushed_samples) == 2
-    assert pushed_samples[0][0].max_score == 25
-    assert pushed_samples[1][0].max_score == 45
+    assert pushed_samples[0].max_score == 25
+    assert pushed_samples[1].max_score == 45
 
 
 # === Task 8: ProcessTracker Integration Tests ===

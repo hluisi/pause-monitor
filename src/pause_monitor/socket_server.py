@@ -32,7 +32,7 @@ class SocketServer:
 
     Message Types:
     - initial_state: Sent on client connect with recent buffer samples
-    - sample: Sent via broadcast() with current ProcessSamples and tier
+    - sample: Sent via broadcast() with current ProcessSamples
     """
 
     def __init__(
@@ -98,7 +98,7 @@ class SocketServer:
 
         log.info("socket_server_stopped")
 
-    async def broadcast(self, samples: ProcessSamples, tier: int) -> None:
+    async def broadcast(self, samples: ProcessSamples) -> None:
         """Broadcast sample to all connected TUI clients.
 
         Called from main loop after each sample.
@@ -106,7 +106,6 @@ class SocketServer:
 
         Args:
             samples: ProcessSamples with scored rogues
-            tier: Current tier (1, 2, or 3)
         """
         if not self._clients:
             return
@@ -114,7 +113,6 @@ class SocketServer:
         message = {
             "type": "sample",
             "timestamp": samples.timestamp.isoformat(),
-            "tier": tier,
             "elapsed_ms": samples.elapsed_ms,
             "process_count": samples.process_count,
             "max_score": samples.max_score,
@@ -179,7 +177,6 @@ class SocketServer:
             "samples": [
                 {
                     "timestamp": s.samples.timestamp.isoformat(),
-                    "tier": s.tier,
                     "elapsed_ms": s.samples.elapsed_ms,
                     "process_count": s.samples.process_count,
                     "max_score": s.samples.max_score,
@@ -187,7 +184,6 @@ class SocketServer:
                 }
                 for s in ring_samples[-30:]  # Last 30 samples
             ],
-            "tier": latest.tier if latest else 1,
             "max_score": latest.samples.max_score if latest else 0,
             "sample_count": len(ring_samples),
         }

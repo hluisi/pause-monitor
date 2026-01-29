@@ -50,7 +50,6 @@ async def test_tui_connects_via_socket_when_daemon_running(short_tmp_path: Path)
             msg = {
                 "type": "initial_state",
                 "samples": [],
-                "tier": 1,
                 "max_score": 15,
                 "sample_count": 0,
             }
@@ -146,7 +145,6 @@ def test_tui_handle_socket_data_updates_score():
     data = {
         "type": "sample",
         "timestamp": "2026-01-24T12:00:00",
-        "tier": 2,
         "elapsed_ms": 50,
         "process_count": 500,
         "max_score": 75,
@@ -174,8 +172,8 @@ def test_tui_handle_socket_data_updates_score():
     # Verify score gauge was updated with max_score
     mock_gauge.update_score.assert_called_once_with(75)
 
-    # Verify sample info panel was updated
-    mock_sample_info.update_info.assert_called_once_with(2, 500, 15)
+    # Verify sample info panel was updated with max_score, process_count, sample_count
+    mock_sample_info.update_info.assert_called_once_with(75, 500, 15)
 
     # Verify processes panel was updated with rogues
     mock_processes.update_rogues.assert_called_once_with(data["rogues"])
@@ -210,7 +208,6 @@ def test_tui_handle_initial_state():
         "samples": [
             {
                 "timestamp": "2026-01-24T12:00:00",
-                "tier": 1,
                 "elapsed_ms": 45,
                 "process_count": 400,
                 "max_score": 25,
@@ -232,7 +229,6 @@ def test_tui_handle_initial_state():
                 ],
             },
         ],
-        "tier": 1,
         "max_score": 25,
         "sample_count": 1,
     }
@@ -242,8 +238,8 @@ def test_tui_handle_initial_state():
     # Verify score gauge was updated with max_score
     mock_gauge.update_score.assert_called_once_with(25)
 
-    # Verify sample info panel was updated
-    mock_sample_info.update_info.assert_called_once_with(1, 400, 1)
+    # Verify sample info panel was updated with max_score, process_count, sample_count
+    mock_sample_info.update_info.assert_called_once_with(25, 400, 1)
 
     # Verify processes panel was updated with rogues from last sample
     mock_processes.update_rogues.assert_called_once_with(data["samples"][-1]["rogues"])

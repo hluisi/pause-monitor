@@ -243,7 +243,7 @@ def test_ring_buffer_stores_process_samples():
             max_score=10 + i * 10,
             rogues=[make_test_process_score(pid=i, score=10 + i * 10)],
         )
-        buffer.push(samples, tier=1)
+        buffer.push(samples)
 
     assert len(buffer) == 5
 
@@ -263,13 +263,12 @@ def test_ring_buffer_freeze_captures_state():
             make_test_process_score(pid=2, command="proc2", score=60),
         ],
     )
-    buffer.push(samples, tier=2)
+    buffer.push(samples)
 
     frozen = buffer.freeze()
 
     # Verify frozen state
     assert len(frozen.samples) == 1
-    assert frozen.samples[0].tier == 2
     assert frozen.samples[0].samples.max_score == 75
     assert len(frozen.samples[0].samples.rogues) == 2
 
@@ -287,7 +286,7 @@ def test_ring_buffer_respects_max_samples():
             max_score=i * 10,
             rogues=[make_test_process_score(pid=i, score=i * 10)],
         )
-        buffer.push(samples, tier=1)
+        buffer.push(samples)
 
     assert len(buffer) == 3
 
@@ -334,11 +333,10 @@ async def test_full_collection_to_socket_cycle(monkeypatch, short_tmp_path, samp
         assert samples.max_score > 0
 
         # Push to ring buffer
-        tier = 2 if samples.max_score >= 35 else 1
-        buffer.push(samples, tier)
+        buffer.push(samples)
 
         # Broadcast to clients
-        await server.broadcast(samples, tier)
+        await server.broadcast(samples)
 
         # Verify client receives broadcast
         broadcast_data = await asyncio.wait_for(reader.readline(), timeout=2.0)
@@ -346,7 +344,6 @@ async def test_full_collection_to_socket_cycle(monkeypatch, short_tmp_path, samp
 
         assert broadcast_msg["type"] == "sample"
         assert broadcast_msg["max_score"] == samples.max_score
-        assert broadcast_msg["tier"] == tier
         assert broadcast_msg["process_count"] == samples.process_count
         assert len(broadcast_msg["rogues"]) == len(samples.rogues)
 
@@ -404,16 +401,16 @@ async def test_collection_storage_retrieval_cycle(monkeypatch, initialized_db, s
         assert orig.categories == retr.categories
 
 
-# --- Integration Test: Tier Determination ---
+# --- Integration Test: Score Range Verification ---
 
 
-# Test cases for tier determination:
-# (top_output, min_expected_score, max_expected_score, expected_tier)
+# Test cases for score range verification:
+# (top_output, min_expected_score, max_expected_score)
 # Scoring weights: cpu=25, state=20, pageins=15, mem=15, cmprs=10, csw=10, sysbsd=5
 # Normalization: cpu/100, pageins/1000, mem/8GB, cmprs/1GB, csw/100k, sysbsd/100k
-TIER_TEST_CASES = [
+SCORE_RANGE_TEST_CASES = [
     pytest.param(
-        # Low stress - should be tier 1 (score < 35)
+        # Low stress (score < 35)
         # 10% cpu = 2.5
         """
 PID    COMMAND          %CPU STATE    MEM    CMPRS  #TH    CSW        SYSBSD     PAGEINS
@@ -421,11 +418,10 @@ PID    COMMAND          %CPU STATE    MEM    CMPRS  #TH    CSW        SYSBSD    
 """,
         0,
         34,
-        1,
-        id="tier1-low-stress",
+        id="low-stress",
     ),
     pytest.param(
-        # Medium stress - should be tier 2 (35 <= score < 65)
+        # Medium stress (35 <= score < 65)
         # 100% cpu = 25, 500 pageins = 7.5, 4GB mem = 7.5, 100k csw = 10 = ~50
         """
 PID    COMMAND          %CPU STATE    MEM    CMPRS  #TH    CSW        SYSBSD     PAGEINS
@@ -433,11 +429,10 @@ PID    COMMAND          %CPU STATE    MEM    CMPRS  #TH    CSW        SYSBSD    
 """,
         35,
         64,
-        2,
-        id="tier2-medium-stress",
+        id="medium-stress",
     ),
     pytest.param(
-        # High stress (stuck + high metrics) - should be tier 3 (score >= 65)
+        # High stress (stuck + high metrics) (score >= 65)
         # 100% cpu = 25, stuck = 20, 1000 pageins = 15, 8GB mem = 15 = 75+
         """
 PID    COMMAND          %CPU STATE    MEM    CMPRS  #TH    CSW        SYSBSD     PAGEINS
@@ -445,18 +440,15 @@ PID    COMMAND          %CPU STATE    MEM    CMPRS  #TH    CSW        SYSBSD    
 """,
         65,
         100,
-        3,
-        id="tier3-high-stress",
+        id="high-stress",
     ),
 ]
 
 
-@pytest.mark.parametrize("top_output,min_score,max_score,expected_tier", TIER_TEST_CASES)
+@pytest.mark.parametrize("top_output,min_score,max_score", SCORE_RANGE_TEST_CASES)
 @pytest.mark.asyncio
-async def test_tier_determination_from_max_score(
-    monkeypatch, top_output, min_score, max_score, expected_tier
-):
-    """Tier should be determined by max_score thresholds (35/65)."""
+async def test_score_ranges(monkeypatch, top_output, min_score, max_score):
+    """Scoring should produce expected ranges for different stress levels."""
     config = Config()
     collector = TopCollector(config)
 
@@ -470,18 +462,6 @@ async def test_tier_determination_from_max_score(
     # Verify score is in expected range
     assert min_score <= samples.max_score <= max_score, (
         f"Expected score in [{min_score}, {max_score}], got {samples.max_score}"
-    )
-
-    # Determine tier based on thresholds
-    if samples.max_score >= 65:
-        actual_tier = 3
-    elif samples.max_score >= 35:
-        actual_tier = 2
-    else:
-        actual_tier = 1
-
-    assert actual_tier == expected_tier, (
-        f"Expected tier {expected_tier} for max_score={samples.max_score}, got tier {actual_tier}"
     )
 
 

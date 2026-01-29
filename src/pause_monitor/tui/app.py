@@ -14,85 +14,11 @@ from textual.widgets import DataTable, Footer, Header, Label, Static
 
 from pause_monitor.boottime import get_boot_time
 from pause_monitor.config import Config
+from pause_monitor.formatting import format_duration, format_duration_verbose
 from pause_monitor.socket_client import SocketClient
+from pause_monitor.storage import get_process_event_detail, get_process_events
 
 log = logging.getLogger(__name__)
-
-
-def _get_process_events(
-    conn: sqlite3.Connection, limit: int = 100, boot_time: int | None = None
-) -> list[dict]:
-    """Get process events from database.
-
-    Args:
-        conn: Database connection
-        limit: Maximum number of events to return
-        boot_time: Optional boot_time filter (if None, gets all)
-
-    Returns:
-        List of event dicts with id, pid, command, entry_time, exit_time,
-        entry_band, peak_band, peak_score
-    """
-    if boot_time is not None:
-        cursor = conn.execute(
-            """SELECT id, pid, command, entry_time, exit_time, entry_band, peak_band, peak_score
-               FROM process_events
-               WHERE boot_time = ?
-               ORDER BY entry_time DESC
-               LIMIT ?""",
-            (boot_time, limit),
-        )
-    else:
-        cursor = conn.execute(
-            """SELECT id, pid, command, entry_time, exit_time, entry_band, peak_band, peak_score
-               FROM process_events
-               ORDER BY entry_time DESC
-               LIMIT ?""",
-            (limit,),
-        )
-    return [
-        {
-            "id": r[0],
-            "pid": r[1],
-            "command": r[2],
-            "entry_time": r[3],
-            "exit_time": r[4],
-            "entry_band": r[5],
-            "peak_band": r[6],
-            "peak_score": r[7],
-        }
-        for r in cursor.fetchall()
-    ]
-
-
-def _get_process_event_by_id(conn: sqlite3.Connection, event_id: int) -> dict | None:
-    """Get a single process event by ID.
-
-    Returns:
-        Event dict with all fields, or None if not found
-    """
-    row = conn.execute(
-        """SELECT id, pid, command, boot_time, entry_time, exit_time,
-                  entry_band, peak_band, peak_score, peak_snapshot
-           FROM process_events WHERE id = ?""",
-        (event_id,),
-    ).fetchone()
-
-    if not row:
-        return None
-
-    return {
-        "id": row[0],
-        "pid": row[1],
-        "command": row[2],
-        "boot_time": row[3],
-        "entry_time": row[4],
-        "exit_time": row[5],
-        "entry_band": row[6],
-        "peak_band": row[7],
-        "peak_score": row[8],
-        "peak_snapshot": row[9],
-    }
 
 
 class StressGauge(Static):
@@ -138,7 +64,7 @@ class StressGauge(Static):
         self.remove_class("disconnected")
         self.update(f"Score: {score:3d}/100 {'█' * (score // 5)}{'░' * (20 - score // 5)}")
 
-        # Update styling based on tier thresholds
+        # Update styling based on score thresholds
         self.remove_class("elevated", "critical")
         if score >= self._critical_threshold:
             self.add_class("critical")
@@ -154,7 +80,7 @@ class StressGauge(Static):
 
 
 class SampleInfoPanel(Static):
-    """Panel showing current sample info (tier, process count, etc.)."""
+    """Panel showing current sample info (max score, process count, etc.)."""
 
     DEFAULT_CSS = """
     SampleInfoPanel {
@@ -171,7 +97,7 @@ class SampleInfoPanel(Static):
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
-        self._tier = 1
+        self._max_score = 0
         self._process_count = 0
         self._sample_count = 0
 
@@ -179,16 +105,15 @@ class SampleInfoPanel(Static):
         """Show initial disconnected state."""
         self.set_disconnected()
 
-    def update_info(self, tier: int, process_count: int, sample_count: int) -> None:
+    def update_info(self, max_score: int, process_count: int, sample_count: int) -> None:
         """Update displayed sample info."""
-        self._tier = tier
+        self._max_score = max_score
         self._process_count = process_count
         self._sample_count = sample_count
         self.remove_class("disconnected")
 
-        tier_labels = {1: "Normal", 2: "Elevated", 3: "Critical"}
         lines = [
-            f"Tier: {tier} ({tier_labels.get(tier, 'Unknown')})",
+            f"Max Score: {max_score}",
             f"Processes: {process_count}",
             f"Samples: {sample_count}",
         ]
@@ -343,7 +268,7 @@ class EventDetailScreen(Screen):
         import json
         from datetime import datetime
 
-        self._event = _get_process_event_by_id(self._conn, self.event_id)
+        self._event = get_process_event_detail(self._conn, self.event_id)
         if not self._event:
             yield Vertical(
                 Label("Event not found", classes="title"),
@@ -355,12 +280,10 @@ class EventDetailScreen(Screen):
         exit_time = datetime.fromtimestamp(event["exit_time"]) if event["exit_time"] else None
 
         # Calculate duration
+        duration_str = format_duration_verbose(event["entry_time"], event["exit_time"])
         if exit_time:
-            duration = (exit_time - entry_time).total_seconds()
-            duration_str = f"{duration:.1f}s"
             end_time_str = exit_time.strftime("%Y-%m-%d %H:%M:%S")
         else:
-            duration_str = "ongoing"
             end_time_str = "(ongoing)"
 
         # Parse peak snapshot
@@ -464,20 +387,14 @@ class EventsScreen(Screen):
             self._events = get_open_events(self._conn, boot_time)
         else:
             # Get all events from current boot
-            self._events = _get_process_events(self._conn, limit=100, boot_time=boot_time)
+            self._events = get_process_events(self._conn, boot_time=boot_time, limit=100)
 
         table = self.query_one("#events-list", DataTable)
         table.clear()
 
         now = time.time()
         for event in self._events:
-            # Calculate duration
-            if event.get("exit_time"):
-                duration = event["exit_time"] - event["entry_time"]
-                duration_str = f"{duration:.1f}s"
-            else:
-                duration = now - event["entry_time"]
-                duration_str = f"{duration:.0f}s*"  # * means ongoing
+            duration_str = format_duration(event["entry_time"], event.get("exit_time"), now=now)
 
             table.add_row(
                 str(event["id"]),
@@ -518,6 +435,186 @@ class EventsScreen(Screen):
         """Show all events from current boot."""
         self._open_only = False
         self._refresh_events()
+
+
+class HistoryScreen(Screen):
+    """Full-screen historical process events across all boots."""
+
+    BINDINGS = [
+        Binding("escape", "pop_screen", "Back"),
+        Binding("1", "filter_24h", "24h"),
+        Binding("7", "filter_7d", "7 days"),
+        Binding("3", "filter_30d", "30 days"),
+        Binding("a", "filter_all", "All time"),
+    ]
+
+    DEFAULT_CSS = """
+    HistoryScreen {
+        layout: vertical;
+    }
+
+    HistoryScreen > Container {
+        height: 100%;
+    }
+
+    HistoryScreen DataTable {
+        height: 1fr;
+    }
+
+    HistoryScreen .summary-bar {
+        height: auto;
+        min-height: 3;
+        background: $surface;
+        padding: 1;
+        border-bottom: solid $primary;
+    }
+
+    HistoryScreen .filter-bar {
+        height: 1;
+        background: $surface;
+        padding: 0 1;
+    }
+    """
+
+    # Time ranges in seconds
+    TIME_RANGES = {
+        "24h": 24 * 3600,
+        "7d": 7 * 24 * 3600,
+        "30d": 30 * 24 * 3600,
+        "all": None,
+    }
+
+    def __init__(self, conn: sqlite3.Connection):
+        super().__init__()
+        self._conn = conn
+        self._time_range: str = "24h"
+        self._events: list[dict] = []
+
+    def compose(self) -> ComposeResult:
+        """Build the history layout."""
+        yield Header()
+        yield Container(
+            Static("Loading...", id="summary", classes="summary-bar"),
+            Static("Filter: Last 24 hours", id="filter-label", classes="filter-bar"),
+            DataTable(id="history-list"),
+        )
+        yield Footer()
+
+    def on_mount(self) -> None:
+        """Set up the history table."""
+        table = self.query_one("#history-list", DataTable)
+        table.cursor_type = "row"
+        table.add_column("ID", width=5)
+        table.add_column("Command", width=20)
+        table.add_column("PID", width=8)
+        table.add_column("Peak", width=10)
+        table.add_column("Duration", width=10)
+        table.add_column("Score", width=6)
+        table.add_column("When", width=18)
+        self._refresh_history()
+
+    def _refresh_history(self) -> None:
+        """Refresh the history list from database."""
+        import time
+
+        # Calculate time cutoff
+        cutoff_seconds = self.TIME_RANGES[self._time_range]
+        time_cutoff = time.time() - cutoff_seconds if cutoff_seconds else None
+
+        self._events = get_process_events(
+            self._conn, boot_time=None, time_cutoff=time_cutoff, limit=500
+        )
+
+        table = self.query_one("#history-list", DataTable)
+        table.clear()
+
+        now = time.time()
+        for event in self._events:
+            duration_str = format_duration(event["entry_time"], event.get("exit_time"), now=now)
+
+            # Format when the event started
+            from datetime import datetime
+
+            entry_dt = datetime.fromtimestamp(event["entry_time"])
+            when_str = entry_dt.strftime("%m-%d %H:%M")
+
+            table.add_row(
+                str(event["id"]),
+                event["command"][:20],
+                str(event["pid"]),
+                event["peak_band"],
+                duration_str,
+                str(event["peak_score"]),
+                when_str,
+                key=str(event["id"]),
+            )
+
+        # Update summary
+        self._update_summary()
+
+        # Update filter label
+        filter_labels = {
+            "24h": "Last 24 hours",
+            "7d": "Last 7 days",
+            "30d": "Last 30 days",
+            "all": "All time",
+        }
+        filter_label = self.query_one("#filter-label", Static)
+        filter_label.update(f"Filter: {filter_labels[self._time_range]}")
+
+    def _update_summary(self) -> None:
+        """Update the summary statistics."""
+        summary = self.query_one("#summary", Static)
+
+        if not self._events:
+            summary.update("No events found")
+            return
+
+        # Calculate stats
+        peak_scores = [e["peak_score"] for e in self._events]
+        avg_score = sum(peak_scores) / len(peak_scores)
+
+        # Band breakdown
+        band_counts: dict[str, int] = {}
+        for event in self._events:
+            band = event["peak_band"]
+            band_counts[band] = band_counts.get(band, 0) + 1
+
+        band_str = "  ".join(f"{b}: {c}" for b, c in sorted(band_counts.items()))
+
+        # Total tracked time
+        total_duration = 0.0
+        for event in self._events:
+            if event["exit_time"]:
+                total_duration += event["exit_time"] - event["entry_time"]
+
+        duration_mins = total_duration / 60
+
+        lines = [
+            f"Events: {len(self._events)}  |  Avg: {avg_score:.0f}  |  Time: {duration_mins:.1f}m",
+            f"Bands: {band_str}" if band_str else "",
+        ]
+        summary.update("\n".join(line for line in lines if line))
+
+    def action_filter_24h(self) -> None:
+        """Filter to last 24 hours."""
+        self._time_range = "24h"
+        self._refresh_history()
+
+    def action_filter_7d(self) -> None:
+        """Filter to last 7 days."""
+        self._time_range = "7d"
+        self._refresh_history()
+
+    def action_filter_30d(self) -> None:
+        """Filter to last 30 days."""
+        self._time_range = "30d"
+        self._refresh_history()
+
+    def action_filter_all(self) -> None:
+        """Show all historical events."""
+        self._time_range = "all"
+        self._refresh_history()
 
 
 class PauseMonitorApp(App):
@@ -698,7 +795,6 @@ class PauseMonitorApp(App):
         # Extract max_score based on message type
         if msg_type == "initial_state":
             max_score = data.get("max_score", 0)
-            tier = data.get("tier", 1)
             sample_count = data.get("sample_count", 0)
             # For initial_state, get rogues from the last sample if available
             samples = data.get("samples", [])
@@ -706,7 +802,6 @@ class PauseMonitorApp(App):
             process_count = samples[-1].get("process_count", 0) if samples else 0
         else:  # sample message
             max_score = data.get("max_score", 0)
-            tier = data.get("tier", 1)
             sample_count = data.get("sample_count", 0)
             rogues = data.get("rogues", [])
             process_count = data.get("process_count", 0)
@@ -723,7 +818,7 @@ class PauseMonitorApp(App):
         # Update sample info panel
         try:
             sample_info = self.query_one("#sample-info", SampleInfoPanel)
-            sample_info.update_info(tier, process_count, sample_count)
+            sample_info.update_info(max_score, process_count, sample_count)
         except NoMatches:
             pass  # Widget not mounted yet
         except Exception:
@@ -762,20 +857,14 @@ class PauseMonitorApp(App):
 
         # Get recent process events from current boot
         boot_time = get_boot_time()
-        events = _get_process_events(self._conn, limit=10, boot_time=boot_time)
+        events = get_process_events(self._conn, boot_time=boot_time, limit=10)
 
         try:
             events_table = self.query_one("#events", EventsTable)
             events_table.clear()
             now = time.time()
             for event in events:
-                # Calculate duration
-                if event.get("exit_time"):
-                    duration = event["exit_time"] - event["entry_time"]
-                    duration_str = f"{duration:.1f}s"
-                else:
-                    duration = now - event["entry_time"]
-                    duration_str = f"{duration:.0f}s*"  # * means ongoing
+                duration_str = format_duration(event["entry_time"], event.get("exit_time"), now=now)
 
                 events_table.add_row(
                     event["command"][:15],
@@ -799,7 +888,10 @@ class PauseMonitorApp(App):
 
     def action_show_history(self) -> None:
         """Show history view."""
-        self.notify("History view not yet implemented")
+        if not self._conn:
+            self.notify("Database not connected", severity="error")
+            return
+        self.push_screen(HistoryScreen(self._conn))
 
 
 def run_tui(config: Config | None = None) -> None:

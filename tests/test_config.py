@@ -556,3 +556,17 @@ forensics_band = "hihg"
 
     with pytest.raises(ValueError, match="Invalid forensics_band"):
         Config.load(config_file)
+
+
+def test_config_load_raises_for_invalid_toml_syntax(tmp_path):
+    """Config.load() raises ValueError with file path for invalid TOML syntax."""
+    import pytest
+
+    config_file = tmp_path / "config.toml"
+    config_file.write_text("""
+[sampling
+normal_interval = 5
+""")
+
+    with pytest.raises(ValueError, match=f"Failed to parse config file {config_file}"):
+        Config.load(config_file)

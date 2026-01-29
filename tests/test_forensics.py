@@ -340,8 +340,8 @@ def test_forensics_capture_includes_ring_buffer(tmp_path):
     rogue = make_process_score(command="chrome", score=25, categories=frozenset({"cpu", "mem"}))
     samples1 = make_process_samples(rogues=[rogue], max_score=25)
     samples2 = make_process_samples(rogues=[rogue], max_score=25)
-    buffer.push(samples1, tier=1)
-    buffer.push(samples2, tier=2)
+    buffer.push(samples1)
+    buffer.push(samples2)
     frozen = buffer.freeze()
 
     # Create capture with buffer
@@ -358,11 +358,9 @@ def test_forensics_capture_includes_ring_buffer(tmp_path):
     # Verify sample structure
     sample = data["samples"][0]
     assert "timestamp" in sample
-    assert "tier" in sample
     assert "max_score" in sample
     assert "process_count" in sample
     assert "rogues" in sample
-    assert sample["tier"] == 1
     assert sample["max_score"] == 25
 
     # Verify rogues structure
@@ -382,7 +380,7 @@ def test_forensics_capture_ring_buffer_with_multiple_rogues(tmp_path):
         make_process_score(pid=456, command="python", cpu=30.0, score=20),
     ]
     samples = make_process_samples(rogues=rogues, max_score=30)
-    buffer.push(samples, tier=2)
+    buffer.push(samples)
     frozen = buffer.freeze()
 
     # Create capture and write
@@ -395,7 +393,6 @@ def test_forensics_capture_ring_buffer_with_multiple_rogues(tmp_path):
     # Verify samples structure
     assert len(data["samples"]) == 1
     sample = data["samples"][0]
-    assert sample["tier"] == 2
     assert sample["max_score"] == 30
 
     # Verify rogues
@@ -411,7 +408,7 @@ def test_identify_culprits_from_buffer():
         pid=100, command="Chrome", score=30, categories=frozenset({"cpu", "mem"})
     )
     samples = make_process_samples(rogues=[rogue])
-    ring_sample = RingSample(samples=samples, tier=2)
+    ring_sample = RingSample(samples=samples)
     contents = BufferContents(samples=(ring_sample,))
 
     culprits = identify_culprits(contents)
@@ -430,7 +427,7 @@ def test_identify_culprits_multiple_processes():
         make_process_score(pid=200, command="Chrome", score=15),
     ]
     samples = make_process_samples(rogues=rogues)
-    ring_sample = RingSample(samples=samples, tier=2)
+    ring_sample = RingSample(samples=samples)
     contents = BufferContents(samples=(ring_sample,))
 
     culprits = identify_culprits(contents)
@@ -476,7 +473,7 @@ def test_identify_culprits_uses_peak_values():
             timestamp=now,
         ),
     ]
-    ring_samples = tuple(RingSample(samples=s, tier=2) for s in samples)
+    ring_samples = tuple(RingSample(samples=s) for s in samples)
     contents = BufferContents(samples=ring_samples)
 
     culprits = identify_culprits(contents)
@@ -492,7 +489,7 @@ def test_identify_culprits_returns_all_sorted_by_score():
     """identify_culprits returns all rogues sorted by score descending."""
     rogues = [make_process_score(pid=i, command=f"proc{i}", score=100 - i) for i in range(10)]
     samples = make_process_samples(rogues=rogues)
-    ring_sample = RingSample(samples=samples, tier=2)
+    ring_sample = RingSample(samples=samples)
     contents = BufferContents(samples=(ring_sample,))
 
     culprits = identify_culprits(contents)
@@ -508,7 +505,7 @@ def test_identify_culprits_returns_all_sorted_by_score():
 def test_identify_culprits_no_rogues():
     """identify_culprits handles samples with no rogues."""
     samples = make_process_samples(rogues=[])
-    ring_sample = RingSample(samples=samples, tier=1)
+    ring_sample = RingSample(samples=samples)
     contents = BufferContents(samples=(ring_sample,))
 
     culprits = identify_culprits(contents)
@@ -527,7 +524,7 @@ def test_identify_culprits_differentiates_by_pid():
         make_process_score(pid=1002, command="Chrome", score=25),
     ]
     samples = make_process_samples(rogues=rogues)
-    ring_sample = RingSample(samples=samples, tier=2)
+    ring_sample = RingSample(samples=samples)
     contents = BufferContents(samples=(ring_sample,))
 
     culprits = identify_culprits(contents)
@@ -565,7 +562,7 @@ def test_identify_culprits_peak_by_pid_not_command():
             timestamp=now,
         ),
     ]
-    ring_samples = tuple(RingSample(samples=s, tier=2) for s in samples)
+    ring_samples = tuple(RingSample(samples=s) for s in samples)
     contents = BufferContents(samples=ring_samples)
 
     culprits = identify_culprits(contents)

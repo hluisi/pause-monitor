@@ -37,7 +37,7 @@ def status() -> None:
 
     from pause_monitor.boottime import get_boot_time
     from pause_monitor.config import Config
-    from pause_monitor.storage import get_connection, get_open_events
+    from pause_monitor.storage import DatabaseNotAvailable, get_open_events, require_database
 
     config = Config.load()
 
@@ -45,29 +45,25 @@ def status() -> None:
     daemon_running = config.socket_path.exists()
     click.echo(f"Daemon: {'running' if daemon_running else 'stopped'}")
 
-    if not config.db_path.exists():
-        click.echo("Database not found. Run 'pause-monitor daemon' first.")
-        return
-
-    conn = get_connection(config.db_path)
     try:
-        boot_time = get_boot_time()
-        open_events = get_open_events(conn, boot_time)
+        with require_database(config.db_path) as conn:
+            boot_time = get_boot_time()
+            open_events = get_open_events(conn, boot_time)
 
-        if not open_events:
-            click.echo("No active process tracking.")
-            return
+            if not open_events:
+                click.echo("No active process tracking.")
+                return
 
-        click.echo(f"\nActive tracked processes: {len(open_events)}")
-        for event in open_events:
-            duration = time.time() - event["entry_time"]
-            duration_str = f"{duration:.0f}s"
-            click.echo(
-                f"  - {event['command']} (PID {event['pid']}): "
-                f"{duration_str} in {event['peak_band']} (score {event['peak_score']})"
-            )
-    finally:
-        conn.close()
+            click.echo(f"\nActive tracked processes: {len(open_events)}")
+            for event in open_events:
+                duration = time.time() - event["entry_time"]
+                duration_str = f"{duration:.0f}s"
+                click.echo(
+                    f"  - {event['command']} (PID {event['pid']}): "
+                    f"{duration_str} in {event['peak_band']} (score {event['peak_score']})"
+                )
+    except DatabaseNotAvailable:
+        return
 
 
 @main.group(invoke_without_command=True)
@@ -84,7 +80,12 @@ def events(ctx, limit: int, open_only: bool) -> None:
 
     from pause_monitor.boottime import get_boot_time
     from pause_monitor.config import Config
-    from pause_monitor.storage import get_connection, get_open_events
+    from pause_monitor.storage import (
+        DatabaseNotAvailable,
+        get_open_events,
+        get_process_events,
+        require_database,
+    )
 
     ctx.ensure_object(dict)
     ctx.obj["config"] = Config.load()
@@ -95,66 +96,39 @@ def events(ctx, limit: int, open_only: bool) -> None:
 
     config = ctx.obj["config"]
 
-    if not config.db_path.exists():
-        click.echo("Database not found. Run 'pause-monitor daemon' first.")
-        return
-
-    conn = get_connection(config.db_path)
     try:
-        boot_time = get_boot_time()
+        with require_database(config.db_path) as conn:
+            boot_time = get_boot_time()
 
-        if open_only:
-            # Only show open events
-            events_list = get_open_events(conn, boot_time)
-        else:
-            # Show all events from current boot (both open and closed)
-            cursor = conn.execute(
-                """SELECT id, pid, command, entry_time, exit_time, entry_band, peak_band, peak_score
-                   FROM process_events
-                   WHERE boot_time = ?
-                   ORDER BY entry_time DESC
-                   LIMIT ?""",
-                (boot_time, limit),
-            )
-            events_list = [
-                {
-                    "id": r[0],
-                    "pid": r[1],
-                    "command": r[2],
-                    "entry_time": r[3],
-                    "exit_time": r[4],
-                    "entry_band": r[5],
-                    "peak_band": r[6],
-                    "peak_score": r[7],
-                }
-                for r in cursor.fetchall()
-            ]
-
-        if not events_list:
-            click.echo("No events recorded.")
-            return
-
-        click.echo(
-            f"{'ID':>5}  {'Command':20}  {'PID':>7}  {'Duration':>10}  "
-            f"{'Peak Band':>10}  {'Score':>6}"
-        )
-        click.echo("-" * 75)
-
-        now = time.time()
-        for event in events_list:
-            if event.get("exit_time"):
-                duration = event["exit_time"] - event["entry_time"]
-                duration_str = f"{duration:.1f}s"
+            if open_only:
+                # Only show open events
+                events_list = get_open_events(conn, boot_time)
             else:
-                duration = now - event["entry_time"]
-                duration_str = f"{duration:.0f}s*"  # * means ongoing
+                # Show all events from current boot (both open and closed)
+                events_list = get_process_events(conn, boot_time=boot_time, limit=limit)
+
+            if not events_list:
+                click.echo("No events recorded.")
+                return
 
             click.echo(
-                f"{event['id']:>5}  {event['command'][:20]:20}  {event['pid']:>7}  "
-                f"{duration_str:>10}  {event['peak_band']:>10}  {event['peak_score']:>6}"
+                f"{'ID':>5}  {'Command':20}  {'PID':>7}  {'Duration':>10}  "
+                f"{'Peak Band':>10}  {'Score':>6}"
             )
-    finally:
-        conn.close()
+            click.echo("-" * 75)
+
+            from pause_monitor.formatting import format_duration
+
+            now = time.time()
+            for event in events_list:
+                duration_str = format_duration(event["entry_time"], event.get("exit_time"), now=now)
+
+                click.echo(
+                    f"{event['id']:>5}  {event['command'][:20]:20}  {event['pid']:>7}  "
+                    f"{duration_str:>10}  {event['peak_band']:>10}  {event['peak_score']:>6}"
+                )
+    except DatabaseNotAvailable:
+        return
 
 
 @events.command("show")
@@ -165,55 +139,42 @@ def events_show(ctx, event_id: int) -> None:
     import json
     from datetime import datetime
 
-    from pause_monitor.storage import get_connection
+    from pause_monitor.storage import get_process_event_detail, require_database
 
     config = ctx.obj["config"]
 
-    if not config.db_path.exists():
-        click.echo("Error: Database not found", err=True)
-        raise SystemExit(1)
+    with require_database(config.db_path, exit_on_missing=True) as conn:
+        event = get_process_event_detail(conn, event_id)
 
-    conn = get_connection(config.db_path)
-    try:
-        row = conn.execute(
-            """SELECT id, pid, command, boot_time, entry_time, exit_time,
-                      entry_band, peak_band, peak_score, peak_snapshot
-               FROM process_events WHERE id = ?""",
-            (event_id,),
-        ).fetchone()
-
-        if not row:
+        if not event:
             click.echo(f"Error: Event {event_id} not found", err=True)
             raise SystemExit(1)
 
-        entry_time = datetime.fromtimestamp(row[4])
-        exit_time = datetime.fromtimestamp(row[5]) if row[5] else None
+        from pause_monitor.formatting import format_duration_verbose
 
-        if exit_time:
-            duration = (exit_time - entry_time).total_seconds()
-            duration_str = f"{duration:.1f}s"
-        else:
-            duration_str = "ongoing"
+        entry_time = datetime.fromtimestamp(event["entry_time"])
+        exit_time = datetime.fromtimestamp(event["exit_time"]) if event["exit_time"] else None
+        duration_str = format_duration_verbose(event["entry_time"], event["exit_time"])
 
-        click.echo(f"Process Event #{row[0]}")
-        click.echo(f"Command: {row[2]}")
-        click.echo(f"PID: {row[1]}")
-        click.echo(f"Entry: {entry_time} ({row[6]} band)")
+        click.echo(f"Process Event #{event['id']}")
+        click.echo(f"Command: {event['command']}")
+        click.echo(f"PID: {event['pid']}")
+        click.echo(f"Entry: {entry_time} ({event['entry_band']} band)")
         if exit_time:
             click.echo(f"Exit: {exit_time}")
         click.echo(f"Duration: {duration_str}")
-        click.echo(f"Peak Band: {row[7]}")
-        click.echo(f"Peak Score: {row[8]}")
+        click.echo(f"Peak Band: {event['peak_band']}")
+        click.echo(f"Peak Score: {event['peak_score']}")
 
         # Show peak snapshot
-        if row[9]:
+        if event["peak_snapshot"]:
             click.echo("\nPeak Snapshot:")
             try:
-                snapshot = json.loads(row[9])
+                snapshot = json.loads(event["peak_snapshot"])
                 for key, val in snapshot.items():
                     click.echo(f"  {key}: {val}")
             except json.JSONDecodeError:
-                click.echo(f"  {row[9]}")
+                click.echo(f"  {event['peak_snapshot']}")
 
         # Show any snapshots
         snapshots = conn.execute(
@@ -225,8 +186,6 @@ def events_show(ctx, event_id: int) -> None:
             click.echo(f"\nSnapshots: {len(snapshots)}")
             for stype, sdata in snapshots:
                 click.echo(f"  [{stype}] {sdata[:100]}...")
-    finally:
-        conn.close()
 
 
 @main.command()
@@ -242,101 +201,96 @@ def history(hours: int, fmt: str) -> None:
     from datetime import datetime
 
     from pause_monitor.config import Config
-    from pause_monitor.storage import get_connection
+    from pause_monitor.storage import DatabaseNotAvailable, get_process_events, require_database
 
     config = Config.load()
 
-    if not config.db_path.exists():
-        click.echo("Database not found. Run 'pause-monitor daemon' first.")
-        return
-
-    conn = get_connection(config.db_path)
     try:
-        # Get events from time range
-        cutoff = time.time() - (hours * 3600)
-        cursor = conn.execute(
-            """SELECT id, pid, command, entry_time, exit_time, entry_band, peak_band, peak_score
-               FROM process_events
-               WHERE entry_time >= ?
-               ORDER BY entry_time DESC
-               LIMIT 1000""",
-            (cutoff,),
-        )
-        events = cursor.fetchall()
+        with require_database(config.db_path) as conn:
+            # Get events from time range
+            cutoff = time.time() - (hours * 3600)
+            events = get_process_events(conn, time_cutoff=cutoff, limit=1000)
 
-        if not events:
-            click.echo(f"No events in the last {hours} hour{'s' if hours != 1 else ''}.")
-            return
+            if not events:
+                click.echo(f"No events in the last {hours} hour{'s' if hours != 1 else ''}.")
+                return
 
-        if fmt == "json":
-            data = []
-            for row in events:
-                entry_time = datetime.fromtimestamp(row[3])
-                exit_time = datetime.fromtimestamp(row[4]) if row[4] else None
-                duration = (row[4] - row[3]) if row[4] else None
-                data.append(
-                    {
-                        "id": row[0],
-                        "pid": row[1],
-                        "command": row[2],
-                        "entry": entry_time.isoformat(),
-                        "exit": exit_time.isoformat() if exit_time else None,
-                        "duration_sec": duration,
-                        "entry_band": row[5],
-                        "peak_band": row[6],
-                        "peak_score": row[7],
-                    }
-                )
-            click.echo(json.dumps(data, indent=2))
-        elif fmt == "csv":
-            click.echo("id,pid,command,entry,exit,duration_sec,entry_band,peak_band,peak_score")
-            for row in events:
-                entry_time = datetime.fromtimestamp(row[3])
-                exit_time = datetime.fromtimestamp(row[4]) if row[4] else None
-                duration = f"{row[4] - row[3]:.1f}" if row[4] else ""
+            from pause_monitor.formatting import calculate_duration
+
+            if fmt == "json":
+                data = []
+                for event in events:
+                    entry_time = datetime.fromtimestamp(event["entry_time"])
+                    exit_time = (
+                        datetime.fromtimestamp(event["exit_time"]) if event["exit_time"] else None
+                    )
+                    duration = calculate_duration(event["entry_time"], event["exit_time"])
+                    data.append(
+                        {
+                            "id": event["id"],
+                            "pid": event["pid"],
+                            "command": event["command"],
+                            "entry": entry_time.isoformat(),
+                            "exit": exit_time.isoformat() if exit_time else None,
+                            "duration_sec": duration,
+                            "entry_band": event["entry_band"],
+                            "peak_band": event["peak_band"],
+                            "peak_score": event["peak_score"],
+                        }
+                    )
+                click.echo(json.dumps(data, indent=2))
+            elif fmt == "csv":
+                click.echo("id,pid,command,entry,exit,duration_sec,entry_band,peak_band,peak_score")
+                for event in events:
+                    entry_time = datetime.fromtimestamp(event["entry_time"])
+                    exit_time = (
+                        datetime.fromtimestamp(event["exit_time"]) if event["exit_time"] else None
+                    )
+                    dur = calculate_duration(event["entry_time"], event["exit_time"])
+                    duration = f"{dur:.1f}" if dur is not None else ""
+                    click.echo(
+                        f"{event['id']},{event['pid']},{event['command']},{entry_time.isoformat()},"
+                        f"{exit_time.isoformat() if exit_time else ''},"
+                        f"{duration},{event['entry_band']},{event['peak_band']},{event['peak_score']}"
+                    )
+            else:
+                # Summary stats
+                click.echo(f"Events: {len(events)}")
+                first_time = datetime.fromtimestamp(events[-1]["entry_time"])
+                last_time = datetime.fromtimestamp(events[0]["entry_time"])
                 click.echo(
-                    f"{row[0]},{row[1]},{row[2]},{entry_time.isoformat()},"
-                    f"{exit_time.isoformat() if exit_time else ''},"
-                    f"{duration},{row[5]},{row[6]},{row[7]}"
+                    f"Time range: {first_time.strftime('%Y-%m-%d %H:%M')} "
+                    f"to {last_time.strftime('%Y-%m-%d %H:%M')}"
                 )
-        else:
-            # Summary stats
-            click.echo(f"Events: {len(events)}")
-            first_time = datetime.fromtimestamp(events[-1][3])
-            last_time = datetime.fromtimestamp(events[0][3])
-            click.echo(
-                f"Time range: {first_time.strftime('%Y-%m-%d %H:%M')} "
-                f"to {last_time.strftime('%Y-%m-%d %H:%M')}"
-            )
 
-            # Peak score stats
-            peak_scores = [row[7] for row in events]
-            click.echo(
-                f"Peak scores - Min: {min(peak_scores)}, Max: {max(peak_scores)}, "
-                f"Avg: {sum(peak_scores) / len(peak_scores):.1f}"
-            )
+                # Peak score stats
+                peak_scores = [event["peak_score"] for event in events]
+                click.echo(
+                    f"Peak scores - Min: {min(peak_scores)}, Max: {max(peak_scores)}, "
+                    f"Avg: {sum(peak_scores) / len(peak_scores):.1f}"
+                )
 
-            # Band breakdown
-            band_counts: dict[str, int] = {}
-            for row in events:
-                band = row[6]  # peak_band
-                band_counts[band] = band_counts.get(band, 0) + 1
+                # Band breakdown
+                band_counts: dict[str, int] = {}
+                for event in events:
+                    band = event["peak_band"]
+                    band_counts[band] = band_counts.get(band, 0) + 1
 
-            click.echo("\nPeak band breakdown:")
-            for band in ["low", "medium", "elevated", "high", "critical"]:
-                if band in band_counts:
-                    click.echo(f"  {band}: {band_counts[band]} events")
+                click.echo("\nPeak band breakdown:")
+                for band in ["low", "medium", "elevated", "high", "critical"]:
+                    if band in band_counts:
+                        click.echo(f"  {band}: {band_counts[band]} events")
 
-            # Total tracked time
-            total_duration = 0.0
-            for row in events:
-                if row[4]:  # exit_time
-                    total_duration += row[4] - row[3]
-            if total_duration > 0:
-                mins = total_duration / 60
-                click.echo(f"\nTotal tracked time: {total_duration:.0f}s ({mins:.1f}m)")
-    finally:
-        conn.close()
+                # Total tracked time
+                total_duration = 0.0
+                for event in events:
+                    if event["exit_time"]:
+                        total_duration += event["exit_time"] - event["entry_time"]
+                if total_duration > 0:
+                    mins = total_duration / 60
+                    click.echo(f"\nTotal tracked time: {total_duration:.0f}s ({mins:.1f}m)")
+    except DatabaseNotAvailable:
+        return
 
 
 @main.command()
@@ -356,7 +310,7 @@ def prune(samples_days: int | None, events_days: int | None, dry_run: bool, forc
     config = Config.load()
 
     if not config.db_path.exists():
-        click.echo("Database not found.")
+        click.echo("Database not found. Run 'pause-monitor daemon' first.")
         return
 
     samples_days = samples_days or config.retention.samples_days

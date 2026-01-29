@@ -73,7 +73,6 @@ class ForensicsCapture:
             "samples": [
                 {
                     "timestamp": s.samples.timestamp.isoformat(),
-                    "tier": s.tier,
                     "max_score": s.samples.max_score,
                     "process_count": s.samples.process_count,
                     "rogues": [p.to_dict() for p in s.samples.rogues],

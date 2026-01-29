@@ -2,8 +2,10 @@
 
 import sqlite3
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Generator
 
 import structlog
 
@@ -86,6 +88,48 @@ def init_database(db_path: Path) -> None:
 def get_connection(db_path: Path) -> sqlite3.Connection:
     """Get a database connection."""
     return sqlite3.connect(db_path)
+
+
+class DatabaseNotAvailable(Exception):
+    """Raised when database doesn't exist and command should exit gracefully."""
+
+    pass
+
+
+@contextmanager
+def require_database(
+    db_path: Path, *, exit_on_missing: bool = False
+) -> Generator[sqlite3.Connection, None, None]:
+    """Context manager for commands requiring database access.
+
+    Handles database existence check and connection lifecycle.
+
+    Args:
+        db_path: Path to the database file
+        exit_on_missing: If True, raise SystemExit(1) on missing database.
+                        If False, raise DatabaseNotAvailable.
+
+    Yields:
+        sqlite3.Connection: Database connection
+
+    Raises:
+        DatabaseNotAvailable: If database doesn't exist and exit_on_missing is False
+        SystemExit: If database doesn't exist and exit_on_missing is True
+    """
+    import click
+
+    if not db_path.exists():
+        if exit_on_missing:
+            click.echo("Error: Database not found", err=True)
+            raise SystemExit(1)
+        click.echo("Database not found. Run 'pause-monitor daemon' first.")
+        raise DatabaseNotAvailable()
+
+    conn = get_connection(db_path)
+    try:
+        yield conn
+    finally:
+        conn.close()
 
 
 def get_schema_version(conn: sqlite3.Connection) -> int:
@@ -288,6 +332,95 @@ def get_open_events(conn: sqlite3.Connection, boot_time: int) -> list[dict]:
         }
         for r in cursor.fetchall()
     ]
+
+
+def get_process_events(
+    conn: sqlite3.Connection,
+    boot_time: int | None = None,
+    time_cutoff: float | None = None,
+    limit: int = 100,
+) -> list[dict]:
+    """Get process events with optional filtering.
+
+    Args:
+        conn: Database connection
+        boot_time: Filter to events from this boot (if None, gets all boots)
+        time_cutoff: Filter to events with entry_time >= this value
+        limit: Maximum number of events to return
+
+    Returns:
+        List of event dicts with id, pid, command, entry_time, exit_time,
+        entry_band, peak_band, peak_score
+    """
+    base_query = """SELECT id, pid, command, entry_time, exit_time,
+                           entry_band, peak_band, peak_score
+                    FROM process_events"""
+    conditions = []
+    params: list = []
+
+    if boot_time is not None:
+        conditions.append("boot_time = ?")
+        params.append(boot_time)
+
+    if time_cutoff is not None:
+        conditions.append("entry_time >= ?")
+        params.append(time_cutoff)
+
+    if conditions:
+        base_query += " WHERE " + " AND ".join(conditions)
+
+    base_query += " ORDER BY entry_time DESC LIMIT ?"
+    params.append(limit)
+
+    cursor = conn.execute(base_query, params)
+    return [
+        {
+            "id": r[0],
+            "pid": r[1],
+            "command": r[2],
+            "entry_time": r[3],
+            "exit_time": r[4],
+            "entry_band": r[5],
+            "peak_band": r[6],
+            "peak_score": r[7],
+        }
+        for r in cursor.fetchall()
+    ]
+
+
+def get_process_event_detail(conn: sqlite3.Connection, event_id: int) -> dict | None:
+    """Get detailed information for a single process event.
+
+    Args:
+        conn: Database connection
+        event_id: The event ID to retrieve
+
+    Returns:
+        Event dict with all fields (including boot_time, peak_snapshot),
+        or None if not found
+    """
+    row = conn.execute(
+        """SELECT id, pid, command, boot_time, entry_time, exit_time,
+                  entry_band, peak_band, peak_score, peak_snapshot
+           FROM process_events WHERE id = ?""",
+        (event_id,),
+    ).fetchone()
+
+    if not row:
+        return None
+
+    return {
+        "id": row[0],
+        "pid": row[1],
+        "command": row[2],
+        "boot_time": row[3],
+        "entry_time": row[4],
+        "exit_time": row[5],
+        "entry_band": row[6],
+        "peak_band": row[7],
+        "peak_score": row[8],
+        "peak_snapshot": row[9],
+    }
 
 
 def close_process_event(conn: sqlite3.Connection, event_id: int, exit_time: float) -> None:

@@ -96,7 +96,7 @@ async def test_socket_server_streams_initial_state_to_client(short_tmp_path):
         max_score=75,
         rogues=[make_test_process_score(pid=123, command="heavy", score=75)],
     )
-    buffer.push(samples, tier=2)
+    buffer.push(samples)
 
     server = SocketServer(socket_path=socket_path, ring_buffer=buffer)
     await server.start()
@@ -111,7 +111,6 @@ async def test_socket_server_streams_initial_state_to_client(short_tmp_path):
 
         assert message["type"] == "initial_state"
         assert "samples" in message
-        assert "tier" in message
         assert len(message["samples"]) == 1
         assert message["samples"][0]["max_score"] == 75
         assert len(message["samples"][0]["rogues"]) == 1
@@ -149,14 +148,13 @@ async def test_socket_server_broadcast_to_clients(short_tmp_path):
                 make_test_process_score(pid=456, command="busy", score=80, cpu=90.0),
             ],
         )
-        await server.broadcast(samples, tier=2)
+        await server.broadcast(samples)
 
         # Read broadcast message
         data = await asyncio.wait_for(reader.readline(), timeout=2.0)
         message = json.loads(data.decode())
 
         assert message["type"] == "sample"
-        assert message["tier"] == 2
         assert message["max_score"] == 80
         assert message["process_count"] == 150
         assert message["elapsed_ms"] == 1500
@@ -212,7 +210,7 @@ async def test_socket_server_broadcast_no_clients(short_tmp_path):
     try:
         # Should not raise when broadcasting with no clients
         samples = make_test_samples()
-        await server.broadcast(samples, tier=1)
+        await server.broadcast(samples)
     finally:
         await server.stop()
 
@@ -257,7 +255,7 @@ async def test_socket_server_multiple_clients(short_tmp_path):
 
         # Broadcast with ProcessSamples
         samples = make_test_samples(max_score=65)
-        await server.broadcast(samples, tier=1)
+        await server.broadcast(samples)
 
         # Both clients should receive
         data1 = await asyncio.wait_for(reader1.readline(), timeout=2.0)

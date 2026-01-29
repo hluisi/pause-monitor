@@ -19,7 +19,6 @@ class RingSample:
     """
 
     samples: ProcessSamples
-    tier: int
 
 
 @dataclass(frozen=True)
@@ -52,14 +51,9 @@ class RingBuffer:
         """Read-only access to samples (returns a copy)."""
         return list(self._samples)
 
-    def push(self, samples: ProcessSamples, tier: int) -> None:
+    def push(self, samples: ProcessSamples) -> None:
         """Add a sample to the buffer."""
-        self._samples.append(
-            RingSample(
-                samples=samples,
-                tier=tier,
-            )
-        )
+        self._samples.append(RingSample(samples=samples))
 
     def clear(self) -> None:
         """Empty the buffer."""
