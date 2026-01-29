@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from datetime import datetime
 
 import structlog
+from termcolor import colored
 
 from pause_monitor.boottime import get_boot_time
 from pause_monitor.collector import TopCollector
@@ -434,19 +435,21 @@ class Daemon:
                 for pid in current_pids - previous_pids:
                     rogue = next(r for r in samples.rogues if r.pid == pid)
                     cats = ",".join(sorted(rogue.categories))
-                    log.info(
-                        f"rogue_entered: {rogue.command}",
-                        score=rogue.score,
-                        pid=pid,
-                        categories=cats,
+                    msg = (
+                        f"rogue_entered: {colored(rogue.command, 'cyan')} "
+                        f"{colored(f'({rogue.score})', 'yellow')} "
+                        f"{colored(f'pid={pid}', 'dark_grey')} "
+                        f"{colored(f'[{cats}]', 'blue')}"
                     )
+                    log.info(msg)
 
                 # Processes exiting rogue selection
                 for pid in previous_pids - current_pids:
-                    log.info(
-                        f"rogue_exited: {previous_rogues[pid]}",
-                        pid=pid,
+                    msg = (
+                        f"rogue_exited: {colored(previous_rogues[pid], 'cyan')} "
+                        f"{colored(f'pid={pid}', 'dark_grey')}"
                     )
+                    log.info(msg)
 
                 previous_rogues = current_rogues
 
@@ -461,11 +464,12 @@ class Daemon:
                 elevated_threshold = self.config.bands.elevated
                 if samples.max_score >= elevated_threshold and samples.rogues:
                     top = samples.rogues[0]
-                    log.info(
-                        f"elevated_sample: {top.command}",
-                        score=samples.max_score,
-                        pid=top.pid,
+                    msg = (
+                        f"elevated_sample: {colored(top.command, 'cyan')} "
+                        f"{colored(f'({samples.max_score})', 'yellow')} "
+                        f"{colored(f'pid={top.pid}', 'dark_grey')}"
                     )
+                    log.info(msg)
 
                 # Update heartbeat stats
                 heartbeat_count += 1
