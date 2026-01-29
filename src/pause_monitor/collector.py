@@ -156,10 +156,13 @@ class TopCollector:
                 continue
 
             try:
+                command = parts[1]
+                if command == "top":
+                    continue  # Skip our own data collection process
                 processes.append(
                     {
                         "pid": int(parts[0]),
-                        "command": parts[1],
+                        "command": command,
                         "cpu": float(parts[2]),
                         "state": parts[3],
                         "mem": self._parse_memory(parts[4]),
