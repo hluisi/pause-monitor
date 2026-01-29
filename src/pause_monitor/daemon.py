@@ -435,19 +435,17 @@ class Daemon:
                     rogue = next(r for r in samples.rogues if r.pid == pid)
                     log.info(
                         "rogue_entered",
-                        pid=pid,
                         command=rogue.command,
                         score=rogue.score,
-                        cpu=rogue.cpu,
-                        categories=",".join(sorted(rogue.categories)),
+                        pid=pid,
                     )
 
                 # Processes exiting rogue selection
                 for pid in previous_pids - current_pids:
                     log.info(
                         "rogue_exited",
-                        pid=pid,
                         command=previous_rogues[pid],
+                        pid=pid,
                     )
 
                 previous_rogues = current_rogues
@@ -465,11 +463,9 @@ class Daemon:
                     top = samples.rogues[0]
                     log.info(
                         "elevated_sample",
+                        command=top.command,
                         score=samples.max_score,
-                        top_process=top.command,
-                        top_pid=top.pid,
-                        top_cpu=top.cpu,
-                        top_state=top.state,
+                        pid=top.pid,
                     )
 
                 # Update heartbeat stats
