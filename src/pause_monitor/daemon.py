@@ -414,6 +414,9 @@ class Daemon:
         # Near-miss threshold: log when ratio exceeds this but is below pause_threshold
         near_miss_ratio = 2.0
 
+        # Track rogue selection churn (PIDs entering/leaving selection)
+        previous_rogues: dict[int, str] = {}  # pid -> command
+
         while not self._shutdown_event.is_set():
             try:
                 # Collect samples (this takes ~1 second due to top -l 2)
@@ -421,6 +424,33 @@ class Daemon:
 
                 if self._shutdown_event.is_set():
                     break
+
+                # Log rogue selection churn (new/exited processes)
+                current_rogues = {r.pid: r.command for r in samples.rogues}
+                current_pids = set(current_rogues.keys())
+                previous_pids = set(previous_rogues.keys())
+
+                # New processes entering rogue selection
+                for pid in current_pids - previous_pids:
+                    rogue = next(r for r in samples.rogues if r.pid == pid)
+                    log.info(
+                        "rogue_entered",
+                        pid=pid,
+                        command=rogue.command,
+                        score=rogue.score,
+                        cpu=rogue.cpu,
+                        categories=",".join(sorted(rogue.categories)),
+                    )
+
+                # Processes exiting rogue selection
+                for pid in previous_pids - current_pids:
+                    log.info(
+                        "rogue_exited",
+                        pid=pid,
+                        command=previous_rogues[pid],
+                    )
+
+                previous_rogues = current_rogues
 
                 # Update per-process tracking
                 if self.tracker is not None:
