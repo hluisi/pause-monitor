@@ -166,10 +166,22 @@ class ProcessTracker:
         """Update peak for tracked process."""
         tracked = self.tracked[score.pid]
         old_score = tracked.peak_score
+        old_band = self.bands.get_band(old_score)
         tracked.peak_score = score.score
 
         snapshot_json = json.dumps(score.to_dict())
         band = self.bands.get_band(score.score)
+
+        # Log band transitions (escalations)
+        if band != old_band:
+            log.info(
+                "process_band_changed",
+                pid=score.pid,
+                command=score.command,
+                from_band=old_band,
+                to_band=band,
+                score=score.score,
+            )
 
         update_process_event_peak(
             self.conn,

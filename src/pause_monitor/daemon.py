@@ -2,6 +2,7 @@
 
 import asyncio
 import os
+import resource
 import signal
 import sqlite3
 from dataclasses import dataclass
@@ -428,6 +429,19 @@ class Daemon:
                 # Push to ring buffer
                 self.ring_buffer.push(samples)
 
+                # Log elevated samples for visibility between heartbeats
+                elevated_threshold = self.config.bands.elevated
+                if samples.max_score >= elevated_threshold and samples.rogues:
+                    top = samples.rogues[0]
+                    log.info(
+                        "elevated_sample",
+                        score=samples.max_score,
+                        top_process=top.command,
+                        top_pid=top.pid,
+                        top_cpu=top.cpu,
+                        top_state=top.state,
+                    )
+
                 # Update heartbeat stats
                 heartbeat_count += 1
                 heartbeat_score_sum += samples.max_score
@@ -462,6 +476,14 @@ class Daemon:
                     client_count = len(self._socket_server._clients) if self._socket_server else 0
                     buffer_size = len(self.ring_buffer)
 
+                    # Resource monitoring
+                    rss_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024 / 1024
+                    db_size_mb = (
+                        self.config.db_path.stat().st_size / 1024 / 1024
+                        if self.config.db_path.exists()
+                        else 0
+                    )
+
                     log.info(
                         "daemon_heartbeat",
                         samples=heartbeat_count,
@@ -470,6 +492,8 @@ class Daemon:
                         tracked=tracked_count,
                         buffer=f"{buffer_size}/{self.ring_buffer.capacity}",
                         clients=client_count,
+                        rss_mb=round(rss_mb, 1),
+                        db_mb=round(db_size_mb, 1),
                     )
 
                     # Reset heartbeat counters

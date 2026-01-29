@@ -302,6 +302,11 @@ class TopCollector:
 
         raw = await self._run_top()
         all_processes = self._parse_top_output(raw)
+
+        # Warn if parsing yielded no processes (indicates a parsing bug)
+        if not all_processes:
+            log.warning("top_no_processes_parsed", raw_bytes=len(raw))
+
         rogues = self._select_rogues(all_processes)
         scored = [self._score_process(p) for p in rogues]
 
