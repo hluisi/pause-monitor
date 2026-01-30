@@ -12,7 +12,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from pause_monitor.collector import LibprocCollector, ProcessSamples, ProcessScore, TopCollector
+from pause_monitor.collector import LibprocCollector, ProcessSamples, ProcessScore
 from pause_monitor.config import Config
 from pause_monitor.daemon import Daemon, DaemonState
 
@@ -529,11 +529,11 @@ async def test_daemon_socket_available_after_start(patched_config_short_paths, m
     assert not config.socket_path.exists(), "Socket file should be cleaned up after stop"
 
 
-# === Task 10: TopCollector Integration Tests ===
+# === Collector Integration Tests ===
 
 
-def test_daemon_uses_libproc_collector_by_default(patched_config_paths):
-    """Daemon should use LibprocCollector by default."""
+def test_daemon_uses_libproc_collector(patched_config_paths):
+    """Daemon should use LibprocCollector."""
     config = Config.load()
     daemon = Daemon(config)
 
@@ -541,19 +541,9 @@ def test_daemon_uses_libproc_collector_by_default(patched_config_paths):
     assert isinstance(daemon.collector, LibprocCollector)
 
 
-def test_daemon_uses_top_collector_when_configured(patched_config_paths):
-    """Daemon should use TopCollector when collector='top' is configured."""
-    config = Config.load()
-    config.system.collector = "top"
-    daemon = Daemon(config)
-
-    assert hasattr(daemon, "collector")
-    assert isinstance(daemon.collector, TopCollector)
-
-
 @pytest.mark.asyncio
 async def test_daemon_main_loop_collects_samples(patched_config_paths, monkeypatch):
-    """Main loop should collect and process samples via TopCollector.
+    """Main loop should collect and process samples.
 
     This explicitly tests the "no tracker" case: daemon is created before DB exists,
     so tracker remains None. The main loop should still work without tracker.update().

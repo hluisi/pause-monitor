@@ -18,7 +18,6 @@ class SystemConfig:
     """System monitoring configuration."""
 
     ring_buffer_size: int = 60  # Number of samples to keep in ring buffer
-    collector: str = "libproc"  # "libproc" (native API) or "top" (subprocess)
     sample_interval: float = 0.2  # Seconds between samples (0.2 = 5Hz)
 
 
@@ -273,7 +272,6 @@ class Config:
             ),
             system=SystemConfig(
                 ring_buffer_size=system_data.get("ring_buffer_size", sys_defaults.ring_buffer_size),
-                collector=system_data.get("collector", sys_defaults.collector),
                 sample_interval=system_data.get("sample_interval", sys_defaults.sample_interval),
             ),
             bands=_load_bands_config(bands_data),

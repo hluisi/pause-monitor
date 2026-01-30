@@ -12,7 +12,7 @@ import structlog
 from termcolor import colored
 
 from pause_monitor.boottime import get_boot_time
-from pause_monitor.collector import LibprocCollector, TopCollector
+from pause_monitor.collector import LibprocCollector
 from pause_monitor.config import Config
 from pause_monitor.forensics import ForensicsCapture
 from pause_monitor.ringbuffer import RingBuffer
@@ -47,11 +47,7 @@ class Daemon:
         self.config = config
         self.state = DaemonState()
 
-        # Select collector based on config (libproc = native API, top = subprocess)
-        if config.system.collector == "libproc":
-            self.collector = LibprocCollector(config)
-        else:
-            self.collector = TopCollector(config)
+        self.collector = LibprocCollector(config)
 
         # Initialize ring buffer
         max_samples = config.system.ring_buffer_size
@@ -206,7 +202,7 @@ class Daemon:
         # Start auto-prune task
         self._auto_prune_task = asyncio.create_task(self._auto_prune())
 
-        # Run main loop (TopCollector -> stress -> ring buffer -> tiers)
+        # Run main loop (collector -> tracker -> ring buffer)
         await self._main_loop()
 
     async def stop(self) -> None:
@@ -326,7 +322,7 @@ class Daemon:
         """Main loop collecting process samples at configured interval.
 
         Each iteration:
-        1. Collect samples via LibprocCollector (or TopCollector)
+        1. Collect samples via LibprocCollector
         2. Update per-process tracking with rogue processes (triggers forensics on band entry)
         3. Push to ring buffer
         4. Broadcast to socket for TUI
