@@ -18,7 +18,7 @@ class SystemConfig:
     """System monitoring configuration."""
 
     ring_buffer_size: int = 60  # Number of samples to keep in ring buffer
-    sample_interval: float = 0.2  # Seconds between samples (0.2 = 5Hz)
+    sample_interval: float = 1 / 3  # Seconds between samples (~0.333s = 3Hz)
 
 
 @dataclass
