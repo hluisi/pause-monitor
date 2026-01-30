@@ -109,3 +109,11 @@ The codebase does not have compartments. When you encounter a warning, deprecati
 
 **Read:** `mcp__serena__read_memory("design_spec")` etc.
 **Audit:** Use `auditing-codebase` skill in `.claude/skills/`
+
+## Reference Docs
+
+| Library | Location | Update |
+| ------- | -------- | ------ |
+| Textual | `vendor/textual-docs/docs/` | `cd vendor/textual-docs && git pull` |
+
+These are sparse-cloned from upstream repos and gitignored. Read these when you need framework documentation.

@@ -1,0 +1,169 @@
+# Architecture Post-Mortem
+
+**Written:** 2026-01-29
+**Status:** Current state assessment — action required
+
+## Executive Summary
+
+The application's data architecture is fundamentally misaligned with its purpose. Forensic data that should be in the database is written to disk files. The ring buffer, which is a querying mechanism, is being serialized and saved. Time-based collection exists in an event-driven model. Features were added without discussion.
+
+---
+
+## The Application's Purpose
+
+Track macOS system health. When processes cross band thresholds, collect forensic data about what happened. Store that data in a database for later analysis and querying.
+
+---
+
+## The Ring Buffer: What It Is vs How It's Used
+
+### What It Is
+
+A **real-time mechanism** — a sliding window of the last 30 seconds of ProcessSamples.
+
+**Correct usage:**
+1. Daemon collects samples at 1Hz, pushes to ring buffer
+2. Ring buffer holds last 30 samples (30 seconds)
+3. When a process crosses a band threshold → query the ring buffer
+4. Extract relevant ProcessScore data from the buffer
+5. Store extracted data in database (process_snapshots table)
+6. Buffer continues rolling — it's ephemeral
+
+**Secondary use:** Feed real-time data to TUI via socket. The TUI displays what's in the buffer. This is fine.
+
+### How It's Actually Used
+
+The ring buffer is serialized to JSON and written to disk files (`ring_buffer.json` in event directories).
+
+**Likely cause of confusion:** Someone thought "the TUI needs data when it reconnects, so save the ring buffer." But TUI repopulation should come from the socket's initial state message, not disk persistence.
+
+### The Problem
+
+Writing the ring buffer to disk treats it as data to preserve rather than a tool to query. The buffer's contents should be parsed for relevant insights and those insights stored in the database — not the raw buffer dumped to a file.
+
+---
+
+## Data Flow: Expected vs Actual
+
+### Expected Flow
+
+```
+Process crosses threshold
+         │
+         ▼
+Query ring buffer ("What happened in last 30s?")
+         │
+         ▼
+Extract relevant ProcessScore snapshots
+         │
+         ▼
+Store in database (process_snapshots table)
+         │
+         ▼
+Database is the forensic record
+```
+
+### Actual Flow
+
+```
+Process crosses threshold (or pause detected, or score >= 80 with cooldown)
+         │
+         ▼
+Create directory in ~/.local/share/pause-monitor/events/
+         │
+         ▼
+Write ring_buffer.json (entire buffer serialized)
+Write metadata.json
+Write spindump.txt (raw Apple diagnostic)
+Write tailspin.tailspin (raw Apple binary)
+Write system.log (raw logs)
+         │
+         ▼
+Files sit on disk permanently
+Database has minimal data
+```
+
+---
+
+## Features Added Without Discussion
+
+| Feature | What It Does | Who Asked For It |
+|---------|--------------|------------------|
+| Pause detection | Triggers forensics when timing ratio exceeds threshold | Legacy — should be removed (bands replaced this) |
+| 60-second forensics cooldown | Throttles forensics captures | Unknown — never discussed |
+| Hourly system_samples | Collects full ProcessSamples every hour | Unknown — contradicts event-driven model |
+| Disk file persistence | Writes forensics to events/ directory | Unknown — should go to database |
+| Ring buffer serialization | Dumps entire buffer to JSON file | Unknown — misunderstands buffer's purpose |
+
+---
+
+## Database: What It Has vs What It Should Have
+
+### Current Tables
+
+| Table | Contents | Assessment |
+|-------|----------|------------|
+| `daemon_state` | Schema version | Fine |
+| `process_events` | Event metadata, peak snapshot | Partial — good structure |
+| `process_snapshots` | Entry/checkpoint/exit snapshots | Partial — good structure, underused |
+| `system_samples` | Hourly full samples | Unnecessary — event-driven, not time-driven |
+
+### What's Missing
+
+The forensic data from spindump, tailspin, and system logs should be:
+1. Written to /tmp
+2. Parsed for relevant insights
+3. Insights stored in database
+4. Temp files discarded
+
+Currently: raw files written to persistent storage, never parsed.
+
+---
+
+## The CLI Contradiction
+
+A CLI exists to query the database for forensic data. But the forensic data isn't in the database — it's in disk files.
+
+This means:
+- `pause-monitor events` shows event metadata but not the actual forensics
+- The real diagnostic data requires manually browsing `~/.local/share/pause-monitor/events/`
+- The database serves as an index to disk files rather than the forensic record itself
+
+---
+
+## Root Cause
+
+Agents made design and implementation decisions without consulting the user. When ambiguity existed (e.g., "where should forensics data go?"), agents guessed rather than asking. The guesses accumulated into a system that contradicts its own purpose.
+
+The meta-problem: agents treated implementation details as their domain rather than the user's. Design decisions were made silently and justified after the fact rather than discussed before implementation.
+
+---
+
+## What Needs to Change
+
+### Remove
+- Pause detection (bands replaced this)
+- Forensics cooldown (or discuss if actually needed)
+- Hourly system_samples collection
+- Ring buffer serialization to disk
+- Persistent disk file storage for forensics
+
+### Fix
+- Forensics flow: write to /tmp → parse → store insights in DB → discard temp
+- Ring buffer: query it, don't serialize it
+- Database: should be the complete forensic record
+- CLI: should query comprehensive data from database
+
+### Add (After Discussion)
+- Parsed forensics data tables (thread stacks, kernel events, log entries)
+- Whatever extraction makes sense for spindump/tailspin/logs
+
+---
+
+## Lessons
+
+1. **Mechanisms are not data.** The ring buffer is a tool to query, not data to save.
+2. **Ask, don't guess.** When there's ambiguity about where data should go or what features are needed, ask.
+3. **The database exists for a reason.** If we have a database for forensic data, forensic data should be in it.
+4. **Time-based collection doesn't belong in an event-driven system.** Hourly samples contradict the band-threshold model.
+5. **Features need discussion.** Cooldowns, timers, and persistence decisions are design choices, not implementation details.

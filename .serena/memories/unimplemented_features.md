@@ -1,13 +1,12 @@
 # Unimplemented Features
 
-> **Per-Process Scoring COMPLETE (2026-01-24).** TopCollector at 1Hz; SCHEMA_VERSION=7.
-> **Per-Process Band Tracking DESIGNED (2026-01-25).** Not yet implemented.
+> **Phase 8 COMPLETE (2026-01-29).** Per-process band tracking implemented. SCHEMA_VERSION=9.
 
-**Last audited:** 2026-01-25
+**Last audited:** 2026-01-29
 
 ## Summary
 
-Phase 7 (per-process scoring) is complete. The new per-process band tracking design exists but is not implemented. Several older features remain unimplemented.
+Core functionality is complete. Per-process band tracking with `ProcessTracker`, `BandsConfig`, and `process_events`/`process_snapshots` tables all implemented and wired into daemon. No explicit stubs remain in source code. Remaining gaps are config options that exist but aren't used, and install/setup automation.
 
 ---
 
@@ -15,22 +14,9 @@ Phase 7 (per-process scoring) is complete. The new per-process band tracking des
 
 | Location | Current | Expected |
 |----------|---------|----------|
-| `tui/app.py:788` | `self.notify("History view not yet implemented")` | TUI history view with charts/graphs |
+| (none) | - | - |
 
----
-
-## Per-Process Band Tracking (DESIGNED, NOT IMPLEMENTED)
-
-Design doc: `docs/plans/2026-01-25-per-process-band-tracking-design.md`
-
-| Component | Status |
-|-----------|--------|
-| `BandsConfig` class | ❌ Not in config.py |
-| `[bands]` TOML section | ❌ Not implemented |
-| `process_events` table | ❌ Not in schema |
-| `process_snapshots` table | ❌ Not in schema |
-| Per-process event lifecycle | ❌ Not in daemon |
-| Boot time tracking | ❌ Not implemented |
+No stubs found. TUI history stub removed.
 
 ---
 
@@ -38,8 +24,10 @@ Design doc: `docs/plans/2026-01-25-per-process-band-tracking-design.md`
 
 | Config Key | Where | What Should Happen |
 |------------|-------|-------------------|
-| `learning_mode` | config.py | Daemon should suppress alerts, collect calibration data |
-| `suspects.patterns` | config.py | Flag matching processes in forensics output |
+| `learning_mode` | config.py:240 | Daemon should suppress alerts, collect calibration data |
+| `suspects.patterns` | config.py:42-51 | Flag matching processes in forensics output or TUI |
+| `sampling.normal_interval` | config.py:12 | Legacy - daemon uses 1Hz TopCollector now |
+| `sampling.elevated_interval` | config.py:13 | Legacy - daemon uses 1Hz TopCollector now |
 
 ---
 
@@ -48,7 +36,7 @@ Design doc: `docs/plans/2026-01-25-per-process-band-tracking-design.md`
 | Feature | Status |
 |---------|--------|
 | `calibrate` command | Does not exist |
-| `history --at "<time>"` | Option not implemented |
+| `history --at "<time>"` | Option not implemented (basic history works) |
 
 ---
 
@@ -56,9 +44,8 @@ Design doc: `docs/plans/2026-01-25-per-process-band-tracking-design.md`
 
 | Step | Status |
 |------|--------|
-| Sudoers rules generation | Not implemented |
-| `tailspin enable` | Not called |
-| `check_forensics_health()` | Function doesn't exist |
+| Sudoers rules generation | Not implemented (forensics needs sudo) |
+| `tailspin enable` | Not called during install |
 
 ---
 
@@ -67,35 +54,34 @@ Design doc: `docs/plans/2026-01-25-per-process-band-tracking-design.md`
 | Feature | Status |
 |---------|--------|
 | SIGHUP config reload | Only SIGTERM/SIGINT handled |
-| Event directory cleanup on prune | Only DB records deleted |
-| daemon_state persistence | Only schema_version stored (not io_baseline, last_sample_id) |
+| Event directory cleanup on prune | Prune deletes DB records but not forensics artifacts in events_dir |
 
 ---
 
-## Legacy Tables (Orphaned)
+## Deleted Components
 
-| Table | Status |
-|-------|--------|
-| `samples` | Never used by current code |
-| `process_samples` | Schema exists, never populated |
-| `event_samples` | Legacy format, unclear if still written |
+These are mentioned in old docs but no longer exist:
+
+| Component | Status |
+|-----------|--------|
+| `sentinel.py` | DELETED - no TierManager |
+| `stress.py` | DELETED |
+| `TierManager` class | DELETED |
 
 ---
 
 ## Priority
 
 ### High (Blocking/Core)
-1. **Per-process band tracking** — Design approved, needs implementation plan
-2. **Learning mode** — Config exists but unused
-3. **Suspects patterns** — Config exists but unused
-4. **Install setup** — Sudoers/tailspin missing
+(none - core features complete)
 
 ### Medium (Nice to Have)
-5. **TUI history view** — Stub exists
-6. **calibrate command** — For threshold learning
-7. **Event directory cleanup** — Prevent orphan accumulation
-8. **SIGHUP config reload** — Hot reloading
+1. **learning_mode implementation** - Config exists, daemon should respect it
+2. **suspects.patterns usage** - Highlight known-problematic processes
+3. **Event directory cleanup** - Prevent orphan forensics accumulation
+4. **Install sudoers setup** - Forensics needs passwordless sudo
 
 ### Low (Tech Debt)
-9. **Legacy table cleanup** — Remove unused tables
-10. **daemon_state completion** — Persist all state
+5. **Remove legacy sampling config** - normal_interval/elevated_interval unused
+6. **SIGHUP config reload** - Hot reloading would be nice
+7. **calibrate command** - Auto-tune thresholds based on system profile

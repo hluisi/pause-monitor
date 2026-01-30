@@ -1,6 +1,6 @@
 # Implementation Guide
 
-> **Phase 8 COMPLETE (2026-01-29).** Enhanced scoring and data persistence; SCHEMA_VERSION=9.
+> **Phase 8 COMPLETE (2026-01-29).** Per-process band tracking with ProcessTracker; SCHEMA_VERSION=9.
 
 **Last updated:** 2026-01-29
 
@@ -38,8 +38,8 @@ This document describes the actual implementation. For design spec, see `design_
          | ProcessSamples            |                             |
          v                           |                             |
 +------------------+                 |                   +------------------+
-|   TierManager    |-----------------+------------------>|   SocketServer   |
-|  (sentinel.py)   |                                     | (socket_server)  |
+|  ProcessTracker  |-----------------+------------------>|   SocketServer   |
+|   (tracker.py)   |                                     | (socket_server)  |
 +------------------+                                     +------------------+
          |
          v
@@ -62,10 +62,11 @@ This document describes the actual implementation. For design spec, see `design_
 - `mem`, `cmprs`, `pageins`, `csw`, `sysbsd`, `threads`
 - `score` (0-100 weighted)
 - `categories` (frozenset of selection reasons)
+- `captured_at` (float timestamp)
 - Methods: `to_dict()`, `from_dict()`
 
 **ProcessSamples** — Collection from one sample:
-- `timestamp`, `elapsed_ms`, `process_count`
+- `timestamp` (datetime), `elapsed_ms`, `process_count`
 - `max_score` (highest rogue score)
 - `rogues` (list of ProcessScore)
 - Methods: `to_json()`, `from_json()`
@@ -107,54 +108,87 @@ Tracks runtime state:
 - `running`, `sample_count`, `event_count`
 - `last_sample_time`, `current_score` (max_score from ProcessSamples)
 - `elevated_since`, `critical_since`
+- Method: `update_sample(score)`
 
 ### Daemon
 
 **Key attributes:**
 - `collector` — TopCollector
 - `ring_buffer` — RingBuffer
-- `tier_manager` — TierManager
+- `tracker` — ProcessTracker (manages per-process event lifecycle)
+- `boot_time` — System boot time (via `get_boot_time()`)
 - `_socket_server` — SocketServer
-- `_current_event_id` — Active escalation event
+- `_conn` — SQLite connection
+- `_last_forensics_time` — For score-based forensics debouncing
 
 **Main loop flow:**
 ```python
 while not shutdown:
     samples = await collector.collect()
-    ring_buffer.push(samples, tier)
-    action = tier_manager.update(samples.max_score)
-    if action:
-        await _handle_tier_action(action, samples)
-    if tier == 3 and action != TIER3_ENTRY:
-        _save_event_sample(samples, tier=3)
-    if samples.elapsed_ms > expected * threshold:
+    tracker.update(samples.rogues)  # Per-process band tracking
+    ring_buffer.push(samples)
+    if timing_ratio > pause_threshold:
         await _handle_pause(...)
-    await socket_server.broadcast(samples, tier)
+    if max_score >= bands.high:  # Score-based forensics
+        await _run_forensics(..., trigger="score")
+    await socket_server.broadcast(samples)
 ```
+
+**Background tasks:**
+- `_auto_prune()` — Daily pruning of old events
+- `_hourly_system_sample()` — Saves full ProcessSamples hourly for trend analysis
 
 ---
 
-## Module: sentinel.py
+## Module: tracker.py
 
-**Purpose:** Tier state machine.
+**Purpose:** Per-process band tracking with event lifecycle management.
 
-### Enums
+### Constants
+- `SNAPSHOT_ENTRY`, `SNAPSHOT_EXIT`, `SNAPSHOT_CHECKPOINT`
 
-- `Tier`: SENTINEL(1), ELEVATED(2), CRITICAL(3)
-- `TierAction`: TIER2_ENTRY, TIER2_EXIT, TIER2_PEAK, TIER3_ENTRY, TIER3_EXIT
+### TrackedProcess (dataclass)
 
-### TierManager
+In-memory state for a tracked process:
+- `event_id` — Database row ID
+- `pid`, `command`
+- `peak_score` — Highest score seen
+- `last_checkpoint` — Timestamp of last checkpoint snapshot
 
-Manages transitions with 5s hysteresis for de-escalation.
+### ProcessTracker
 
-**Thresholds (configurable):**
-- elevated_threshold = 50
-- critical_threshold = 75
+Manages per-process band state and database persistence.
 
-**Key behavior:**
-- Uses `max_score` from ProcessSamples for decisions
-- TIER2_PEAK only emitted when new peak reached (not equal)
-- Returns TierAction or None
+**Constructor args:**
+- `conn` — SQLite connection
+- `bands` — BandsConfig
+- `boot_time` — System boot timestamp
+
+**Key methods:**
+- `_restore_open_events()` — Restore state from DB on daemon restart
+- `update(scores: list[ProcessScore])` — Main update method called each sample
+- `_open_event(score)` — Create new event when process enters bad state
+- `_close_event(pid, exit_time, exit_score)` — Close event when process exits bad state
+- `_update_peak(score)` — Update peak when score increases
+- `_insert_checkpoint(score, tracked)` — Periodic checkpoint snapshots
+
+**Tracking rules:**
+- Processes enter tracking when `score >= tracking_threshold` (default: elevated band = 40)
+- Processes exit tracking when score drops below threshold OR process disappears
+- Checkpoints saved every `checkpoint_interval` seconds (default: 30) while in bad state
+- Band transitions logged with colored output
+
+---
+
+## Module: boottime.py
+
+**Purpose:** Detect system boot time via sysctl.
+
+### Function
+
+`get_boot_time() -> int` — Returns Unix timestamp of system boot.
+
+Uses `sysctl -n kern.boottime` and parses `sec = NNNN` from output.
 
 ---
 
@@ -164,27 +198,42 @@ Manages transitions with 5s hysteresis for de-escalation.
 
 ### Constants
 - `SCHEMA_VERSION = 9`
-- `VALID_EVENT_STATUSES = {"unreviewed", "reviewed", "pinned", "dismissed"}`
 
 ### Tables (v9)
 
-**daemon_state** — Key-value store for daemon state.
+**daemon_state** — Key-value store for daemon state:
+- `key` (TEXT PRIMARY KEY), `value` (TEXT), `updated_at` (REAL)
 
 **process_events** — One row per process tracking event:
-- `id`, `pid`, `command`, `boot_time`
-- `entry_time`, `exit_time`
-- `entry_band`, `peak_band`, `peak_score`, `peak_snapshot`
+- `id` (INTEGER PRIMARY KEY), `pid`, `command`, `boot_time`
+- `entry_time`, `exit_time` (NULL if still tracking)
+- `entry_band`, `peak_band`, `peak_score`, `peak_snapshot` (JSON)
 
 **process_snapshots** — Snapshots during tracking:
-- `id`, `event_id`, `snapshot_type` (entry/exit/checkpoint), `snapshot`
+- `id`, `event_id` (FK), `snapshot_type` (entry/exit/checkpoint), `snapshot` (JSON)
 
 **system_samples** — Hourly full system samples for trend analysis:
 - `id`, `captured_at`, `data` (JSON ProcessSamples)
 - Pruned after 7 days
 
-### Dataclasses
-- `Event` — Escalation event
-- `ProcessSampleRecord` — Sample with ProcessSamples data
+### Key Functions
+
+**Process event CRUD:**
+- `create_process_event(...)` → event_id
+- `get_open_events(conn, boot_time)` → list of dicts
+- `get_process_events(conn, boot_time, time_cutoff, limit)` → list of dicts
+- `get_process_event_detail(conn, event_id)` → dict or None
+- `close_process_event(conn, event_id, exit_time)`
+- `update_process_event_peak(conn, event_id, peak_score, peak_band, peak_snapshot)`
+- `insert_process_snapshot(conn, event_id, snapshot_type, snapshot)`
+
+**System samples:**
+- `insert_system_sample(conn, data)`
+- `get_last_system_sample_time(conn)` → float or None
+- `prune_system_samples(conn, days)` → deleted count
+
+**Pruning:**
+- `prune_old_data(conn, events_days, system_samples_days)` → (events_deleted, samples_deleted)
 
 ---
 
@@ -203,12 +252,13 @@ Manages transitions with 5s hysteresis for de-escalation.
 - Each category: enabled, count, threshold
 - State selection: enabled, count, states list
 
-**BandsConfig:**
-- low=20, medium=40, elevated=60, high=80, critical=100
-- `tracking_band` = "elevated" (threshold for tracking)
-- `forensics_band` = "high" (threshold for forensics)
+**BandsConfig** — Band thresholds and behavior triggers:
+- `low=20`, `medium=40`, `elevated=60`, `high=80`, `critical=100`
+- `tracking_band` = "elevated" (threshold for per-process tracking)
+- `forensics_band` = "high" (threshold for forensics capture)
 - `checkpoint_interval` = 30 (seconds between checkpoint snapshots)
 - `forensics_cooldown` = 60 (seconds between score-based forensics)
+- Methods: `get_band(score)`, `get_threshold(band)`, `tracking_threshold`, `forensics_threshold`
 
 ### Config Paths
 - config: `~/.config/pause-monitor/config.toml`
@@ -220,14 +270,14 @@ Manages transitions with 5s hysteresis for de-escalation.
 
 ## Module: ringbuffer.py
 
-**Purpose:** Fixed-size circular buffer.
+**Purpose:** Fixed-size circular buffer for recent samples.
 
 ### Classes
-- `RingSample` — ProcessSamples + tier
-- `BufferContents` — Immutable snapshot
+- `RingSample` — ProcessSamples wrapper (no tier field anymore)
+- `BufferContents` — Immutable snapshot with samples list
 - `RingBuffer` — deque(maxlen=30)
 
-Methods: `push()`, `freeze()`, `clear()`
+Methods: `push(samples)`, `freeze()`, `clear()`, `capacity`, `is_empty`
 
 ---
 
@@ -239,63 +289,100 @@ Methods: `push()`, `freeze()`, `clear()`
 Newline-delimited JSON over Unix socket.
 
 **Message types:**
-- `initial_state` — Ring buffer state on connect
+- `initial_state` — Ring buffer state on connect (samples list, max_score, sample_count)
 - `sample` — ProcessSamples data per sample
 
 **SocketServer methods:**
 - `start()`, `stop()`
-- `broadcast(samples, tier)` — Push to all clients
+- `broadcast(samples)` — Push to all clients
 - `has_clients` property — For main loop optimization
 
 ---
 
 ## Module: forensics.py
 
-**Purpose:** Diagnostic capture on pause.
+**Purpose:** Diagnostic capture on pause or high score.
 
 ### ForensicsCapture
 - `write_metadata()`, `write_process_snapshot()`
 - `write_ring_buffer()` — Serializes ProcessSamples
+- `write_text_artifact()`, `write_binary_artifact()`
 
 ### Functions
+- `create_event_dir()` — Create timestamped event directory
 - `capture_spindump()`, `capture_tailspin()`, `capture_system_logs()`
 - `identify_culprits(contents)` — Top rogues from buffer
+- `run_full_capture(capture, ...)` — Run all heavy captures
 
 ### Triggers
 - **Pause detection:** When timing ratio exceeds threshold
-- **Score-based:** When max_score >= 80 (critical band), with 60s cooldown
+- **Score-based:** When max_score >= high band (80), with 60s cooldown
 
 ---
 
 ## Module: tui/app.py
 
-**Purpose:** Textual dashboard.
+**Purpose:** Real-time monitoring dashboard (single screen, socket-only).
+
+### Philosophy
+- TUI = Real-time window into daemon state, nothing more
+- Display what daemon sends via socket — no database queries
+- CLI is for investigation; TUI is for "what's happening now"
+- Single-screen dashboard — no page switching
 
 ### Widgets
-- `StressGauge` — Score meter (max_score)
-- `SampleInfoPanel` — Tier, counts
-- `ProcessesPanel` — Rogue process table
-- `EventsTable` — Recent events
 
-### Screens
-- `EventsScreen` — Full event list with filtering
-- `EventDetailScreen` — Single event details
+**HeaderBar** — Score gauge + 30-second sparkline + stats:
+- Reactive properties: `score`, `connected`
+- Shows: STRESS bar, score/100, tier name, timestamp, process count, sample count
+
+**ProcessTable** — Rogue processes with full metrics:
+- CSS Grid layout with 9 columns (trend, process, score, cpu, mem, pgin, csw, state, why)
+- 5 score bands with colors: critical (red), high (orange), elevated (yellow), medium (default), low (green)
+- Decay persistence: processes stay visible 10s after dropping (dimmed)
+- Trend symbols: ▲ escalating, ● steady, ▽ declining, ○ decayed
+
+**TrackedEventsPanel** — Tracked processes (active and historical):
+- Tracks by command name (not PID) to deduplicate
+- Shows: Time, Process, Peak score, Duration, Why (categories), Status
+- Active entries shown first, then history (max 15)
+
+**ActivityLog** — System tier transitions:
+- Logs: CRITICAL/ELEVATED/NORMAL transitions with timestamps
+- Max 15 entries
+
+**PauseMonitorApp** — Main app:
+- Connects to daemon via SocketClient
+- Handles initial_state and sample messages
+- Updates all widgets from socket data
 
 ### Data Flow
-- Real-time: SocketClient → `_handle_socket_data()`
-- Events: SQLite → `_refresh_events()`
+```
+Daemon (1Hz) → Socket → TUI
+                 │
+                 ├─→ HeaderBar.update_from_sample(...)
+                 ├─→ ProcessTable.update_rogues(rogues, timestamp)
+                 ├─→ TrackedEventsPanel.update_tracking(rogues, timestamp)
+                 └─→ ActivityLog.check_transitions(score)
+```
+
+**No database queries in TUI.** Everything comes from socket.
 
 ---
 
 ## Deleted Components
 
 These no longer exist:
-- `stress.py` — Replaced by per-process scoring
+- `sentinel.py` — TierManager replaced by ProcessTracker (band-based, not tier-based)
+- `stress.py` — Replaced by per-process scoring in collector.py
 - `StressBreakdown` — Use ProcessScore.score
 - `PowermetricsStream` — Use TopCollector
-- `Sentinel` class — Use TierManager directly
+- `TierManager`, `Tier`, `TierAction` enums — Deleted
 - `calculate_stress()` — Deleted
 - `IOBaselineManager` — Deleted
+- `EventsScreen`, `EventDetailScreen`, `HistoryScreen` — TUI simplified to single screen
+- `StressGauge`, `SampleInfoPanel`, `ProcessesPanel`, `EventsTable` — Replaced by new widgets
+- `Event` dataclass in storage — Replaced by dict-based functions
 
 ---
 
@@ -305,10 +392,13 @@ These no longer exist:
 |------|----------|
 | test_collector.py | TopCollector parsing, scoring |
 | test_daemon.py | Daemon state, main loop |
-| test_tier_manager.py | TierManager state machine |
+| test_tracker.py | ProcessTracker band tracking |
 | test_storage.py | Database operations |
 | test_ringbuffer.py | Ring buffer operations |
 | test_socket_*.py | Socket server/client |
 | test_forensics.py | Forensics capture |
+| test_boottime.py | Boot time detection |
+| test_tui.py | TUI widgets |
+| test_tui_connection.py | TUI socket connection |
 
 Run: `uv run pytest`
