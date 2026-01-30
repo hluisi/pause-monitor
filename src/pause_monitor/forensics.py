@@ -256,8 +256,9 @@ def identify_culprits(contents: "BufferContents") -> list[dict]:
         contents: Frozen ring buffer contents with samples
 
     Returns:
-        List of {"pid": int, "command": str, "score": int, "categories": [str]}
-        sorted by score descending.
+        List of ProcessScore-compatible dicts with MetricValue format for score.
+        Each dict has: pid, command, score (as MetricValue dict), categories.
+        Sorted by score descending.
         Processes are keyed by PID, so two processes with the same command
         but different PIDs are treated as separate entries.
     """
@@ -272,16 +273,21 @@ def identify_culprits(contents: "BufferContents") -> list[dict]:
         for rogue in sample.samples.rogues:
             existing = peak_scores.get(rogue.pid)
             score_val = rogue.score.current
-            if existing is None or score_val > existing["score"]:
+            if existing is None or score_val > existing["score"]["current"]:
+                # Store full score MetricValue for consistency
                 peak_scores[rogue.pid] = {
                     "pid": rogue.pid,
                     "command": rogue.command,
-                    "score": score_val,
+                    "score": rogue.score.to_dict(),
                     "categories": list(rogue.categories),
                 }
 
     # Sort by score descending
-    culprits = sorted(peak_scores.values(), key=lambda c: c["score"], reverse=True)
+    culprits = sorted(
+        peak_scores.values(),
+        key=lambda c: c["score"]["current"],
+        reverse=True,
+    )
     return culprits
 
 
@@ -638,7 +644,8 @@ class ForensicsCapture:
             contents: Frozen ring buffer contents
         """
         culprits = identify_culprits(contents)
-        peak_score = max((c["score"] for c in culprits), default=0)
+        # Score is now MetricValue dict: {"current": x, "low": y, "high": z}
+        peak_score = max((c["score"]["current"] for c in culprits), default=0)
 
         insert_buffer_context(
             self.conn,

@@ -255,14 +255,14 @@ def test_tracker_inserts_entry_snapshot(tmp_path):
     # Get the event ID
     event_id = tracker.tracked[789].event_id
 
-    # Check snapshot was inserted with structured columns
+    # Check snapshot was inserted with structured columns (MetricValue dicts)
     snapshots = get_process_snapshots(conn, event_id)
     assert len(snapshots) == 1
     snap = snapshots[0]
     assert snap["snapshot_type"] == "entry"
-    assert snap["score"] == 55
-    assert snap["cpu"] == 60.0
-    assert snap["mem"] == 2000
+    assert snap["score"]["current"] == 55
+    assert snap["cpu"]["current"] == 60.0
+    assert snap["mem"]["current"] == 2000
     assert set(snap["categories"]) == {"cpu", "mem"}
 
     conn.close()
@@ -294,9 +294,9 @@ def test_tracker_inserts_exit_snapshot_on_score_drop(tmp_path):
     types = {s["snapshot_type"] for s in snapshots}
     assert types == {"entry", "exit"}
 
-    # Verify exit snapshot has the low score
+    # Verify exit snapshot has the low score (MetricValue dict)
     exit_snap = [s for s in snapshots if s["snapshot_type"] == "exit"][0]
-    assert exit_snap["score"] == 30
+    assert exit_snap["score"]["current"] == 30
 
     conn.close()
 

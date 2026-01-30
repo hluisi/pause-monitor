@@ -266,8 +266,8 @@ def test_identify_culprits_from_buffer():
     assert len(culprits) == 1
     assert culprits[0]["pid"] == 100
     assert culprits[0]["command"] == "Chrome"
-    # identify_culprits extracts .current from MetricValue, returns int
-    assert culprits[0]["score"] == 30
+    # identify_culprits returns full MetricValue dict for score
+    assert culprits[0]["score"]["current"] == 30
     assert set(culprits[0]["categories"]) == {"cpu", "mem"}
 
 
@@ -287,10 +287,10 @@ def test_identify_culprits_multiple_processes():
     assert len(culprits) == 2
     assert culprits[0]["pid"] == 100
     assert culprits[0]["command"] == "python"
-    assert culprits[0]["score"] == 30
+    assert culprits[0]["score"]["current"] == 30
     assert culprits[1]["pid"] == 200
     assert culprits[1]["command"] == "Chrome"
-    assert culprits[1]["score"] == 15
+    assert culprits[1]["score"]["current"] == 15
 
 
 def test_identify_culprits_empty_buffer():
@@ -333,7 +333,7 @@ def test_identify_culprits_uses_peak_values():
     assert len(culprits) == 1
     assert culprits[0]["pid"] == 300
     assert culprits[0]["command"] == "Safari"
-    assert culprits[0]["score"] == 35
+    assert culprits[0]["score"]["current"] == 35
 
 
 def test_identify_culprits_differentiates_by_pid():
@@ -357,10 +357,10 @@ def test_identify_culprits_differentiates_by_pid():
     # Sorted by score descending
     assert culprits[0]["pid"] == 1001
     assert culprits[0]["command"] == "Chrome"
-    assert culprits[0]["score"] == 40
+    assert culprits[0]["score"]["current"] == 40
     assert culprits[1]["pid"] == 1002
     assert culprits[1]["command"] == "Chrome"
-    assert culprits[1]["score"] == 25
+    assert culprits[1]["score"]["current"] == 25
 
 
 # --- ForensicsCapture Integration Tests ---

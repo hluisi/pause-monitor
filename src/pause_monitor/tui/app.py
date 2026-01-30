@@ -396,7 +396,11 @@ class ProcessTable(Static):
         self._grid.mount(Label(why, classes=base_class))
 
     def update_rogues(self, rogues: list[dict], now: float) -> None:
-        """Update with rogue process list."""
+        """Update with rogue process list.
+
+        Rogues contain ProcessScore data serialized as dicts with MetricValue
+        fields (each has current/low/high).
+        """
         self.remove_class("disconnected")
         if not self._grid:
             return
@@ -425,11 +429,9 @@ class ProcessTable(Static):
                     del self._cached_rogues[pid]
                     self._last_seen.pop(pid, None)
 
-        # Sort by score.current (MetricValue dict)
+        # Sort by score (MetricValue dict: {"current": x, "low": y, "high": z})
         display_list.sort(
-            key=lambda x: x[0].get("score", {}).get("current", 0)
-            if isinstance(x[0].get("score"), dict)
-            else x[0].get("score", 0),
+            key=lambda x: x[0]["score"]["current"],
             reverse=True,
         )
 
@@ -437,13 +439,7 @@ class ProcessTable(Static):
 
         for rogue, is_decayed in display_list:
             pid = rogue.get("pid", 0)
-
-            # Extract current value from MetricValue dict (new schema) or plain int (legacy)
-            score_data = rogue.get("score", 0)
-            if isinstance(score_data, dict):
-                score = score_data.get("current", 0)
-            else:
-                score = score_data
+            score = rogue["score"]["current"]
 
             prev_score = self._prev_scores.get(pid, score)
 
@@ -465,23 +461,11 @@ class ProcessTable(Static):
                 why = str(categories)
 
             # Extract .current from MetricValue dicts
-            cpu_data = rogue.get("cpu", 0)
-            cpu = cpu_data.get("current", 0) if isinstance(cpu_data, dict) else cpu_data
-
-            mem_data = rogue.get("mem", 0)
-            mem = mem_data.get("current", 0) if isinstance(mem_data, dict) else mem_data
-
-            pageins_data = rogue.get("pageins", 0)
-            if isinstance(pageins_data, dict):
-                pageins = pageins_data.get("current", 0)
-            else:
-                pageins = pageins_data
-
-            csw_data = rogue.get("csw", 0)
-            csw = csw_data.get("current", 0) if isinstance(csw_data, dict) else csw_data
-
-            state_data = rogue.get("state", "?")
-            state = state_data.get("current", "?") if isinstance(state_data, dict) else state_data
+            cpu = rogue["cpu"]["current"]
+            mem = rogue["mem"]["current"]
+            pageins = rogue["pageins"]["current"]
+            csw = rogue["csw"]["current"]
+            state = rogue["state"]["current"]
 
             self._add_row(
                 trend,
@@ -504,8 +488,12 @@ class ProcessTable(Static):
 
 
 @dataclass
-class TrackedProcess:
-    """A process being tracked or that was tracked."""
+class DisplayTrackedProcess:
+    """A process being tracked in the TUI display.
+
+    Note: This is distinct from tracker.py's TrackedProcess which manages
+    database event lifecycle. This class is purely for TUI display state.
+    """
 
     command: str
     entry_time: float
@@ -556,10 +544,10 @@ class TrackedEventsPanel(Static):
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self._table: DataTable | None = None
-        # command -> TrackedProcess for active tracking (by command name, not PID)
-        self._active: dict[str, TrackedProcess] = {}
-        # command -> TrackedProcess for history (one entry per command, highest peak)
-        self._history: dict[str, TrackedProcess] = {}
+        # command -> DisplayTrackedProcess for active tracking (by command name, not PID)
+        self._active: dict[str, DisplayTrackedProcess] = {}
+        # command -> DisplayTrackedProcess for history (one entry per command, highest peak)
+        self._history: dict[str, DisplayTrackedProcess] = {}
         # Track PIDs currently above threshold
         self._tracked_pids: set[int] = set()
 
@@ -581,11 +569,11 @@ class TrackedEventsPanel(Static):
         self._table.cursor_type = "none"
 
     def _extract_score(self, rogue: dict) -> int:
-        """Extract score value from rogue dict (handles MetricValue or plain int)."""
-        score_data = rogue.get("score", 0)
-        if isinstance(score_data, dict):
-            return score_data.get("current", 0)
-        return score_data
+        """Extract current score value from rogue dict.
+
+        Score is always a MetricValue dict: {"current": x, "low": y, "high": z}
+        """
+        return rogue["score"]["current"]
 
     def update_tracking(self, rogues: list[dict], now: float) -> None:
         """Update tracking based on current rogues.
@@ -618,7 +606,7 @@ class TrackedEventsPanel(Static):
 
             if cmd not in self._active:
                 # New tracking entry
-                self._active[cmd] = TrackedProcess(
+                self._active[cmd] = DisplayTrackedProcess(
                     command=cmd,
                     entry_time=now,
                     peak_score=score,

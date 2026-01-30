@@ -214,6 +214,54 @@ class ProcessScore:
             categories=data["categories"],
         )
 
+    @classmethod
+    def from_storage(cls, data: dict, pid: int, command: str) -> "ProcessScore":
+        """Reconstruct ProcessScore from storage dict format.
+
+        Storage dicts have MetricValue fields as {"current": x, "low": y, "high": z}.
+        This is the inverse of how storage.get_snapshot() returns data.
+
+        Args:
+            data: Storage dict with MetricValue-compatible fields
+            pid: Process ID (not stored in snapshot)
+            command: Process command (not stored in snapshot)
+        """
+        return cls(
+            pid=pid,
+            command=command,
+            captured_at=data["captured_at"],
+            # CPU
+            cpu=MetricValue.from_dict(data["cpu"]),
+            # Memory
+            mem=MetricValue.from_dict(data["mem"]),
+            mem_peak=data["mem_peak"],
+            pageins=MetricValue.from_dict(data["pageins"]),
+            faults=MetricValue.from_dict(data["faults"]),
+            # Disk I/O
+            disk_io=MetricValue.from_dict(data["disk_io"]),
+            disk_io_rate=MetricValue.from_dict(data["disk_io_rate"]),
+            # Activity
+            csw=MetricValue.from_dict(data["csw"]),
+            syscalls=MetricValue.from_dict(data["syscalls"]),
+            threads=MetricValue.from_dict(data["threads"]),
+            mach_msgs=MetricValue.from_dict(data["mach_msgs"]),
+            # Efficiency
+            instructions=MetricValue.from_dict(data["instructions"]),
+            cycles=MetricValue.from_dict(data["cycles"]),
+            ipc=MetricValue.from_dict(data["ipc"]),
+            # Power
+            energy=MetricValue.from_dict(data["energy"]),
+            energy_rate=MetricValue.from_dict(data["energy_rate"]),
+            wakeups=MetricValue.from_dict(data["wakeups"]),
+            # State
+            state=MetricValueStr.from_dict(data["state"]),
+            priority=MetricValue.from_dict(data["priority"]),
+            # Scoring
+            score=MetricValue.from_dict(data["score"]),
+            band=MetricValueStr.from_dict(data["band"]),
+            categories=data["categories"],
+        )
+
 
 @dataclass
 class ProcessSamples:

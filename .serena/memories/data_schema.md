@@ -6,7 +6,7 @@
 >
 > **DO NOT create alternative representations.** If you need process data anywhere in the application, use ProcessScore. No subsetting, no reshaping, no "simplified versions." One schema, everywhere.
 
-**Last updated:** 2026-01-29
+**Last updated:** 2026-01-29 (Unified storage with full MetricValue columns)
 
 ---
 

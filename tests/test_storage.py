@@ -314,14 +314,14 @@ def test_schema_has_process_snapshots_table(tmp_path):
     conn.close()
 
 
-def test_schema_version_12(initialized_db: Path):
-    """Schema version should be 12 (MetricValue fields + new metrics)."""
+def test_schema_version_13(initialized_db: Path):
+    """Schema version should be 13 (full MetricValue with low/high columns)."""
     from pause_monitor.storage import get_connection
 
     conn = get_connection(initialized_db)
     version = get_schema_version(conn)
     conn.close()
-    assert version == 12
+    assert version == 13
 
 
 # --- Process Event CRUD Tests ---
@@ -496,14 +496,15 @@ def test_insert_process_snapshot(tmp_path):
     assert snapshot_id is not None
     assert isinstance(snapshot_id, int)
 
-    # Verify structured columns
+    # Verify structured columns with MetricValue dicts
     snapshots = get_process_snapshots(conn, event_id)
     assert len(snapshots) == 1
     snap = snapshots[0]
     assert snap["snapshot_type"] == "entry"
-    assert snap["score"] == 45
-    assert snap["cpu"] == 30.5
-    assert snap["mem"] == 200
+    # MetricValue fields are dicts with current/low/high
+    assert snap["score"]["current"] == 45
+    assert snap["cpu"]["current"] == 30.5
+    assert snap["mem"]["current"] == 200
     assert "cpu" in snap["categories"]
     conn.close()
 

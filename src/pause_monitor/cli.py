@@ -191,9 +191,13 @@ def events_show(ctx, event_id: int, forensics: bool, threads: bool, logs: bool) 
             click.echo(f"\nSnapshots: {len(snapshots)}")
             for snap in snapshots:
                 cats = ", ".join(snap["categories"]) if snap["categories"] else "none"
+                # MetricValue dicts: extract .current for display
+                score_val = snap["score"]["current"]
+                cpu_val = snap["cpu"]["current"]
+                mem_val = snap["mem"]["current"]
                 click.echo(
-                    f"  [{snap['snapshot_type']}] score={snap['score']} "
-                    f"cpu={snap['cpu']:.1f} mem={snap['mem']} [{cats}]"
+                    f"  [{snap['snapshot_type']}] score={score_val} "
+                    f"cpu={cpu_val:.1f} mem={mem_val} [{cats}]"
                 )
 
         # Show forensic captures
@@ -219,9 +223,13 @@ def events_show(ctx, event_id: int, forensics: bool, threads: bool, logs: bool) 
                             culprits = json.loads(context["culprits"])
                             for culprit in culprits[:5]:
                                 cats = ", ".join(culprit.get("categories", []))
-                                click.echo(
-                                    f"      - {culprit['command']} ({culprit['score']}) [{cats}]"
-                                )
+                                # Score is MetricValue dict
+                                score_data = culprit.get("score", {})
+                                if isinstance(score_data, dict):
+                                    score_val = score_data.get("current", 0)
+                                else:
+                                    score_val = score_data
+                                click.echo(f"      - {culprit['command']} ({score_val}) [{cats}]")
                         except json.JSONDecodeError:
                             pass
 

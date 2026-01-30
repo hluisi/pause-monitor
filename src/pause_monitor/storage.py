@@ -14,7 +14,7 @@ if TYPE_CHECKING:
 
 log = structlog.get_logger()
 
-SCHEMA_VERSION = 12  # MetricValue schema: new fields, cmprs removed, sysbsd→syscalls
+SCHEMA_VERSION = 13  # Full MetricValue storage with low/high columns
 
 
 SCHEMA = """
@@ -43,35 +43,75 @@ CREATE TABLE IF NOT EXISTS process_snapshots (
     event_id INTEGER NOT NULL,
     snapshot_type TEXT NOT NULL,
     captured_at REAL NOT NULL,
-    -- CPU
+    -- CPU (MetricValue: current/low/high)
     cpu REAL NOT NULL,
-    -- Memory
+    cpu_low REAL NOT NULL,
+    cpu_high REAL NOT NULL,
+    -- Memory (MetricValue + plain mem_peak)
     mem INTEGER NOT NULL,
+    mem_low INTEGER NOT NULL,
+    mem_high INTEGER NOT NULL,
     mem_peak INTEGER NOT NULL,
     pageins INTEGER NOT NULL,
+    pageins_low INTEGER NOT NULL,
+    pageins_high INTEGER NOT NULL,
     faults INTEGER NOT NULL,
-    -- Disk I/O
+    faults_low INTEGER NOT NULL,
+    faults_high INTEGER NOT NULL,
+    -- Disk I/O (MetricValue)
     disk_io INTEGER NOT NULL,
+    disk_io_low INTEGER NOT NULL,
+    disk_io_high INTEGER NOT NULL,
     disk_io_rate REAL NOT NULL,
-    -- Activity
+    disk_io_rate_low REAL NOT NULL,
+    disk_io_rate_high REAL NOT NULL,
+    -- Activity (MetricValue)
     csw INTEGER NOT NULL,
+    csw_low INTEGER NOT NULL,
+    csw_high INTEGER NOT NULL,
     syscalls INTEGER NOT NULL,
+    syscalls_low INTEGER NOT NULL,
+    syscalls_high INTEGER NOT NULL,
     threads INTEGER NOT NULL,
+    threads_low INTEGER NOT NULL,
+    threads_high INTEGER NOT NULL,
     mach_msgs INTEGER NOT NULL,
-    -- Efficiency
+    mach_msgs_low INTEGER NOT NULL,
+    mach_msgs_high INTEGER NOT NULL,
+    -- Efficiency (MetricValue)
     instructions INTEGER NOT NULL,
+    instructions_low INTEGER NOT NULL,
+    instructions_high INTEGER NOT NULL,
     cycles INTEGER NOT NULL,
+    cycles_low INTEGER NOT NULL,
+    cycles_high INTEGER NOT NULL,
     ipc REAL NOT NULL,
-    -- Power
+    ipc_low REAL NOT NULL,
+    ipc_high REAL NOT NULL,
+    -- Power (MetricValue)
     energy INTEGER NOT NULL,
+    energy_low INTEGER NOT NULL,
+    energy_high INTEGER NOT NULL,
     energy_rate REAL NOT NULL,
+    energy_rate_low REAL NOT NULL,
+    energy_rate_high REAL NOT NULL,
     wakeups INTEGER NOT NULL,
-    -- State
+    wakeups_low INTEGER NOT NULL,
+    wakeups_high INTEGER NOT NULL,
+    -- State (MetricValueStr: current/low/high)
     state TEXT NOT NULL,
+    state_low TEXT NOT NULL,
+    state_high TEXT NOT NULL,
     priority INTEGER NOT NULL,
-    -- Scoring
+    priority_low INTEGER NOT NULL,
+    priority_high INTEGER NOT NULL,
+    -- Scoring (MetricValue + MetricValueStr)
     score INTEGER NOT NULL,
+    score_low INTEGER NOT NULL,
+    score_high INTEGER NOT NULL,
     band TEXT NOT NULL,
+    band_low TEXT NOT NULL,
+    band_high TEXT NOT NULL,
     categories TEXT NOT NULL,
     FOREIGN KEY (event_id) REFERENCES process_events(id) ON DELETE CASCADE
 );
@@ -456,16 +496,33 @@ def get_process_event_detail(conn: sqlite3.Connection, event_id: int) -> dict | 
         event_id: The event ID to retrieve
 
     Returns:
-        Event dict with all fields including peak_snapshot (as dict from
-        joined process_snapshots row), or None if not found
+        Event dict with all fields including peak_snapshot (as MetricValue-compatible
+        dict from joined process_snapshots row), or None if not found
     """
     row = conn.execute(
         """SELECT e.id, e.pid, e.command, e.boot_time, e.entry_time, e.exit_time,
                   e.entry_band, e.peak_band, e.peak_score, e.peak_snapshot_id,
-                  s.cpu, s.state, s.mem, s.mem_peak, s.pageins, s.faults,
-                  s.disk_io, s.disk_io_rate, s.csw, s.syscalls, s.threads, s.mach_msgs,
-                  s.instructions, s.cycles, s.ipc, s.energy, s.energy_rate, s.wakeups,
-                  s.priority, s.score, s.band, s.categories, s.captured_at
+                  s.cpu, s.cpu_low, s.cpu_high,
+                  s.state, s.state_low, s.state_high,
+                  s.mem, s.mem_low, s.mem_high, s.mem_peak,
+                  s.pageins, s.pageins_low, s.pageins_high,
+                  s.faults, s.faults_low, s.faults_high,
+                  s.disk_io, s.disk_io_low, s.disk_io_high,
+                  s.disk_io_rate, s.disk_io_rate_low, s.disk_io_rate_high,
+                  s.csw, s.csw_low, s.csw_high,
+                  s.syscalls, s.syscalls_low, s.syscalls_high,
+                  s.threads, s.threads_low, s.threads_high,
+                  s.mach_msgs, s.mach_msgs_low, s.mach_msgs_high,
+                  s.instructions, s.instructions_low, s.instructions_high,
+                  s.cycles, s.cycles_low, s.cycles_high,
+                  s.ipc, s.ipc_low, s.ipc_high,
+                  s.energy, s.energy_low, s.energy_high,
+                  s.energy_rate, s.energy_rate_low, s.energy_rate_high,
+                  s.wakeups, s.wakeups_low, s.wakeups_high,
+                  s.priority, s.priority_low, s.priority_high,
+                  s.score, s.score_low, s.score_high,
+                  s.band, s.band_low, s.band_high,
+                  s.categories, s.captured_at
            FROM process_events e
            LEFT JOIN process_snapshots s ON e.peak_snapshot_id = s.id
            WHERE e.id = ?""",
@@ -479,29 +536,29 @@ def get_process_event_detail(conn: sqlite3.Connection, event_id: int) -> dict | 
     peak_snapshot = None
     if row[9] is not None:  # peak_snapshot_id exists
         peak_snapshot = {
-            "cpu": row[10],
-            "state": row[11],
-            "mem": row[12],
-            "mem_peak": row[13],
-            "pageins": row[14],
-            "faults": row[15],
-            "disk_io": row[16],
-            "disk_io_rate": row[17],
-            "csw": row[18],
-            "syscalls": row[19],
-            "threads": row[20],
-            "mach_msgs": row[21],
-            "instructions": row[22],
-            "cycles": row[23],
-            "ipc": row[24],
-            "energy": row[25],
-            "energy_rate": row[26],
-            "wakeups": row[27],
-            "priority": row[28],
-            "score": row[29],
-            "band": row[30],
-            "categories": json.loads(row[31]) if row[31] else [],
-            "captured_at": row[32],
+            "cpu": {"current": row[10], "low": row[11], "high": row[12]},
+            "state": {"current": row[13], "low": row[14], "high": row[15]},
+            "mem": {"current": row[16], "low": row[17], "high": row[18]},
+            "mem_peak": row[19],
+            "pageins": {"current": row[20], "low": row[21], "high": row[22]},
+            "faults": {"current": row[23], "low": row[24], "high": row[25]},
+            "disk_io": {"current": row[26], "low": row[27], "high": row[28]},
+            "disk_io_rate": {"current": row[29], "low": row[30], "high": row[31]},
+            "csw": {"current": row[32], "low": row[33], "high": row[34]},
+            "syscalls": {"current": row[35], "low": row[36], "high": row[37]},
+            "threads": {"current": row[38], "low": row[39], "high": row[40]},
+            "mach_msgs": {"current": row[41], "low": row[42], "high": row[43]},
+            "instructions": {"current": row[44], "low": row[45], "high": row[46]},
+            "cycles": {"current": row[47], "low": row[48], "high": row[49]},
+            "ipc": {"current": row[50], "low": row[51], "high": row[52]},
+            "energy": {"current": row[53], "low": row[54], "high": row[55]},
+            "energy_rate": {"current": row[56], "low": row[57], "high": row[58]},
+            "wakeups": {"current": row[59], "low": row[60], "high": row[61]},
+            "priority": {"current": row[62], "low": row[63], "high": row[64]},
+            "score": {"current": row[65], "low": row[66], "high": row[67]},
+            "band": {"current": row[68], "low": row[69], "high": row[70]},
+            "categories": json.loads(row[71]) if row[71] else [],
+            "captured_at": row[72],
         }
 
     return {
@@ -553,49 +610,127 @@ def insert_process_snapshot(
 ) -> int:
     """Insert a snapshot for an event. Returns snapshot ID.
 
-    Extracts .current from MetricValue fields (low/high are transient).
+    Saves full MetricValue (current/low/high) for all metric fields.
     """
     cursor = conn.execute(
         """INSERT INTO process_snapshots
            (event_id, snapshot_type, captured_at,
-            cpu, mem, mem_peak, pageins, faults,
-            disk_io, disk_io_rate, csw, syscalls, threads, mach_msgs,
-            instructions, cycles, ipc, energy, energy_rate, wakeups,
-            state, priority, score, band, categories)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            cpu, cpu_low, cpu_high,
+            mem, mem_low, mem_high, mem_peak,
+            pageins, pageins_low, pageins_high,
+            faults, faults_low, faults_high,
+            disk_io, disk_io_low, disk_io_high,
+            disk_io_rate, disk_io_rate_low, disk_io_rate_high,
+            csw, csw_low, csw_high,
+            syscalls, syscalls_low, syscalls_high,
+            threads, threads_low, threads_high,
+            mach_msgs, mach_msgs_low, mach_msgs_high,
+            instructions, instructions_low, instructions_high,
+            cycles, cycles_low, cycles_high,
+            ipc, ipc_low, ipc_high,
+            energy, energy_low, energy_high,
+            energy_rate, energy_rate_low, energy_rate_high,
+            wakeups, wakeups_low, wakeups_high,
+            state, state_low, state_high,
+            priority, priority_low, priority_high,
+            score, score_low, score_high,
+            band, band_low, band_high,
+            categories)
+           VALUES (?, ?, ?,
+                   ?, ?, ?,
+                   ?, ?, ?, ?,
+                   ?, ?, ?,
+                   ?, ?, ?,
+                   ?, ?, ?,
+                   ?, ?, ?,
+                   ?, ?, ?,
+                   ?, ?, ?,
+                   ?, ?, ?,
+                   ?, ?, ?,
+                   ?, ?, ?,
+                   ?, ?, ?,
+                   ?, ?, ?,
+                   ?, ?, ?,
+                   ?, ?, ?,
+                   ?, ?, ?,
+                   ?, ?, ?,
+                   ?, ?, ?,
+                   ?, ?, ?,
+                   ?, ?, ?,
+                   ?)""",
         (
             event_id,
             snapshot_type,
             score.captured_at,
             # CPU
             score.cpu.current,
+            score.cpu.low,
+            score.cpu.high,
             # Memory
             score.mem.current,
+            score.mem.low,
+            score.mem.high,
             score.mem_peak,
             score.pageins.current,
+            score.pageins.low,
+            score.pageins.high,
             score.faults.current,
+            score.faults.low,
+            score.faults.high,
             # Disk I/O
             score.disk_io.current,
+            score.disk_io.low,
+            score.disk_io.high,
             score.disk_io_rate.current,
+            score.disk_io_rate.low,
+            score.disk_io_rate.high,
             # Activity
             score.csw.current,
+            score.csw.low,
+            score.csw.high,
             score.syscalls.current,
+            score.syscalls.low,
+            score.syscalls.high,
             score.threads.current,
+            score.threads.low,
+            score.threads.high,
             score.mach_msgs.current,
+            score.mach_msgs.low,
+            score.mach_msgs.high,
             # Efficiency
             score.instructions.current,
+            score.instructions.low,
+            score.instructions.high,
             score.cycles.current,
+            score.cycles.low,
+            score.cycles.high,
             score.ipc.current,
+            score.ipc.low,
+            score.ipc.high,
             # Power
             score.energy.current,
+            score.energy.low,
+            score.energy.high,
             score.energy_rate.current,
+            score.energy_rate.low,
+            score.energy_rate.high,
             score.wakeups.current,
+            score.wakeups.low,
+            score.wakeups.high,
             # State
             score.state.current,
+            score.state.low,
+            score.state.high,
             score.priority.current,
+            score.priority.low,
+            score.priority.high,
             # Scoring
             score.score.current,
+            score.score.low,
+            score.score.high,
             score.band.current,
+            score.band.low,
+            score.band.high,
             json.dumps(score.categories),
         ),
     )
@@ -606,13 +741,30 @@ def insert_process_snapshot(
 
 
 def get_snapshot(conn: sqlite3.Connection, snapshot_id: int) -> dict | None:
-    """Get a snapshot by ID with all fields (returns flat values, not MetricValue)."""
+    """Get a snapshot by ID with all fields as MetricValue-compatible dicts."""
     row = conn.execute(
         """SELECT id, event_id, snapshot_type, captured_at,
-                  cpu, mem, mem_peak, pageins, faults,
-                  disk_io, disk_io_rate, csw, syscalls, threads, mach_msgs,
-                  instructions, cycles, ipc, energy, energy_rate, wakeups,
-                  state, priority, score, band, categories
+                  cpu, cpu_low, cpu_high,
+                  mem, mem_low, mem_high, mem_peak,
+                  pageins, pageins_low, pageins_high,
+                  faults, faults_low, faults_high,
+                  disk_io, disk_io_low, disk_io_high,
+                  disk_io_rate, disk_io_rate_low, disk_io_rate_high,
+                  csw, csw_low, csw_high,
+                  syscalls, syscalls_low, syscalls_high,
+                  threads, threads_low, threads_high,
+                  mach_msgs, mach_msgs_low, mach_msgs_high,
+                  instructions, instructions_low, instructions_high,
+                  cycles, cycles_low, cycles_high,
+                  ipc, ipc_low, ipc_high,
+                  energy, energy_low, energy_high,
+                  energy_rate, energy_rate_low, energy_rate_high,
+                  wakeups, wakeups_low, wakeups_high,
+                  state, state_low, state_high,
+                  priority, priority_low, priority_high,
+                  score, score_low, score_high,
+                  band, band_low, band_high,
+                  categories
            FROM process_snapshots WHERE id = ?""",
         (snapshot_id,),
     ).fetchone()
@@ -626,46 +778,66 @@ def get_snapshot(conn: sqlite3.Connection, snapshot_id: int) -> dict | None:
         "snapshot_type": row[2],
         "captured_at": row[3],
         # CPU
-        "cpu": row[4],
+        "cpu": {"current": row[4], "low": row[5], "high": row[6]},
         # Memory
-        "mem": row[5],
-        "mem_peak": row[6],
-        "pageins": row[7],
-        "faults": row[8],
+        "mem": {"current": row[7], "low": row[8], "high": row[9]},
+        "mem_peak": row[10],
+        "pageins": {"current": row[11], "low": row[12], "high": row[13]},
+        "faults": {"current": row[14], "low": row[15], "high": row[16]},
         # Disk I/O
-        "disk_io": row[9],
-        "disk_io_rate": row[10],
+        "disk_io": {"current": row[17], "low": row[18], "high": row[19]},
+        "disk_io_rate": {"current": row[20], "low": row[21], "high": row[22]},
         # Activity
-        "csw": row[11],
-        "syscalls": row[12],
-        "threads": row[13],
-        "mach_msgs": row[14],
+        "csw": {"current": row[23], "low": row[24], "high": row[25]},
+        "syscalls": {"current": row[26], "low": row[27], "high": row[28]},
+        "threads": {"current": row[29], "low": row[30], "high": row[31]},
+        "mach_msgs": {"current": row[32], "low": row[33], "high": row[34]},
         # Efficiency
-        "instructions": row[15],
-        "cycles": row[16],
-        "ipc": row[17],
+        "instructions": {"current": row[35], "low": row[36], "high": row[37]},
+        "cycles": {"current": row[38], "low": row[39], "high": row[40]},
+        "ipc": {"current": row[41], "low": row[42], "high": row[43]},
         # Power
-        "energy": row[18],
-        "energy_rate": row[19],
-        "wakeups": row[20],
+        "energy": {"current": row[44], "low": row[45], "high": row[46]},
+        "energy_rate": {"current": row[47], "low": row[48], "high": row[49]},
+        "wakeups": {"current": row[50], "low": row[51], "high": row[52]},
         # State
-        "state": row[21],
-        "priority": row[22],
+        "state": {"current": row[53], "low": row[54], "high": row[55]},
+        "priority": {"current": row[56], "low": row[57], "high": row[58]},
         # Scoring
-        "score": row[23],
-        "band": row[24],
-        "categories": json.loads(row[25]) if row[25] else [],
+        "score": {"current": row[59], "low": row[60], "high": row[61]},
+        "band": {"current": row[62], "low": row[63], "high": row[64]},
+        "categories": json.loads(row[65]) if row[65] else [],
     }
 
 
 def get_process_snapshots(conn: sqlite3.Connection, event_id: int) -> list[dict]:
-    """Get all snapshots for an event, ordered by capture time."""
+    """Get all snapshots for an event, ordered by capture time.
+
+    Returns MetricValue-compatible dicts with current/low/high.
+    """
     cursor = conn.execute(
         """SELECT id, event_id, snapshot_type, captured_at,
-                  cpu, mem, mem_peak, pageins, faults,
-                  disk_io, disk_io_rate, csw, syscalls, threads, mach_msgs,
-                  instructions, cycles, ipc, energy, energy_rate, wakeups,
-                  state, priority, score, band, categories
+                  cpu, cpu_low, cpu_high,
+                  mem, mem_low, mem_high, mem_peak,
+                  pageins, pageins_low, pageins_high,
+                  faults, faults_low, faults_high,
+                  disk_io, disk_io_low, disk_io_high,
+                  disk_io_rate, disk_io_rate_low, disk_io_rate_high,
+                  csw, csw_low, csw_high,
+                  syscalls, syscalls_low, syscalls_high,
+                  threads, threads_low, threads_high,
+                  mach_msgs, mach_msgs_low, mach_msgs_high,
+                  instructions, instructions_low, instructions_high,
+                  cycles, cycles_low, cycles_high,
+                  ipc, ipc_low, ipc_high,
+                  energy, energy_low, energy_high,
+                  energy_rate, energy_rate_low, energy_rate_high,
+                  wakeups, wakeups_low, wakeups_high,
+                  state, state_low, state_high,
+                  priority, priority_low, priority_high,
+                  score, score_low, score_high,
+                  band, band_low, band_high,
+                  categories
            FROM process_snapshots WHERE event_id = ?
            ORDER BY captured_at""",
         (event_id,),
@@ -677,35 +849,35 @@ def get_process_snapshots(conn: sqlite3.Connection, event_id: int) -> list[dict]
             "snapshot_type": r[2],
             "captured_at": r[3],
             # CPU
-            "cpu": r[4],
+            "cpu": {"current": r[4], "low": r[5], "high": r[6]},
             # Memory
-            "mem": r[5],
-            "mem_peak": r[6],
-            "pageins": r[7],
-            "faults": r[8],
+            "mem": {"current": r[7], "low": r[8], "high": r[9]},
+            "mem_peak": r[10],
+            "pageins": {"current": r[11], "low": r[12], "high": r[13]},
+            "faults": {"current": r[14], "low": r[15], "high": r[16]},
             # Disk I/O
-            "disk_io": r[9],
-            "disk_io_rate": r[10],
+            "disk_io": {"current": r[17], "low": r[18], "high": r[19]},
+            "disk_io_rate": {"current": r[20], "low": r[21], "high": r[22]},
             # Activity
-            "csw": r[11],
-            "syscalls": r[12],
-            "threads": r[13],
-            "mach_msgs": r[14],
+            "csw": {"current": r[23], "low": r[24], "high": r[25]},
+            "syscalls": {"current": r[26], "low": r[27], "high": r[28]},
+            "threads": {"current": r[29], "low": r[30], "high": r[31]},
+            "mach_msgs": {"current": r[32], "low": r[33], "high": r[34]},
             # Efficiency
-            "instructions": r[15],
-            "cycles": r[16],
-            "ipc": r[17],
+            "instructions": {"current": r[35], "low": r[36], "high": r[37]},
+            "cycles": {"current": r[38], "low": r[39], "high": r[40]},
+            "ipc": {"current": r[41], "low": r[42], "high": r[43]},
             # Power
-            "energy": r[18],
-            "energy_rate": r[19],
-            "wakeups": r[20],
+            "energy": {"current": r[44], "low": r[45], "high": r[46]},
+            "energy_rate": {"current": r[47], "low": r[48], "high": r[49]},
+            "wakeups": {"current": r[50], "low": r[51], "high": r[52]},
             # State
-            "state": r[21],
-            "priority": r[22],
+            "state": {"current": r[53], "low": r[54], "high": r[55]},
+            "priority": {"current": r[56], "low": r[57], "high": r[58]},
             # Scoring
-            "score": r[23],
-            "band": r[24],
-            "categories": json.loads(r[25]) if r[25] else [],
+            "score": {"current": r[59], "low": r[60], "high": r[61]},
+            "band": {"current": r[62], "low": r[63], "high": r[64]},
+            "categories": json.loads(r[65]) if r[65] else [],
         }
         for r in cursor.fetchall()
     ]

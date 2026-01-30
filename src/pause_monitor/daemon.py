@@ -371,15 +371,19 @@ class Daemon:
 
                 previous_rogues = current_rogues
 
-                # Update per-process tracking (may trigger forensics callback)
-                if self.tracker is not None:
-                    self.tracker.update(samples.rogues)
-
-                # Push to ring buffer
+                # Push unenriched to ring buffer first (needed for history lookup)
                 self.ring_buffer.push(samples)
 
                 # Enrich with low/high from ring buffer history
                 samples = self._compute_pid_low_high(samples)
+
+                # Update ring buffer with enriched version (so storage gets full data)
+                self.ring_buffer.update_latest(samples)
+
+                # Update per-process tracking with enriched data
+                # (tracker persists to storage, needs full MetricValue)
+                if self.tracker is not None:
+                    self.tracker.update(samples.rogues)
 
                 # Log elevated samples for visibility between heartbeats
                 elevated_threshold = self.config.bands.elevated
