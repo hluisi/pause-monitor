@@ -5,7 +5,6 @@ import ctypes
 import logging
 import logging.handlers
 import os
-import re
 import resource
 import signal
 import sqlite3
@@ -647,26 +646,6 @@ def _add_source(source: str) -> structlog.types.Processor:
     return processor
 
 
-# Control characters that corrupt terminal output (0x00-0x1F except \t and \n)
-_CONTROL_CHAR_RE = re.compile(r"[\x00-\x08\x0b-\x0c\x0e-\x1f]")
-
-
-def _sanitize_log_values(
-    logger: structlog.types.WrappedLogger,
-    method_name: str,
-    event_dict: structlog.types.EventDict,
-) -> structlog.types.EventDict:
-    """Strip control characters from logged values to prevent terminal corruption.
-
-    External data (process names, subprocess output) may contain carriage returns
-    or other control characters that corrupt terminal output when logged.
-    """
-    for key, value in event_dict.items():
-        if isinstance(value, str):
-            event_dict[key] = _CONTROL_CHAR_RE.sub("", value)
-    return event_dict
-
-
 def _setup_logging(config: "Config") -> None:
     """Configure structlog with dual output: console + JSON file.
 
@@ -720,13 +699,12 @@ def _setup_logging(config: "Config") -> None:
             structlog.stdlib.PositionalArgumentsFormatter(),
             structlog.processors.StackInfoRenderer(),
             structlog.processors.format_exc_info,
-            _sanitize_log_values,  # Strip control chars before rendering
             structlog.stdlib.ProcessorFormatter.wrap_for_formatter,
         ],
         wrapper_class=structlog.stdlib.BoundLogger,
         context_class=dict,
         logger_factory=structlog.stdlib.LoggerFactory(),
-        cache_logger_on_first_use=False,
+        cache_logger_on_first_use=True,
     )
 
     # Also add a console handler for human-readable output
@@ -741,7 +719,6 @@ def _setup_logging(config: "Config") -> None:
                 structlog.processors.add_log_level,
                 structlog.processors.StackInfoRenderer(),
                 structlog.processors.format_exc_info,
-                _sanitize_log_values,  # Strip control chars before rendering
             ],
         )
     )
