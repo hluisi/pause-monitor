@@ -5,6 +5,7 @@ import ctypes
 import logging
 import logging.handlers
 import os
+import re
 import resource
 import signal
 import sqlite3
@@ -13,7 +14,6 @@ from datetime import datetime
 
 import psutil
 import structlog
-from termcolor import colored
 
 from pause_monitor.boottime import get_boot_time
 from pause_monitor.collector import (
@@ -431,22 +431,21 @@ class Daemon:
                 # New processes entering rogue selection (debug - use -v to see)
                 for pid in current_pids - previous_pids:
                     rogue = next(r for r in samples.rogues if r.pid == pid)
-                    cats = ",".join(sorted(rogue.categories))
-                    msg = (
-                        f"rogue_entered: {colored(rogue.command, 'cyan')} "
-                        f"{colored(f'({rogue.score.current})', 'yellow')} "
-                        f"{colored(f'pid={pid}', 'dark_grey')} "
-                        f"{colored(f'[{cats}]', 'blue')}"
+                    log.debug(
+                        "rogue_entered",
+                        command=rogue.command,
+                        score=rogue.score.current,
+                        pid=pid,
+                        categories=sorted(rogue.categories),
                     )
-                    log.debug(msg)
 
                 # Processes exiting rogue selection (debug - use -v to see)
                 for pid in previous_pids - current_pids:
-                    msg = (
-                        f"rogue_exited: {colored(previous_rogues[pid], 'cyan')} "
-                        f"{colored(f'pid={pid}', 'dark_grey')}"
+                    log.debug(
+                        "rogue_exited",
+                        command=previous_rogues[pid],
+                        pid=pid,
                     )
-                    log.debug(msg)
 
                 previous_rogues = current_rogues
 
@@ -648,6 +647,26 @@ def _add_source(source: str) -> structlog.types.Processor:
     return processor
 
 
+# Control characters that corrupt terminal output (0x00-0x1F except \t and \n)
+_CONTROL_CHAR_RE = re.compile(r"[\x00-\x08\x0b-\x0c\x0e-\x1f]")
+
+
+def _sanitize_log_values(
+    logger: structlog.types.WrappedLogger,
+    method_name: str,
+    event_dict: structlog.types.EventDict,
+) -> structlog.types.EventDict:
+    """Strip control characters from logged values to prevent terminal corruption.
+
+    External data (process names, subprocess output) may contain carriage returns
+    or other control characters that corrupt terminal output when logged.
+    """
+    for key, value in event_dict.items():
+        if isinstance(value, str):
+            event_dict[key] = _CONTROL_CHAR_RE.sub("", value)
+    return event_dict
+
+
 def _setup_logging(config: "Config") -> None:
     """Configure structlog with dual output: console + JSON file.
 
@@ -701,12 +720,13 @@ def _setup_logging(config: "Config") -> None:
             structlog.stdlib.PositionalArgumentsFormatter(),
             structlog.processors.StackInfoRenderer(),
             structlog.processors.format_exc_info,
+            _sanitize_log_values,  # Strip control chars before rendering
             structlog.stdlib.ProcessorFormatter.wrap_for_formatter,
         ],
         wrapper_class=structlog.stdlib.BoundLogger,
         context_class=dict,
         logger_factory=structlog.stdlib.LoggerFactory(),
-        cache_logger_on_first_use=True,
+        cache_logger_on_first_use=False,
     )
 
     # Also add a console handler for human-readable output
@@ -721,6 +741,7 @@ def _setup_logging(config: "Config") -> None:
                 structlog.processors.add_log_level,
                 structlog.processors.StackInfoRenderer(),
                 structlog.processors.format_exc_info,
+                _sanitize_log_values,  # Strip control chars before rendering
             ],
         )
     )

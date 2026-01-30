@@ -34,6 +34,23 @@ log = structlog.get_logger()
 # Tailspin captures are written here (sudoers rule restricts to this path)
 TAILSPIN_DIR = Path("/tmp/pause-monitor")
 
+# Strip ANSI escape sequences and control characters from external tool output
+_ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+# Control characters (0x00-0x1F) except newline (0x0A) and tab (0x09)
+_CONTROL_CHAR_RE = re.compile(r"[\x00-\x08\x0b-\x0c\x0e-\x1f]")
+
+
+def _sanitize_text(text: str) -> str:
+    """Remove ANSI escape sequences and control characters from text.
+
+    Preserves newlines and tabs but strips carriage returns and other
+    control characters that can corrupt terminal output.
+    """
+    # First strip ANSI sequences
+    text = _ANSI_ESCAPE_RE.sub("", text)
+    # Then strip control characters (including \r which is 0x0D)
+    return _CONTROL_CHAR_RE.sub("", text)
+
 
 # --- Parsing Data Structures ---
 
@@ -406,13 +423,15 @@ class ForensicsCapture:
             "save",
             "-o",
             str(output_path),
+            stdin=asyncio.subprocess.DEVNULL,  # No tty interaction
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.PIPE,  # Capture stderr for error messages
+            start_new_session=True,  # Detach from controlling terminal
         )
         _, stderr = await process.communicate()
 
         if process.returncode != 0:
-            error_msg = stderr.decode("utf-8", errors="replace").strip()
+            error_msg = _sanitize_text(stderr.decode("utf-8", errors="replace").strip())
             raise PermissionError(f"tailspin save failed (sudo -n): {error_msg}")
 
         if not output_path.exists():
@@ -443,8 +462,10 @@ class ForensicsCapture:
             'eventMessage CONTAINS[c] "hang" OR '
             'eventMessage CONTAINS[c] "stall" OR '
             'eventMessage CONTAINS[c] "timeout"',
+            stdin=asyncio.subprocess.DEVNULL,  # No tty interaction
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
+            start_new_session=True,  # Detach from controlling terminal
         )
 
         stdout, _ = await process.communicate()
@@ -471,7 +492,7 @@ class ForensicsCapture:
             Status string: 'success' or 'failed'
         """
         if isinstance(result, BaseException):
-            log.warning("tailspin_failed", error=str(result))
+            log.warning("tailspin_failed", error=_sanitize_text(str(result)))
             return "failed"
 
         try:
@@ -480,7 +501,9 @@ class ForensicsCapture:
 
             completed = subprocess.run(
                 ["/usr/sbin/spindump", "-i", str(result), "-stdout"],
+                stdin=subprocess.DEVNULL,  # No tty interaction
                 capture_output=True,
+                start_new_session=True,  # Detach from controlling terminal
             )
 
             if completed.returncode != 0:
@@ -523,7 +546,7 @@ class ForensicsCapture:
             return "success"
 
         except Exception as e:
-            log.warning("tailspin_decode_failed", error=str(e))
+            log.warning("tailspin_decode_failed", error=_sanitize_text(str(e)))
             return "failed"
 
     def _process_logs(
@@ -541,7 +564,7 @@ class ForensicsCapture:
             Status string: 'success' or 'failed'
         """
         if isinstance(result, BaseException):
-            log.warning("logs_failed", error=str(result))
+            log.warning("logs_failed", error=_sanitize_text(str(result)))
             return "failed"
 
         try:
@@ -565,7 +588,7 @@ class ForensicsCapture:
             return "success"
 
         except Exception as e:
-            log.warning("logs_parse_failed", error=str(e))
+            log.warning("logs_parse_failed", error=_sanitize_text(str(e)))
             return "failed"
 
     def _store_buffer_context(

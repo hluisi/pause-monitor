@@ -9,7 +9,6 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
 import structlog
-from termcolor import colored
 
 from pause_monitor.collector import ProcessScore
 from pause_monitor.config import BandsConfig
@@ -152,13 +151,13 @@ class ProcessTracker:
             last_checkpoint=score.captured_at,  # Start checkpoint timer from entry
         )
 
-        msg = (
-            f"tracking_started: {colored(score.command, 'cyan')} "
-            f"{colored(f'({score.score.current})', 'yellow')} "
-            f"{colored(f'pid={score.pid}', 'dark_grey')} "
-            f"{colored(f'[{band}]', 'magenta')}"
+        log.info(
+            "tracking_started",
+            command=score.command,
+            score=score.score.current,
+            pid=score.pid,
+            band=band,
         )
-        log.info(msg)
 
         # Trigger forensics if entering high or critical band
         if band in ("high", "critical") and self._on_forensics_trigger:
@@ -193,14 +192,14 @@ class ProcessTracker:
         # Log with reason for closure
         reason = "score_dropped" if exit_score is not None else "process_gone"
         exit_score_val = exit_score.score.current if exit_score else None
-        score_info = f"{exit_score_val}→0" if exit_score_val else f"peak={tracked.peak_score}"
-        msg = (
-            f"tracking_ended: {colored(tracked.command, 'cyan')} "
-            f"{colored(f'({score_info})', 'yellow')} "
-            f"{colored(f'pid={pid}', 'dark_grey')} "
-            f"{colored(f'[{reason}]', 'magenta')}"
+        log.info(
+            "tracking_ended",
+            command=tracked.command,
+            exit_score=exit_score_val,
+            peak_score=tracked.peak_score,
+            pid=pid,
+            reason=reason,
         )
-        log.info(msg)
 
     def _update_peak(self, score: ProcessScore) -> None:
         """Update peak for tracked process."""
@@ -215,13 +214,15 @@ class ProcessTracker:
 
         # Log band transitions (escalations)
         if band != old_band:
-            msg = (
-                f"band_changed: {colored(score.command, 'cyan')} "
-                f"{colored(f'({old_score}→{score.score.current})', 'yellow')} "
-                f"{colored(f'pid={score.pid}', 'dark_grey')} "
-                f"{colored(f'[{old_band}→{band}]', 'magenta')}"
+            log.info(
+                "band_changed",
+                command=score.command,
+                old_score=old_score,
+                new_score=score.score.current,
+                pid=score.pid,
+                old_band=old_band,
+                new_band=band,
             )
-            log.info(msg)
 
             # Trigger forensics on escalation INTO high/critical (from lower band)
             if band in ("high", "critical") and old_band not in ("high", "critical"):
@@ -245,9 +246,11 @@ class ProcessTracker:
         )
 
         log.debug(
-            f"tracking_peak: {colored(score.command, 'cyan')} "
-            f"{colored(f'({old_score}→{score.score.current})', 'yellow')} "
-            f"{colored(f'pid={score.pid}', 'dark_grey')}"
+            "tracking_peak",
+            command=score.command,
+            old_score=old_score,
+            new_score=score.score.current,
+            pid=score.pid,
         )
 
     def _insert_checkpoint(self, score: ProcessScore, tracked: TrackedProcess) -> None:
@@ -260,7 +263,8 @@ class ProcessTracker:
         tracked.last_checkpoint = score.captured_at
 
         log.debug(
-            f"tracking_checkpoint: {colored(score.command, 'cyan')} "
-            f"{colored(f'({score.score.current})', 'yellow')} "
-            f"{colored(f'pid={score.pid}', 'dark_grey')}"
+            "tracking_checkpoint",
+            command=score.command,
+            score=score.score.current,
+            pid=score.pid,
         )
