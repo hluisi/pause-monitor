@@ -385,17 +385,6 @@ class Daemon:
                 if self.tracker is not None:
                     self.tracker.update(samples.rogues)
 
-                # Log elevated samples for visibility between heartbeats
-                elevated_threshold = self.config.bands.elevated
-                if samples.max_score >= elevated_threshold and samples.rogues:
-                    top = samples.rogues[0]
-                    msg = (
-                        f"elevated_sample: {colored(top.command, 'cyan')} "
-                        f"{colored(f'({samples.max_score})', 'yellow')} "
-                        f"{colored(f'pid={top.pid}', 'dark_grey')}"
-                    )
-                    log.info(msg)
-
                 # Update heartbeat stats
                 heartbeat_count += 1
                 heartbeat_score_sum += samples.max_score
