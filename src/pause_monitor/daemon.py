@@ -1,6 +1,7 @@
 """Background daemon for pause-monitor."""
 
 import asyncio
+import ctypes
 import os
 import resource
 import signal
@@ -30,6 +31,40 @@ from pause_monitor.storage import init_database, prune_old_data
 from pause_monitor.tracker import ProcessTracker
 
 log = structlog.get_logger()
+
+# macOS QoS class constants (from pthread/qos.h)
+QOS_CLASS_USER_INTERACTIVE = 0x21
+QOS_CLASS_USER_INITIATED = 0x19
+QOS_CLASS_DEFAULT = 0x15
+QOS_CLASS_UTILITY = 0x11
+QOS_CLASS_BACKGROUND = 0x09
+
+
+def _set_qos_class(qos_class: int, relative_priority: int = 0) -> bool:
+    """
+    Set QoS class for the current thread via pthread.
+
+    This doesn't require root — it's a scheduler hint that affects CPU priority,
+    I/O priority, and timer coalescing. USER_INITIATED is appropriate for a
+    monitoring daemon that needs timely wakeups.
+
+    Args:
+        qos_class: One of the QOS_CLASS_* constants
+        relative_priority: -15 to 0, offset within class (0 = highest in class)
+
+    Returns:
+        True if successful, False otherwise
+    """
+    try:
+        libsystem = ctypes.CDLL("/usr/lib/libSystem.B.dylib")
+        pthread_set_qos = libsystem.pthread_set_qos_class_self_np
+        pthread_set_qos.argtypes = [ctypes.c_uint, ctypes.c_int]
+        pthread_set_qos.restype = ctypes.c_int
+
+        result = pthread_set_qos(qos_class, relative_priority)
+        return result == 0
+    except (OSError, AttributeError):
+        return False
 
 
 @dataclass
@@ -157,12 +192,17 @@ class Daemon:
         log.info("daemon_boot_time", boot_time=self.boot_time)
 
         # Set QoS to USER_INITIATED for reliable sampling under load
-        # Ensures we get CPU time even when system is busy (when monitoring matters most)
-        try:
-            os.setpriority(os.PRIO_PROCESS, 0, -10)  # Negative nice = higher priority
-            log.info("daemon_priority_set", nice=-10)
-        except PermissionError:
-            log.warning("qos_priority_failed", msg="Could not set high priority, running as normal")
+        # This affects CPU scheduling, I/O priority, and timer coalescing
+        # Ensures we get timely wakeups even when system is busy
+        if _set_qos_class(QOS_CLASS_USER_INITIATED):
+            log.info("qos_class_set", qos="USER_INITIATED")
+        else:
+            # Fall back to nice (requires root, will likely fail)
+            try:
+                os.setpriority(os.PRIO_PROCESS, 0, -10)
+                log.info("daemon_priority_set", nice=-10)
+            except PermissionError:
+                log.info("priority_default", msg="Running at default priority")
 
         # Setup signal handlers
         loop = asyncio.get_running_loop()
