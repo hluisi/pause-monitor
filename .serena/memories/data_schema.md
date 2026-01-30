@@ -6,7 +6,7 @@
 >
 > **DO NOT create alternative representations.** If you need process data anywhere in the application, use ProcessScore. No subsetting, no reshaping, no "simplified versions." One schema, everywhere.
 
-**Last updated:** 2026-01-29 (Unified storage with full MetricValue columns)
+**Last updated:** 2026-01-30
 
 ---
 
@@ -99,7 +99,7 @@ class ProcessScore:
     # ─────────────────────────────────────────────────────────────
     score: MetricValue          # Stress score 0-100
     band: MetricValueStr        # low/medium/elevated/high/critical
-    categories: list[str]       # Why selected as rogue
+    categories: list[str]       # Why selected as rogue (selection reasons)
 ```
 
 ---

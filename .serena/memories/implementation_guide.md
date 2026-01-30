@@ -30,34 +30,7 @@
 - Intel: (1, 1) — already nanoseconds
 - Apple Silicon: (125, 3) — ~41.67ns per tick
 
-### TopCollector (Legacy)
-
-Kept for backwards compatibility. Use `collector = "top"` in config to enable.
-
-**Problems:**
-1. Subprocess spawn overhead every 2 seconds
-2. First sample always invalid (CPU% needs delta) — wastes 50% of work
-3. Text parsing is fragile
-4. Missing: disk I/O, energy, instructions, cycles, wakeups, GPU
-
-### Configuration
-
-```toml
-[sentinel]
-collector = "libproc"  # or "top" for legacy
-```
-
-See `libproc_and_iokit_research` memory for complete API documentation
-
-**Data source:** Direct syscalls to `/usr/lib/libproc.dylib` via ctypes
-
-**APIs used:**
-- `proc_pid_rusage(RUSAGE_INFO_V4)` — CPU time, memory, disk I/O, energy, wakeups
-- `proc_pidinfo(PROC_PIDTASKINFO)` — Context switches, syscalls, threads
-- `sysctl(KERN_PROC)` — Process state, listing
-- IOKit (optional) — Per-process GPU time
-
-**See `libproc_and_iokit_research` memory for complete API documentation.**
+See `libproc_and_iokit_research` memory for complete API documentation.
 
 ### Dataclasses
 
@@ -191,9 +164,9 @@ Uses `sysctl -n kern.boottime` and parses `sec = NNNN` from output.
 **Purpose:** SQLite with WAL mode.
 
 ### Constants
-- `SCHEMA_VERSION = 9`
+- `SCHEMA_VERSION = 13`
 
-### Tables (v9)
+### Tables (v13)
 
 **daemon_state** — Key-value store for daemon state:
 - `key` (TEXT PRIMARY KEY), `value` (TEXT), `updated_at` (REAL)

@@ -13,4 +13,4 @@
 | `powermetrics_per_process_flags` | What powermetrics flags give per-process data? |
 | `architecture_postmortem` | What's wrong with current data architecture? |
 
-**Focus:** Architecture review in progress. Data flow misaligned — forensics goes to disk instead of database, ring buffer serialized instead of queried. See `architecture_postmortem`.
+**Focus:** Core system functional with LibprocCollector. Remaining work: forensics flow cleanup (data goes to disk instead of database). See `architecture_postmortem` for historical context.

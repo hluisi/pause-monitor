@@ -1,10 +1,10 @@
 # Architecture Post-Mortem
 
 **Written:** 2026-01-29
-**Updated:** 2026-01-29
-**Status:** Current state assessment — action required
+**Updated:** 2026-01-30
+**Status:** Historical reference — collector issue resolved
 
-> **Update 2026-01-29:** Added collector design flaw. TopCollector spawns `top -l 2` every 2 seconds and throws away 50% of samples. Being replaced with LibprocCollector using native APIs.
+> **Resolved 2026-01-30:** TopCollector replaced with LibprocCollector (commits `ecb4748`, `b32310e`). The collector section below is preserved as historical context.
 
 ## Executive Summary
 
@@ -180,8 +180,8 @@ The meta-problem: agents treated implementation details as their domain rather t
 
 ## What Needs to Change
 
-### Replace (Critical)
-- **TopCollector with LibprocCollector** — Use native macOS APIs (see `libproc_and_iokit_research` memory)
+### ~~Replace (Critical)~~ ✓ DONE
+- ~~**TopCollector with LibprocCollector**~~ — Completed 2026-01-30
 
 ### Remove
 - Pause detection (bands replaced this)

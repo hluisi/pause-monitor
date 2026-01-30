@@ -1,8 +1,6 @@
 # Design Specification
 
-> ⚠️ **COLLECTOR REDESIGN PENDING (2026-01-29).** TopCollector to be replaced with LibprocCollector.
-
-**Last updated:** 2026-01-29
+**Last updated:** 2026-01-30
 **Primary language:** Python
 
 ## Source Documents
@@ -65,43 +63,27 @@ A **real-time** system health monitoring tool for macOS that tracks down intermi
 
 ## Components
 
-### LibprocCollector (collector.py) — TO BE IMPLEMENTED
+### LibprocCollector (collector.py)
 
 **Purpose:** Per-process data collection via native macOS APIs (libproc.dylib)
 
-**Why replacing TopCollector:**
-- TopCollector spawns `top -l 2` subprocess every 2 seconds
-- Throws away 50% of samples (first sample has invalid CPU%)
-- Text parsing is fragile and slow
-- Missing metrics: disk I/O, energy, instructions, cycles, GPU
-
-**New approach:**
+**Approach:**
 - Direct syscalls via ctypes to `/usr/lib/libproc.dylib`
 - `proc_pid_rusage()` for CPU, memory, disk I/O, energy, wakeups
 - `proc_pidinfo()` for context switches, syscalls, threads
 - `sysctl` for process state
-- IOKit for GPU metrics (optional)
 - No subprocess spawning, no text parsing
 
-**Data available (see `libproc_and_iokit_research` memory):**
-- All current metrics (CPU, mem, state, pageins, csw, syscalls, threads)
-- NEW: Disk I/O (bytes read/written)
-- NEW: Energy (billed/serviced)
-- NEW: CPU instructions and cycles
-- NEW: Wakeups (package + interrupt)
-- NEW: QoS breakdown
-- NEW: Peak memory
-- NEW: Per-process GPU time (via IOKit)
-
-### ~~TopCollector (collector.py)~~ — DEPRECATED
-
-> ⚠️ **DO NOT USE.** Being replaced with LibprocCollector.
-
-The old approach used `top -l 2 -s 1` which:
-- Spawns a subprocess every 2 seconds
-- Wastes the first sample (invalid CPU%)
-- Parses text output
-- Misses many available metrics
+**Data collected (see `libproc_and_iokit_research` memory):**
+- CPU % (calculated from time deltas)
+- Memory (physical footprint, peak)
+- Disk I/O (bytes read/written, rate)
+- Energy (billed, rate)
+- CPU instructions and cycles (IPC)
+- Wakeups (package + interrupt)
+- Context switches, syscalls, threads, mach messages
+- Process state and priority
+- Page-ins and faults
 
 ### ProcessTracker (tracker.py)
 - **Purpose:** Per-process band tracking with event lifecycle management
@@ -126,7 +108,7 @@ The old approach used `top -l 2 -s 1` which:
 
 ### Storage (storage.py)
 - **Purpose:** SQLite with WAL mode, schema v9
-- **Primary tables:** `process_events`, `process_snapshots`, `system_samples`
+- **Primary tables:** `process_events`, `process_snapshots`
 - **Support tables:** `daemon_state` (key-value store)
 
 ### TUI (tui/app.py)
@@ -166,24 +148,12 @@ The old approach used `top -l 2 -s 1` which:
 ## Data Models
 
 ### ProcessScore (collector.py)
-```python
-@dataclass
-class ProcessScore:
-    pid: int
-    command: str
-    cpu: float
-    state: str
-    mem: int
-    cmprs: int
-    pageins: int
-    csw: int
-    sysbsd: int
-    threads: int
-    score: int
-    categories: frozenset[str]
-    captured_at: float
-    # Future: disk_read, disk_write, energy, instructions, cycles, gpu_time
-```
+
+See `data_schema` memory for complete field documentation. Key structure:
+- Identity: pid, command, captured_at
+- Metrics with ranges: cpu, mem, pageins, faults, disk_io, disk_io_rate, csw, syscalls, threads, mach_msgs, instructions, cycles, ipc, energy, energy_rate, wakeups, priority (all `MetricValue`)
+- Categorical with hierarchy: state, band (both `MetricValueStr`)
+- Scoring: score (`MetricValue`), categories (`list[str]`)
 
 ### ProcessSamples (collector.py)
 ```python
@@ -196,7 +166,7 @@ class ProcessSamples:
     rogues: list[ProcessScore]
 ```
 
-### Database Tables (storage.py, v9)
+### Database Tables (storage.py, v13)
 
 **process_events:**
 | Field | Type | Purpose |
@@ -259,7 +229,7 @@ class BandsConfig:
 | Decision | Rationale |
 |----------|-----------|
 | Per-process scoring over system-wide stress | Identifies specific culprits, not just "system stressed" |
-| **libproc over top** | Direct API = no subprocess, no parsing, more data |
+| **libproc (not top)** | Direct API = no subprocess, no parsing, more data |
 | 8-factor weighted scoring with multi-category bonus | Flexible, configurable identification of stress types |
 | ProcessTracker per-process events | Historical record of which processes caused stress |
 | Boot time for PID disambiguation | PIDs can be reused across reboots |
