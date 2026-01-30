@@ -156,10 +156,14 @@ def test_scoring_weights_default():
     assert config.scoring.weights.state == defaults.state
     assert config.scoring.weights.pageins == defaults.pageins
     assert config.scoring.weights.mem == defaults.mem
-    assert config.scoring.weights.cmprs == defaults.cmprs
     assert config.scoring.weights.csw == defaults.csw
-    assert config.scoring.weights.sysbsd == defaults.sysbsd
+    assert config.scoring.weights.syscalls == defaults.syscalls
     assert config.scoring.weights.threads == defaults.threads
+    # New fields in v12
+    assert config.scoring.weights.disk_io_rate == defaults.disk_io_rate
+    assert config.scoring.weights.energy_rate == defaults.energy_rate
+    assert config.scoring.weights.wakeups == defaults.wakeups
+    assert config.scoring.weights.ipc == defaults.ipc
 
 
 def test_rogue_selection_default():
@@ -267,11 +271,15 @@ def test_normalization_config_defaults():
     defaults = NormalizationConfig()
     assert norm.cpu == defaults.cpu
     assert norm.mem_gb == defaults.mem_gb
-    assert norm.cmprs_gb == defaults.cmprs_gb
     assert norm.pageins == defaults.pageins
     assert norm.csw == defaults.csw
-    assert norm.sysbsd == defaults.sysbsd
+    assert norm.syscalls == defaults.syscalls
     assert norm.threads == defaults.threads
+    # New fields in v12
+    assert norm.disk_io_rate == defaults.disk_io_rate
+    assert norm.energy_rate == defaults.energy_rate
+    assert norm.wakeups == defaults.wakeups
+    assert norm.ipc_min == defaults.ipc_min
 
 
 def test_bands_config_defaults():
@@ -358,20 +366,26 @@ def test_config_loads_normalization(tmp_path):
 [scoring.normalization]
 cpu = 100.0
 mem_gb = 32.0
-cmprs_gb = 4.0
 pageins = 5000
 csw = 200000
-sysbsd = 150000
+syscalls = 150000
 threads = 500
+disk_io_rate = 200000000
+energy_rate = 2000000
+wakeups = 20000
+ipc_min = 0.3
 """)
 
     config = Config.load(config_file)
     assert config.scoring.normalization.mem_gb == 32.0
-    assert config.scoring.normalization.cmprs_gb == 4.0
     assert config.scoring.normalization.pageins == 5000
     assert config.scoring.normalization.csw == 200000
-    assert config.scoring.normalization.sysbsd == 150000
+    assert config.scoring.normalization.syscalls == 150000
     assert config.scoring.normalization.threads == 500
+    assert config.scoring.normalization.disk_io_rate == 200000000
+    assert config.scoring.normalization.energy_rate == 2000000
+    assert config.scoring.normalization.wakeups == 20000
+    assert config.scoring.normalization.ipc_min == 0.3
 
 
 def test_config_loads_partial_normalization(tmp_path):

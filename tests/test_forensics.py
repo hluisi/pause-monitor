@@ -1,12 +1,13 @@
 """Tests for forensics capture."""
 
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from pause_monitor.collector import ProcessSamples, ProcessScore
+from pause_monitor.collector import MetricValue, MetricValueStr, ProcessSamples, ProcessScore
 from pause_monitor.forensics import (
     ForensicsCapture,
     identify_culprits,
@@ -17,41 +18,51 @@ from pause_monitor.ringbuffer import BufferContents, RingBuffer, RingSample
 from pause_monitor.storage import get_connection, init_database
 
 
+def _metric(val: float | int) -> MetricValue:
+    return MetricValue(current=val, low=val, high=val)
+
+
+def _metric_str(val: str) -> MetricValueStr:
+    return MetricValueStr(current=val, low=val, high=val)
+
+
 def make_process_score(
     pid: int = 1,
     command: str = "test",
     cpu: float = 50.0,
     score: int = 25,
-    categories: frozenset[str] | None = None,
+    categories: list[str] | None = None,
+    state: str = "running",
+    band: str = "low",
     **kwargs,
 ) -> ProcessScore:
     """Create ProcessScore with sensible defaults for testing."""
-    defaults = {
-        "state": "running",
-        "mem": 100 * 1024 * 1024,  # 100MB
-        "cmprs": 10 * 1024 * 1024,  # 10MB
-        "pageins": 100,
-        "csw": 1000,
-        "sysbsd": 500,
-        "threads": 10,
-    }
-    defaults.update(kwargs)
-    import time
-
     return ProcessScore(
         pid=pid,
         command=command,
-        cpu=cpu,
-        state=defaults["state"],
-        mem=defaults["mem"],
-        cmprs=defaults["cmprs"],
-        pageins=defaults["pageins"],
-        csw=defaults["csw"],
-        sysbsd=defaults["sysbsd"],
-        threads=defaults["threads"],
-        score=score,
-        categories=categories or frozenset({"cpu"}),
-        captured_at=defaults.get("captured_at", time.time()),
+        captured_at=kwargs.get("captured_at", time.time()),
+        cpu=_metric(cpu),
+        mem=_metric(kwargs.get("mem", 100 * 1024 * 1024)),
+        mem_peak=kwargs.get("mem_peak", 150 * 1024 * 1024),
+        pageins=_metric(kwargs.get("pageins", 100)),
+        faults=_metric(kwargs.get("faults", 0)),
+        disk_io=_metric(kwargs.get("disk_io", 0)),
+        disk_io_rate=_metric(kwargs.get("disk_io_rate", 0.0)),
+        csw=_metric(kwargs.get("csw", 1000)),
+        syscalls=_metric(kwargs.get("syscalls", 500)),
+        threads=_metric(kwargs.get("threads", 10)),
+        mach_msgs=_metric(kwargs.get("mach_msgs", 0)),
+        instructions=_metric(kwargs.get("instructions", 0)),
+        cycles=_metric(kwargs.get("cycles", 0)),
+        ipc=_metric(kwargs.get("ipc", 0.0)),
+        energy=_metric(kwargs.get("energy", 0)),
+        energy_rate=_metric(kwargs.get("energy_rate", 0.0)),
+        wakeups=_metric(kwargs.get("wakeups", 0)),
+        state=_metric_str(state),
+        priority=_metric(kwargs.get("priority", 31)),
+        score=_metric(score),
+        band=_metric_str(band),
+        categories=categories or ["cpu"],
     )
 
 
@@ -66,7 +77,8 @@ def make_process_samples(
     if rogues is None:
         rogues = []
     if max_score is None:
-        max_score = max((r.score for r in rogues), default=0)
+        # score is MetricValue, extract .current for comparison
+        max_score = max((r.score.current for r in rogues), default=0)
     return ProcessSamples(
         timestamp=timestamp or datetime.now(),
         elapsed_ms=elapsed_ms,
@@ -244,9 +256,7 @@ def test_parse_logs_ndjson_handles_invalid_json():
 
 def test_identify_culprits_from_buffer():
     """identify_culprits returns top rogues by score."""
-    rogue = make_process_score(
-        pid=100, command="Chrome", score=30, categories=frozenset({"cpu", "mem"})
-    )
+    rogue = make_process_score(pid=100, command="Chrome", score=30, categories=["cpu", "mem"])
     samples = make_process_samples(rogues=[rogue])
     ring_sample = RingSample(samples=samples)
     contents = BufferContents(samples=(ring_sample,))
@@ -256,6 +266,7 @@ def test_identify_culprits_from_buffer():
     assert len(culprits) == 1
     assert culprits[0]["pid"] == 100
     assert culprits[0]["command"] == "Chrome"
+    # identify_culprits extracts .current from MetricValue, returns int
     assert culprits[0]["score"] == 30
     assert set(culprits[0]["categories"]) == {"cpu", "mem"}
 

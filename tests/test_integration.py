@@ -15,7 +15,12 @@ from pathlib import Path
 
 import pytest
 
-from pause_monitor.collector import ProcessSamples, ProcessScore
+from pause_monitor.collector import (
+    MetricValue,
+    MetricValueStr,
+    ProcessSamples,
+    ProcessScore,
+)
 from pause_monitor.ringbuffer import RingBuffer
 from pause_monitor.socket_server import SocketServer
 
@@ -33,25 +38,74 @@ def short_tmp_path():
         yield Path(tmpdir)
 
 
+def _metric(val: float | int) -> MetricValue:
+    """Create MetricValue with same value for current/low/high."""
+    return MetricValue(current=val, low=val, high=val)
+
+
+def _metric_str(val: str) -> MetricValueStr:
+    """Create MetricValueStr with same value for current/low/high."""
+    return MetricValueStr(current=val, low=val, high=val)
+
+
 def make_test_process_score(**kwargs) -> ProcessScore:
     """Create ProcessScore with sensible defaults for testing."""
-    defaults = {
-        "pid": 1,
-        "command": "test_proc",
-        "cpu": 50.0,
-        "state": "running",
-        "mem": 1024 * 1024,  # 1MB
-        "cmprs": 0,
-        "pageins": 10,
-        "csw": 100,
-        "sysbsd": 50,
-        "threads": 4,
-        "score": 50,
-        "categories": frozenset({"cpu"}),
-        "captured_at": time.time(),
-    }
-    defaults.update(kwargs)
-    return ProcessScore(**defaults)
+    cap_time = kwargs.pop("captured_at", time.time())
+    pid = kwargs.pop("pid", 1)
+    command = kwargs.pop("command", "test_proc")
+    categories = kwargs.pop("categories", ["cpu"])
+
+    # Handle MetricValue fields - convert simple values to MetricValue
+    cpu = kwargs.pop("cpu", 50.0)
+    mem = kwargs.pop("mem", 1024 * 1024)
+    pageins = kwargs.pop("pageins", 10)
+    faults = kwargs.pop("faults", 0)
+    disk_io = kwargs.pop("disk_io", 0)
+    disk_io_rate = kwargs.pop("disk_io_rate", 0.0)
+    csw = kwargs.pop("csw", 100)
+    syscalls = kwargs.pop("syscalls", 50)
+    threads = kwargs.pop("threads", 4)
+    mach_msgs = kwargs.pop("mach_msgs", 0)
+    instructions = kwargs.pop("instructions", 0)
+    cycles = kwargs.pop("cycles", 0)
+    ipc = kwargs.pop("ipc", 0.0)
+    energy = kwargs.pop("energy", 0)
+    energy_rate = kwargs.pop("energy_rate", 0.0)
+    wakeups = kwargs.pop("wakeups", 0)
+    priority = kwargs.pop("priority", 31)
+    score = kwargs.pop("score", 50)
+
+    # MetricValueStr fields
+    state = kwargs.pop("state", "running")
+    band = kwargs.pop("band", "elevated")
+
+    return ProcessScore(
+        pid=pid,
+        command=command,
+        captured_at=cap_time,
+        cpu=_metric(cpu),
+        mem=_metric(mem),
+        mem_peak=mem,
+        pageins=_metric(pageins),
+        faults=_metric(faults),
+        disk_io=_metric(disk_io),
+        disk_io_rate=_metric(disk_io_rate),
+        csw=_metric(csw),
+        syscalls=_metric(syscalls),
+        threads=_metric(threads),
+        mach_msgs=_metric(mach_msgs),
+        instructions=_metric(instructions),
+        cycles=_metric(cycles),
+        ipc=_metric(ipc),
+        energy=_metric(energy),
+        energy_rate=_metric(energy_rate),
+        wakeups=_metric(wakeups),
+        state=_metric_str(state),
+        priority=_metric(priority),
+        score=_metric(score),
+        band=_metric_str(band),
+        categories=list(categories) if isinstance(categories, frozenset) else categories,
+    )
 
 
 def make_test_samples(**kwargs) -> ProcessSamples:
@@ -189,8 +243,9 @@ async def test_full_collection_to_socket_cycle(short_tmp_path):
             (r for r in broadcast_msg["rogues"] if r["command"] == "test_proc"), None
         )
         assert proc_in_broadcast is not None
-        assert proc_in_broadcast["cpu"] == 85.1
-        assert proc_in_broadcast["score"] == 75
+        # MetricValue fields are serialized as {"current", "low", "high"} dicts
+        assert proc_in_broadcast["cpu"]["current"] == 85.1
+        assert proc_in_broadcast["score"]["current"] == 75
 
         writer.close()
         await writer.wait_closed()

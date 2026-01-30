@@ -271,11 +271,12 @@ def identify_culprits(contents: "BufferContents") -> list[dict]:
     for sample in contents.samples:
         for rogue in sample.samples.rogues:
             existing = peak_scores.get(rogue.pid)
-            if existing is None or rogue.score > existing["score"]:
+            score_val = rogue.score.current
+            if existing is None or score_val > existing["score"]:
                 peak_scores[rogue.pid] = {
                     "pid": rogue.pid,
                     "command": rogue.command,
-                    "score": rogue.score,
+                    "score": score_val,
                     "categories": list(rogue.categories),
                 }
 

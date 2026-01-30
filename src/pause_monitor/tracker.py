@@ -95,13 +95,13 @@ class ProcessTracker:
 
         # Process each score
         for score in scores:
-            in_bad_state = score.score >= threshold
+            in_bad_state = score.score.current >= threshold
 
             if score.pid in self.tracked:
                 # Already tracking — update peak or close
                 tracked = self.tracked[score.pid]
                 if in_bad_state:
-                    if score.score > tracked.peak_score:
+                    if score.score.current > tracked.peak_score:
                         self._update_peak(score)
                     # Checkpoint: periodic snapshot while in bad state
                     checkpoint_interval = self.bands.checkpoint_interval
@@ -119,7 +119,7 @@ class ProcessTracker:
         """Create new event for process entering bad state."""
         import asyncio
 
-        band = self.bands.get_band(score.score)
+        band = score.band.current
 
         # Create event (peak_snapshot_id starts NULL)
         event_id = create_process_event(
@@ -129,7 +129,7 @@ class ProcessTracker:
             boot_time=self.boot_time,
             entry_time=score.captured_at,
             entry_band=band,
-            peak_score=score.score,
+            peak_score=score.score.current,
             peak_band=band,
         )
 
@@ -138,7 +138,7 @@ class ProcessTracker:
         update_process_event_peak(
             self.conn,
             event_id,
-            peak_score=score.score,
+            peak_score=score.score.current,
             peak_band=band,
             peak_snapshot_id=snapshot_id,
         )
@@ -147,14 +147,14 @@ class ProcessTracker:
             event_id=event_id,
             pid=score.pid,
             command=score.command,
-            peak_score=score.score,
+            peak_score=score.score.current,
             peak_snapshot_id=snapshot_id,
             last_checkpoint=score.captured_at,  # Start checkpoint timer from entry
         )
 
         msg = (
             f"tracking_started: {colored(score.command, 'cyan')} "
-            f"{colored(f'({score.score})', 'yellow')} "
+            f"{colored(f'({score.score.current})', 'yellow')} "
             f"{colored(f'pid={score.pid}', 'dark_grey')} "
             f"{colored(f'[{band}]', 'magenta')}"
         )
@@ -192,7 +192,7 @@ class ProcessTracker:
 
         # Log with reason for closure
         reason = "score_dropped" if exit_score is not None else "process_gone"
-        exit_score_val = exit_score.score if exit_score else None
+        exit_score_val = exit_score.score.current if exit_score else None
         score_info = f"{exit_score_val}→0" if exit_score_val else f"peak={tracked.peak_score}"
         msg = (
             f"tracking_ended: {colored(tracked.command, 'cyan')} "
@@ -209,15 +209,15 @@ class ProcessTracker:
         tracked = self.tracked[score.pid]
         old_score = tracked.peak_score
         old_band = self.bands.get_band(old_score)
-        tracked.peak_score = score.score
+        tracked.peak_score = score.score.current
 
-        band = self.bands.get_band(score.score)
+        band = score.band.current
 
         # Log band transitions (escalations)
         if band != old_band:
             msg = (
                 f"band_changed: {colored(score.command, 'cyan')} "
-                f"{colored(f'({old_score}→{score.score})', 'yellow')} "
+                f"{colored(f'({old_score}→{score.score.current})', 'yellow')} "
                 f"{colored(f'pid={score.pid}', 'dark_grey')} "
                 f"{colored(f'[{old_band}→{band}]', 'magenta')}"
             )
@@ -239,14 +239,14 @@ class ProcessTracker:
         update_process_event_peak(
             self.conn,
             tracked.event_id,
-            peak_score=score.score,
+            peak_score=score.score.current,
             peak_band=band,
             peak_snapshot_id=snapshot_id,
         )
 
         log.debug(
             f"tracking_peak: {colored(score.command, 'cyan')} "
-            f"{colored(f'({old_score}→{score.score})', 'yellow')} "
+            f"{colored(f'({old_score}→{score.score.current})', 'yellow')} "
             f"{colored(f'pid={score.pid}', 'dark_grey')}"
         )
 
@@ -261,6 +261,6 @@ class ProcessTracker:
 
         log.debug(
             f"tracking_checkpoint: {colored(score.command, 'cyan')} "
-            f"{colored(f'({score.score})', 'yellow')} "
+            f"{colored(f'({score.score.current})', 'yellow')} "
             f"{colored(f'pid={score.pid}', 'dark_grey')}"
         )

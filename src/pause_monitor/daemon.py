@@ -12,7 +12,15 @@ import structlog
 from termcolor import colored
 
 from pause_monitor.boottime import get_boot_time
-from pause_monitor.collector import LibprocCollector
+from pause_monitor.collector import (
+    BAND_SEVERITY,
+    STATE_SEVERITY,
+    LibprocCollector,
+    MetricValue,
+    MetricValueStr,
+    ProcessSamples,
+    ProcessScore,
+)
 from pause_monitor.config import Config
 from pause_monitor.forensics import ForensicsCapture
 from pause_monitor.ringbuffer import RingBuffer
@@ -56,24 +64,10 @@ class Daemon:
         # Boot time for process tracking (stable across daemon restarts)
         self.boot_time = get_boot_time()
 
-        # Database connection and tracker. Initialized eagerly if DB exists and has
-        # compatible schema; deferred to _init_database() otherwise.
+        # Database connection and tracker. Initialized in _init_database() after
+        # schema validation/recreation to avoid stale connections.
         self._conn: sqlite3.Connection | None = None
         self.tracker: ProcessTracker | None = None
-        if config.db_path.exists():
-            try:
-                self._conn = sqlite3.connect(config.db_path)
-                self.tracker = ProcessTracker(
-                    self._conn,
-                    config.bands,
-                    self.boot_time,
-                    on_forensics_trigger=self._forensics_callback,
-                )
-            except sqlite3.OperationalError:
-                # DB exists but wrong schema; will be recreated in _init_database
-                if self._conn:
-                    self._conn.close()
-                    self._conn = None
 
         self._caffeinate_proc: asyncio.subprocess.Process | None = None
         self._shutdown_event = asyncio.Event()
@@ -127,16 +121,14 @@ class Daemon:
         db_existed = self.config.db_path.exists()
         init_database(self.config.db_path)  # Handles version check + recreate
 
-        # Create connection and tracker if not already initialized in __init__
-        if self._conn is None:
-            self._conn = sqlite3.connect(self.config.db_path)
-        if self.tracker is None:
-            self.tracker = ProcessTracker(
-                self._conn,
-                self.config.bands,
-                self.boot_time,
-                on_forensics_trigger=self._forensics_callback,
-            )
+        # Create connection and tracker AFTER init_database validates/recreates schema
+        self._conn = sqlite3.connect(self.config.db_path)
+        self.tracker = ProcessTracker(
+            self._conn,
+            self.config.bands,
+            self.boot_time,
+            on_forensics_trigger=self._forensics_callback,
+        )
 
         # Log database state
         restored_count = len(self.tracker.tracked) if self.tracker else 0
@@ -363,7 +355,7 @@ class Daemon:
                     cats = ",".join(sorted(rogue.categories))
                     msg = (
                         f"rogue_entered: {colored(rogue.command, 'cyan')} "
-                        f"{colored(f'({rogue.score})', 'yellow')} "
+                        f"{colored(f'({rogue.score.current})', 'yellow')} "
                         f"{colored(f'pid={pid}', 'dark_grey')} "
                         f"{colored(f'[{cats}]', 'blue')}"
                     )
@@ -386,6 +378,9 @@ class Daemon:
                 # Push to ring buffer
                 self.ring_buffer.push(samples)
 
+                # Enrich with low/high from ring buffer history
+                samples = self._compute_pid_low_high(samples)
+
                 # Log elevated samples for visibility between heartbeats
                 elevated_threshold = self.config.bands.elevated
                 if samples.max_score >= elevated_threshold and samples.rogues:
@@ -402,7 +397,7 @@ class Daemon:
                 heartbeat_score_sum += samples.max_score
                 heartbeat_max_score = max(heartbeat_max_score, samples.max_score)
 
-                # Broadcast to TUI clients
+                # Broadcast to TUI clients (with enriched low/high data)
                 if self._socket_server and self._socket_server.has_clients:
                     await self._socket_server.broadcast(samples)
 
@@ -461,6 +456,110 @@ class Daemon:
                     break
                 except asyncio.TimeoutError:
                     pass  # Continue with next sample
+
+    def _get_pid_history(self, pid: int) -> list[ProcessScore]:
+        """Get all ProcessScore entries for a PID from ring buffer."""
+        history = []
+        for ring_sample in self.ring_buffer.samples:
+            for rogue in ring_sample.samples.rogues:
+                if rogue.pid == pid:
+                    history.append(rogue)
+        return history
+
+    def _enrich_metric(
+        self, current: MetricValue, history_values: list[float | int]
+    ) -> MetricValue:
+        """Compute low/high from history and create enriched MetricValue."""
+        if not history_values:
+            return current
+        all_values = history_values + [current.current]
+        return MetricValue(
+            current=current.current,
+            low=min(all_values),
+            high=max(all_values),
+        )
+
+    def _enrich_metric_str(
+        self, current: MetricValueStr, history_values: list[str], severity_map: dict[str, int]
+    ) -> MetricValueStr:
+        """Compute low/high from history using severity ordering."""
+        if not history_values:
+            return current
+        all_values = history_values + [current.current]
+        severities = [(v, severity_map.get(v, 0)) for v in all_values]
+        sorted_by_severity = sorted(severities, key=lambda x: x[1])
+        return MetricValueStr(
+            current=current.current,
+            low=sorted_by_severity[0][0],  # least severe
+            high=sorted_by_severity[-1][0],  # most severe
+        )
+
+    def _enrich_with_low_high(
+        self, rogue: ProcessScore, history: list[ProcessScore]
+    ) -> ProcessScore:
+        """Enrich a ProcessScore with low/high computed from history."""
+
+        # Extract history values for each field
+        def hist_vals(attr: str) -> list[float | int]:
+            return [getattr(h, attr).current for h in history]
+
+        def hist_vals_str(attr: str) -> list[str]:
+            return [getattr(h, attr).current for h in history]
+
+        return ProcessScore(
+            pid=rogue.pid,
+            command=rogue.command,
+            captured_at=rogue.captured_at,
+            # CPU
+            cpu=self._enrich_metric(rogue.cpu, hist_vals("cpu")),
+            # Memory
+            mem=self._enrich_metric(rogue.mem, hist_vals("mem")),
+            mem_peak=rogue.mem_peak,  # Lifetime peak, no range needed
+            pageins=self._enrich_metric(rogue.pageins, hist_vals("pageins")),
+            faults=self._enrich_metric(rogue.faults, hist_vals("faults")),
+            # Disk I/O
+            disk_io=self._enrich_metric(rogue.disk_io, hist_vals("disk_io")),
+            disk_io_rate=self._enrich_metric(rogue.disk_io_rate, hist_vals("disk_io_rate")),
+            # Activity
+            csw=self._enrich_metric(rogue.csw, hist_vals("csw")),
+            syscalls=self._enrich_metric(rogue.syscalls, hist_vals("syscalls")),
+            threads=self._enrich_metric(rogue.threads, hist_vals("threads")),
+            mach_msgs=self._enrich_metric(rogue.mach_msgs, hist_vals("mach_msgs")),
+            # Efficiency
+            instructions=self._enrich_metric(rogue.instructions, hist_vals("instructions")),
+            cycles=self._enrich_metric(rogue.cycles, hist_vals("cycles")),
+            ipc=self._enrich_metric(rogue.ipc, hist_vals("ipc")),
+            # Power
+            energy=self._enrich_metric(rogue.energy, hist_vals("energy")),
+            energy_rate=self._enrich_metric(rogue.energy_rate, hist_vals("energy_rate")),
+            wakeups=self._enrich_metric(rogue.wakeups, hist_vals("wakeups")),
+            # State (categorical)
+            state=self._enrich_metric_str(rogue.state, hist_vals_str("state"), STATE_SEVERITY),
+            priority=self._enrich_metric(rogue.priority, hist_vals("priority")),
+            # Scoring
+            score=self._enrich_metric(rogue.score, hist_vals("score")),
+            band=self._enrich_metric_str(rogue.band, hist_vals_str("band"), BAND_SEVERITY),
+            categories=rogue.categories,
+        )
+
+    def _compute_pid_low_high(self, samples: ProcessSamples) -> ProcessSamples:
+        """Enrich ProcessScore with low/high from ring buffer history."""
+        enriched_rogues = []
+
+        for rogue in samples.rogues:
+            # Collect history for this PID from ring buffer
+            history = self._get_pid_history(rogue.pid)
+            # Enrich with low/high values
+            enriched = self._enrich_with_low_high(rogue, history)
+            enriched_rogues.append(enriched)
+
+        return ProcessSamples(
+            timestamp=samples.timestamp,
+            elapsed_ms=samples.elapsed_ms,
+            process_count=samples.process_count,
+            max_score=samples.max_score,
+            rogues=enriched_rogues,
+        )
 
 
 async def run_daemon(config: Config | None = None) -> None:

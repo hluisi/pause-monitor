@@ -13,41 +13,166 @@ from pause_monitor.config import Config
 
 log = structlog.get_logger()
 
+# Severity orderings for categorical metrics
+STATE_SEVERITY = {
+    "idle": 0,
+    "sleeping": 1,
+    "running": 2,
+    "stopped": 3,
+    "halted": 4,
+    "zombie": 5,
+    "stuck": 6,
+}
+BAND_SEVERITY = {
+    "low": 0,
+    "medium": 1,
+    "elevated": 2,
+    "high": 3,
+    "critical": 4,
+}
+
+
+@dataclass
+class MetricValue:
+    """A metric with current value and buffer-window range."""
+
+    current: float | int
+    low: float | int
+    high: float | int
+
+    def to_dict(self) -> dict:
+        """Serialize to a dictionary."""
+        return {"current": self.current, "low": self.low, "high": self.high}
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "MetricValue":
+        """Deserialize from a dictionary."""
+        return cls(current=d["current"], low=d["low"], high=d["high"])
+
+
+@dataclass
+class MetricValueStr:
+    """A categorical metric with hierarchy (for state/band)."""
+
+    current: str
+    low: str  # best (least concerning)
+    high: str  # worst (most concerning)
+
+    def to_dict(self) -> dict:
+        """Serialize to a dictionary."""
+        return {"current": self.current, "low": self.low, "high": self.high}
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "MetricValueStr":
+        """Deserialize from a dictionary."""
+        return cls(current=d["current"], low=d["low"], high=d["high"])
+
 
 @dataclass
 class ProcessScore:
-    """Single process with its stressor score."""
+    """Single process with metrics and buffer-window ranges.
 
+    This is THE canonical data schema for process data.
+    DO NOT create alternative representations.
+    """
+
+    # ─────────────────────────────────────────────────────────────
+    # Identity (no range — these don't vary)
+    # ─────────────────────────────────────────────────────────────
     pid: int
     command: str
-    cpu: float
-    state: str
-    mem: int
-    cmprs: int
-    pageins: int
-    csw: int
-    sysbsd: int
-    threads: int
-    score: int
-    categories: frozenset[str]
     captured_at: float
+
+    # ─────────────────────────────────────────────────────────────
+    # CPU
+    # ─────────────────────────────────────────────────────────────
+    cpu: MetricValue
+
+    # ─────────────────────────────────────────────────────────────
+    # Memory
+    # ─────────────────────────────────────────────────────────────
+    mem: MetricValue
+    mem_peak: int  # Lifetime peak (doesn't need range)
+    pageins: MetricValue
+    faults: MetricValue
+
+    # ─────────────────────────────────────────────────────────────
+    # Disk I/O
+    # ─────────────────────────────────────────────────────────────
+    disk_io: MetricValue
+    disk_io_rate: MetricValue
+
+    # ─────────────────────────────────────────────────────────────
+    # Activity
+    # ─────────────────────────────────────────────────────────────
+    csw: MetricValue
+    syscalls: MetricValue
+    threads: MetricValue
+    mach_msgs: MetricValue
+
+    # ─────────────────────────────────────────────────────────────
+    # Efficiency
+    # ─────────────────────────────────────────────────────────────
+    instructions: MetricValue
+    cycles: MetricValue
+    ipc: MetricValue
+
+    # ─────────────────────────────────────────────────────────────
+    # Power
+    # ─────────────────────────────────────────────────────────────
+    energy: MetricValue
+    energy_rate: MetricValue
+    wakeups: MetricValue
+
+    # ─────────────────────────────────────────────────────────────
+    # State (categorical with hierarchy)
+    # ─────────────────────────────────────────────────────────────
+    state: MetricValueStr
+    priority: MetricValue
+
+    # ─────────────────────────────────────────────────────────────
+    # Scoring (our assessment)
+    # ─────────────────────────────────────────────────────────────
+    score: MetricValue
+    band: MetricValueStr
+    categories: list[str]
 
     def to_dict(self) -> dict:
         """Serialize to a dictionary."""
         return {
             "pid": self.pid,
             "command": self.command,
-            "cpu": self.cpu,
-            "state": self.state,
-            "mem": self.mem,
-            "cmprs": self.cmprs,
-            "pageins": self.pageins,
-            "csw": self.csw,
-            "sysbsd": self.sysbsd,
-            "threads": self.threads,
-            "score": self.score,
-            "categories": list(self.categories),
             "captured_at": self.captured_at,
+            # CPU
+            "cpu": self.cpu.to_dict(),
+            # Memory
+            "mem": self.mem.to_dict(),
+            "mem_peak": self.mem_peak,
+            "pageins": self.pageins.to_dict(),
+            "faults": self.faults.to_dict(),
+            # Disk I/O
+            "disk_io": self.disk_io.to_dict(),
+            "disk_io_rate": self.disk_io_rate.to_dict(),
+            # Activity
+            "csw": self.csw.to_dict(),
+            "syscalls": self.syscalls.to_dict(),
+            "threads": self.threads.to_dict(),
+            "mach_msgs": self.mach_msgs.to_dict(),
+            # Efficiency
+            "instructions": self.instructions.to_dict(),
+            "cycles": self.cycles.to_dict(),
+            "ipc": self.ipc.to_dict(),
+            # Power
+            "energy": self.energy.to_dict(),
+            "energy_rate": self.energy_rate.to_dict(),
+            "wakeups": self.wakeups.to_dict(),
+            # State
+            "state": self.state.to_dict(),
+            "priority": self.priority.to_dict(),
+            # Scoring
+            "score": self.score.to_dict(),
+            "band": self.band.to_dict(),
+            "categories": self.categories,
         }
 
     @classmethod
@@ -56,17 +181,37 @@ class ProcessScore:
         return cls(
             pid=data["pid"],
             command=data["command"],
-            cpu=data["cpu"],
-            state=data["state"],
-            mem=data["mem"],
-            cmprs=data["cmprs"],
-            pageins=data["pageins"],
-            csw=data["csw"],
-            sysbsd=data["sysbsd"],
-            threads=data["threads"],
-            score=data["score"],
-            categories=frozenset(data["categories"]),
             captured_at=data["captured_at"],
+            # CPU
+            cpu=MetricValue.from_dict(data["cpu"]),
+            # Memory
+            mem=MetricValue.from_dict(data["mem"]),
+            mem_peak=data["mem_peak"],
+            pageins=MetricValue.from_dict(data["pageins"]),
+            faults=MetricValue.from_dict(data["faults"]),
+            # Disk I/O
+            disk_io=MetricValue.from_dict(data["disk_io"]),
+            disk_io_rate=MetricValue.from_dict(data["disk_io_rate"]),
+            # Activity
+            csw=MetricValue.from_dict(data["csw"]),
+            syscalls=MetricValue.from_dict(data["syscalls"]),
+            threads=MetricValue.from_dict(data["threads"]),
+            mach_msgs=MetricValue.from_dict(data["mach_msgs"]),
+            # Efficiency
+            instructions=MetricValue.from_dict(data["instructions"]),
+            cycles=MetricValue.from_dict(data["cycles"]),
+            ipc=MetricValue.from_dict(data["ipc"]),
+            # Power
+            energy=MetricValue.from_dict(data["energy"]),
+            energy_rate=MetricValue.from_dict(data["energy_rate"]),
+            wakeups=MetricValue.from_dict(data["wakeups"]),
+            # State
+            state=MetricValueStr.from_dict(data["state"]),
+            priority=MetricValue.from_dict(data["priority"]),
+            # Scoring
+            score=MetricValue.from_dict(data["score"]),
+            band=MetricValueStr.from_dict(data["band"]),
+            categories=data["categories"],
         )
 
 
@@ -112,9 +257,11 @@ def get_core_count() -> int:
 
 @dataclass
 class _PrevSample:
-    """Previous sample state for CPU% delta calculation."""
+    """Previous sample state for delta calculations (CPU%, disk rate, energy rate)."""
 
     cpu_time_ns: int  # Total CPU time (user + system) in nanoseconds
+    disk_io: int  # Total disk I/O bytes (read + write)
+    energy: int  # Total energy billed
     timestamp: float  # time.monotonic() when sampled
 
 
@@ -191,17 +338,46 @@ class LibprocCollector:
             system_ns = abs_to_ns(rusage.ri_system_time, self._timebase)
             total_cpu_ns = user_ns + system_ns
 
-            # Calculate CPU% from delta
+            # Extract cumulative values for rate calculation
+            disk_io = rusage.ri_diskio_bytesread + rusage.ri_diskio_byteswritten
+            energy = rusage.ri_billed_energy
+            instructions = rusage.ri_instructions
+            cycles = rusage.ri_cycles
+
+            # Calculate deltas/rates from previous sample
             cpu_percent = 0.0
+            disk_io_rate = 0.0
+            energy_rate = 0.0
+            if self._last_collect_time > 0:
+                wall_delta_sec = start - self._last_collect_time
+            else:
+                wall_delta_sec = 0.0
+
             if wall_delta_ns > 0 and pid in self._prev_samples:
                 prev = self._prev_samples[pid]
+                # CPU%
                 cpu_delta_ns = total_cpu_ns - prev.cpu_time_ns
                 if cpu_delta_ns > 0:
-                    # CPU% = (CPU time used / wall time elapsed) * 100
                     cpu_percent = (cpu_delta_ns / wall_delta_ns) * 100.0
+                # Disk I/O rate (bytes/sec)
+                disk_delta = disk_io - prev.disk_io
+                if disk_delta > 0 and wall_delta_sec > 0:
+                    disk_io_rate = disk_delta / wall_delta_sec
+                # Energy rate (energy units/sec)
+                energy_delta = energy - prev.energy
+                if energy_delta > 0 and wall_delta_sec > 0:
+                    energy_rate = energy_delta / wall_delta_sec
+
+            # IPC (instructions per cycle) - no delta needed
+            ipc = instructions / cycles if cycles > 0 else 0.0
 
             # Store current sample for next delta
-            self._prev_samples[pid] = _PrevSample(cpu_time_ns=total_cpu_ns, timestamp=start)
+            self._prev_samples[pid] = _PrevSample(
+                cpu_time_ns=total_cpu_ns,
+                disk_io=disk_io,
+                energy=energy,
+                timestamp=start,
+            )
 
             # Get process name (try proc_name first, fall back to pbi_comm)
             command = get_process_name(pid)
@@ -213,18 +389,36 @@ class LibprocCollector:
             # Map state
             state = get_state_name(bsd_info.pbi_status)
 
-            # Build process dict
+            # Build process dict with all metrics
             proc = {
                 "pid": pid,
                 "command": command,
+                # CPU
                 "cpu": cpu_percent,
-                "state": state,
-                "mem": rusage.ri_phys_footprint,  # Physical footprint (Activity Monitor "Memory")
-                "cmprs": 0,  # Not available without expensive API
+                # Memory
+                "mem": rusage.ri_phys_footprint,
+                "mem_peak": rusage.ri_lifetime_max_phys_footprint,
                 "pageins": rusage.ri_pageins,
+                "faults": task_info.pti_faults,
+                # Disk I/O
+                "disk_io": disk_io,
+                "disk_io_rate": disk_io_rate,
+                # Activity
                 "csw": task_info.pti_csw,
-                "sysbsd": task_info.pti_syscalls_mach + task_info.pti_syscalls_unix,
+                "syscalls": task_info.pti_syscalls_mach + task_info.pti_syscalls_unix,
                 "threads": task_info.pti_threadnum,
+                "mach_msgs": task_info.pti_messages_sent + task_info.pti_messages_received,
+                # Efficiency
+                "instructions": instructions,
+                "cycles": cycles,
+                "ipc": ipc,
+                # Power
+                "energy": energy,
+                "energy_rate": energy_rate,
+                "wakeups": rusage.ri_pkg_idle_wkups + rusage.ri_interrupt_wkups,
+                # State
+                "state": state,
+                "priority": task_info.pti_priority,
             }
             all_processes.append(proc)
 
@@ -237,7 +431,7 @@ class LibprocCollector:
         scored = [self._score_process(p) for p in rogues]
 
         elapsed_ms = int((time.monotonic() - start) * 1000)
-        max_score = max((p.score for p in scored), default=0)
+        max_score = max((p.score.current for p in scored), default=0)
 
         return ProcessSamples(
             timestamp=datetime.now(),
@@ -288,10 +482,9 @@ class LibprocCollector:
         categories = [
             ("cpu", "cpu", self.config.rogue_selection.cpu),
             ("mem", "mem", self.config.rogue_selection.mem),
-            ("cmprs", "cmprs", self.config.rogue_selection.cmprs),
             ("threads", "threads", self.config.rogue_selection.threads),
             ("csw", "csw", self.config.rogue_selection.csw),
-            ("sysbsd", "sysbsd", self.config.rogue_selection.sysbsd),
+            ("syscalls", "syscalls", self.config.rogue_selection.syscalls),
             ("pageins", "pageins", self.config.rogue_selection.pageins),
         ]
 
@@ -325,6 +518,18 @@ class LibprocCollector:
         else:
             return 0.0
 
+    def _get_band(self, score: int) -> str:
+        """Derive band name from score using config thresholds."""
+        return self.config.bands.get_band(score)
+
+    def _make_metric(self, value: float | int) -> MetricValue:
+        """Create a MetricValue with same current/low/high (daemon enriches later)."""
+        return MetricValue(current=value, low=value, high=value)
+
+    def _make_metric_str(self, value: str) -> MetricValueStr:
+        """Create a MetricValueStr with same current/low/high (daemon enriches later)."""
+        return MetricValueStr(current=value, low=value, high=value)
+
     def _score_process(self, proc: dict) -> ProcessScore:
         """Compute stressor score using config weights, then apply state multiplier."""
         weights = self.config.scoring.weights
@@ -337,10 +542,16 @@ class LibprocCollector:
             "state": self._normalize_state(proc["state"]),
             "pageins": min(1.0, proc["pageins"] / norm.pageins),
             "mem": min(1.0, proc["mem"] / (norm.mem_gb * 1024**3)),
-            "cmprs": min(1.0, proc["cmprs"] / (norm.cmprs_gb * 1024**3)),
             "csw": min(1.0, proc["csw"] / norm.csw),
-            "sysbsd": min(1.0, proc["sysbsd"] / norm.sysbsd),
+            "syscalls": min(1.0, proc["syscalls"] / norm.syscalls),
             "threads": min(1.0, proc["threads"] / norm.threads),
+            "disk_io_rate": min(1.0, proc["disk_io_rate"] / norm.disk_io_rate),
+            "energy_rate": min(1.0, proc["energy_rate"] / norm.energy_rate),
+            "wakeups": min(1.0, proc["wakeups"] / norm.wakeups),
+            # IPC: inverse scoring — low IPC is bad (stalled pipeline)
+            "ipc": (
+                max(0.0, 1.0 - (proc["ipc"] / norm.ipc_min)) if proc["ipc"] < norm.ipc_min else 0.0
+            ),
         }
 
         # Weighted sum (base score - what this process WOULD contribute if active)
@@ -349,10 +560,13 @@ class LibprocCollector:
             + normalized["state"] * weights.state
             + normalized["pageins"] * weights.pageins
             + normalized["mem"] * weights.mem
-            + normalized["cmprs"] * weights.cmprs
             + normalized["csw"] * weights.csw
-            + normalized["sysbsd"] * weights.sysbsd
+            + normalized["syscalls"] * weights.syscalls
             + normalized["threads"] * weights.threads
+            + normalized["disk_io_rate"] * weights.disk_io_rate
+            + normalized["energy_rate"] * weights.energy_rate
+            + normalized["wakeups"] * weights.wakeups
+            + normalized["ipc"] * weights.ipc
         )
 
         # Apply state multiplier (discount for currently-inactive processes)
@@ -363,19 +577,41 @@ class LibprocCollector:
         category_bonus = 1.0 + (0.1 * max(0, category_count - 2))
 
         score = min(100, int(base_score * state_mult * category_bonus))
+        band = self._get_band(score)
+        captured_at = time.time()
 
         return ProcessScore(
             pid=proc["pid"],
             command=proc["command"],
-            cpu=proc["cpu"],
-            state=proc["state"],
-            mem=proc["mem"],
-            cmprs=proc["cmprs"],
-            pageins=proc["pageins"],
-            csw=proc["csw"],
-            sysbsd=proc["sysbsd"],
-            threads=proc["threads"],
-            score=score,
-            categories=frozenset(proc["_categories"]),
-            captured_at=time.time(),
+            captured_at=captured_at,
+            # CPU
+            cpu=self._make_metric(proc["cpu"]),
+            # Memory
+            mem=self._make_metric(proc["mem"]),
+            mem_peak=proc["mem_peak"],
+            pageins=self._make_metric(proc["pageins"]),
+            faults=self._make_metric(proc["faults"]),
+            # Disk I/O
+            disk_io=self._make_metric(proc["disk_io"]),
+            disk_io_rate=self._make_metric(proc["disk_io_rate"]),
+            # Activity
+            csw=self._make_metric(proc["csw"]),
+            syscalls=self._make_metric(proc["syscalls"]),
+            threads=self._make_metric(proc["threads"]),
+            mach_msgs=self._make_metric(proc["mach_msgs"]),
+            # Efficiency
+            instructions=self._make_metric(proc["instructions"]),
+            cycles=self._make_metric(proc["cycles"]),
+            ipc=self._make_metric(proc["ipc"]),
+            # Power
+            energy=self._make_metric(proc["energy"]),
+            energy_rate=self._make_metric(proc["energy_rate"]),
+            wakeups=self._make_metric(proc["wakeups"]),
+            # State
+            state=self._make_metric_str(proc["state"]),
+            priority=self._make_metric(proc["priority"]),
+            # Scoring
+            score=self._make_metric(score),
+            band=self._make_metric_str(band),
+            categories=list(proc["_categories"]),
         )

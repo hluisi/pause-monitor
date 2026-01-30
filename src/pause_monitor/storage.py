@@ -14,7 +14,7 @@ if TYPE_CHECKING:
 
 log = structlog.get_logger()
 
-SCHEMA_VERSION = 11  # Structured snapshot columns (drop JSON blobs)
+SCHEMA_VERSION = 12  # MetricValue schema: new fields, cmprs removed, sysbsd→syscalls
 
 
 SCHEMA = """
@@ -43,15 +43,35 @@ CREATE TABLE IF NOT EXISTS process_snapshots (
     event_id INTEGER NOT NULL,
     snapshot_type TEXT NOT NULL,
     captured_at REAL NOT NULL,
+    -- CPU
     cpu REAL NOT NULL,
-    state TEXT NOT NULL,
+    -- Memory
     mem INTEGER NOT NULL,
-    cmprs INTEGER NOT NULL,
+    mem_peak INTEGER NOT NULL,
     pageins INTEGER NOT NULL,
+    faults INTEGER NOT NULL,
+    -- Disk I/O
+    disk_io INTEGER NOT NULL,
+    disk_io_rate REAL NOT NULL,
+    -- Activity
     csw INTEGER NOT NULL,
-    sysbsd INTEGER NOT NULL,
+    syscalls INTEGER NOT NULL,
     threads INTEGER NOT NULL,
+    mach_msgs INTEGER NOT NULL,
+    -- Efficiency
+    instructions INTEGER NOT NULL,
+    cycles INTEGER NOT NULL,
+    ipc REAL NOT NULL,
+    -- Power
+    energy INTEGER NOT NULL,
+    energy_rate REAL NOT NULL,
+    wakeups INTEGER NOT NULL,
+    -- State
+    state TEXT NOT NULL,
+    priority INTEGER NOT NULL,
+    -- Scoring
     score INTEGER NOT NULL,
+    band TEXT NOT NULL,
     categories TEXT NOT NULL,
     FOREIGN KEY (event_id) REFERENCES process_events(id) ON DELETE CASCADE
 );
@@ -442,8 +462,10 @@ def get_process_event_detail(conn: sqlite3.Connection, event_id: int) -> dict | 
     row = conn.execute(
         """SELECT e.id, e.pid, e.command, e.boot_time, e.entry_time, e.exit_time,
                   e.entry_band, e.peak_band, e.peak_score, e.peak_snapshot_id,
-                  s.cpu, s.state, s.mem, s.cmprs, s.pageins, s.csw, s.sysbsd,
-                  s.threads, s.score, s.categories, s.captured_at
+                  s.cpu, s.state, s.mem, s.mem_peak, s.pageins, s.faults,
+                  s.disk_io, s.disk_io_rate, s.csw, s.syscalls, s.threads, s.mach_msgs,
+                  s.instructions, s.cycles, s.ipc, s.energy, s.energy_rate, s.wakeups,
+                  s.priority, s.score, s.band, s.categories, s.captured_at
            FROM process_events e
            LEFT JOIN process_snapshots s ON e.peak_snapshot_id = s.id
            WHERE e.id = ?""",
@@ -460,14 +482,26 @@ def get_process_event_detail(conn: sqlite3.Connection, event_id: int) -> dict | 
             "cpu": row[10],
             "state": row[11],
             "mem": row[12],
-            "cmprs": row[13],
+            "mem_peak": row[13],
             "pageins": row[14],
-            "csw": row[15],
-            "sysbsd": row[16],
-            "threads": row[17],
-            "score": row[18],
-            "categories": json.loads(row[19]) if row[19] else [],
-            "captured_at": row[20],
+            "faults": row[15],
+            "disk_io": row[16],
+            "disk_io_rate": row[17],
+            "csw": row[18],
+            "syscalls": row[19],
+            "threads": row[20],
+            "mach_msgs": row[21],
+            "instructions": row[22],
+            "cycles": row[23],
+            "ipc": row[24],
+            "energy": row[25],
+            "energy_rate": row[26],
+            "wakeups": row[27],
+            "priority": row[28],
+            "score": row[29],
+            "band": row[30],
+            "categories": json.loads(row[31]) if row[31] else [],
+            "captured_at": row[32],
         }
 
     return {
@@ -517,26 +551,52 @@ def insert_process_snapshot(
     snapshot_type: str,
     score: "ProcessScore",
 ) -> int:
-    """Insert a snapshot for an event. Returns snapshot ID."""
+    """Insert a snapshot for an event. Returns snapshot ID.
+
+    Extracts .current from MetricValue fields (low/high are transient).
+    """
     cursor = conn.execute(
         """INSERT INTO process_snapshots
-           (event_id, snapshot_type, captured_at, cpu, state, mem, cmprs,
-            pageins, csw, sysbsd, threads, score, categories)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+           (event_id, snapshot_type, captured_at,
+            cpu, mem, mem_peak, pageins, faults,
+            disk_io, disk_io_rate, csw, syscalls, threads, mach_msgs,
+            instructions, cycles, ipc, energy, energy_rate, wakeups,
+            state, priority, score, band, categories)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             event_id,
             snapshot_type,
             score.captured_at,
-            score.cpu,
-            score.state,
-            score.mem,
-            score.cmprs,
-            score.pageins,
-            score.csw,
-            score.sysbsd,
-            score.threads,
-            score.score,
-            json.dumps(list(score.categories)),
+            # CPU
+            score.cpu.current,
+            # Memory
+            score.mem.current,
+            score.mem_peak,
+            score.pageins.current,
+            score.faults.current,
+            # Disk I/O
+            score.disk_io.current,
+            score.disk_io_rate.current,
+            # Activity
+            score.csw.current,
+            score.syscalls.current,
+            score.threads.current,
+            score.mach_msgs.current,
+            # Efficiency
+            score.instructions.current,
+            score.cycles.current,
+            score.ipc.current,
+            # Power
+            score.energy.current,
+            score.energy_rate.current,
+            score.wakeups.current,
+            # State
+            score.state.current,
+            score.priority.current,
+            # Scoring
+            score.score.current,
+            score.band.current,
+            json.dumps(score.categories),
         ),
     )
     conn.commit()
@@ -546,10 +606,13 @@ def insert_process_snapshot(
 
 
 def get_snapshot(conn: sqlite3.Connection, snapshot_id: int) -> dict | None:
-    """Get a snapshot by ID with all fields."""
+    """Get a snapshot by ID with all fields (returns flat values, not MetricValue)."""
     row = conn.execute(
-        """SELECT id, event_id, snapshot_type, captured_at, cpu, state, mem,
-                  cmprs, pageins, csw, sysbsd, threads, score, categories
+        """SELECT id, event_id, snapshot_type, captured_at,
+                  cpu, mem, mem_peak, pageins, faults,
+                  disk_io, disk_io_rate, csw, syscalls, threads, mach_msgs,
+                  instructions, cycles, ipc, energy, energy_rate, wakeups,
+                  state, priority, score, band, categories
            FROM process_snapshots WHERE id = ?""",
         (snapshot_id,),
     ).fetchone()
@@ -562,24 +625,47 @@ def get_snapshot(conn: sqlite3.Connection, snapshot_id: int) -> dict | None:
         "event_id": row[1],
         "snapshot_type": row[2],
         "captured_at": row[3],
+        # CPU
         "cpu": row[4],
-        "state": row[5],
-        "mem": row[6],
-        "cmprs": row[7],
-        "pageins": row[8],
-        "csw": row[9],
-        "sysbsd": row[10],
-        "threads": row[11],
-        "score": row[12],
-        "categories": json.loads(row[13]) if row[13] else [],
+        # Memory
+        "mem": row[5],
+        "mem_peak": row[6],
+        "pageins": row[7],
+        "faults": row[8],
+        # Disk I/O
+        "disk_io": row[9],
+        "disk_io_rate": row[10],
+        # Activity
+        "csw": row[11],
+        "syscalls": row[12],
+        "threads": row[13],
+        "mach_msgs": row[14],
+        # Efficiency
+        "instructions": row[15],
+        "cycles": row[16],
+        "ipc": row[17],
+        # Power
+        "energy": row[18],
+        "energy_rate": row[19],
+        "wakeups": row[20],
+        # State
+        "state": row[21],
+        "priority": row[22],
+        # Scoring
+        "score": row[23],
+        "band": row[24],
+        "categories": json.loads(row[25]) if row[25] else [],
     }
 
 
 def get_process_snapshots(conn: sqlite3.Connection, event_id: int) -> list[dict]:
     """Get all snapshots for an event, ordered by capture time."""
     cursor = conn.execute(
-        """SELECT id, event_id, snapshot_type, captured_at, cpu, state, mem,
-                  cmprs, pageins, csw, sysbsd, threads, score, categories
+        """SELECT id, event_id, snapshot_type, captured_at,
+                  cpu, mem, mem_peak, pageins, faults,
+                  disk_io, disk_io_rate, csw, syscalls, threads, mach_msgs,
+                  instructions, cycles, ipc, energy, energy_rate, wakeups,
+                  state, priority, score, band, categories
            FROM process_snapshots WHERE event_id = ?
            ORDER BY captured_at""",
         (event_id,),
@@ -590,16 +676,36 @@ def get_process_snapshots(conn: sqlite3.Connection, event_id: int) -> list[dict]
             "event_id": r[1],
             "snapshot_type": r[2],
             "captured_at": r[3],
+            # CPU
             "cpu": r[4],
-            "state": r[5],
-            "mem": r[6],
-            "cmprs": r[7],
-            "pageins": r[8],
-            "csw": r[9],
-            "sysbsd": r[10],
-            "threads": r[11],
-            "score": r[12],
-            "categories": json.loads(r[13]) if r[13] else [],
+            # Memory
+            "mem": r[5],
+            "mem_peak": r[6],
+            "pageins": r[7],
+            "faults": r[8],
+            # Disk I/O
+            "disk_io": r[9],
+            "disk_io_rate": r[10],
+            # Activity
+            "csw": r[11],
+            "syscalls": r[12],
+            "threads": r[13],
+            "mach_msgs": r[14],
+            # Efficiency
+            "instructions": r[15],
+            "cycles": r[16],
+            "ipc": r[17],
+            # Power
+            "energy": r[18],
+            "energy_rate": r[19],
+            "wakeups": r[20],
+            # State
+            "state": r[21],
+            "priority": r[22],
+            # Scoring
+            "score": r[23],
+            "band": r[24],
+            "categories": json.loads(r[25]) if r[25] else [],
         }
         for r in cursor.fetchall()
     ]

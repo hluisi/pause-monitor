@@ -1,7 +1,30 @@
 # tests/test_tracker.py
 """Tests for per-process band tracker."""
 
-from pause_monitor.collector import ProcessScore
+from pause_monitor.collector import MetricValue, MetricValueStr, ProcessScore
+
+
+def _metric(val: float | int) -> MetricValue:
+    return MetricValue(current=val, low=val, high=val)
+
+
+def _metric_str(val: str) -> MetricValueStr:
+    return MetricValueStr(current=val, low=val, high=val)
+
+
+def _get_band_for_score(score: int) -> str:
+    """Derive band name from score using default BandsConfig thresholds."""
+    # Default thresholds: medium=20, elevated=40, high=60, critical=80
+    if score >= 80:
+        return "critical"
+    elif score >= 60:
+        return "high"
+    elif score >= 40:
+        return "elevated"
+    elif score >= 20:
+        return "medium"
+    else:
+        return "low"
 
 
 def make_score(
@@ -9,27 +32,40 @@ def make_score(
     command: str = "test",
     score: int = 50,
     captured_at: float = 1706000100.0,
+    state: str = "running",
+    band: str | None = None,
     **kwargs,
 ) -> ProcessScore:
     """Create ProcessScore with sensible defaults for testing."""
-    defaults = {
-        "cpu": 50.0,
-        "state": "running",
-        "mem": 1000,
-        "cmprs": 0,
-        "pageins": 0,
-        "csw": 10,
-        "sysbsd": 5,
-        "threads": 2,
-        "categories": frozenset(["cpu"]) if score >= 40 else frozenset(),
-    }
-    defaults.update(kwargs)
+    # Derive band from score if not explicitly provided
+    if band is None:
+        band = _get_band_for_score(score)
     return ProcessScore(
         pid=pid,
         command=command,
-        score=score,
         captured_at=captured_at,
-        **defaults,
+        cpu=_metric(kwargs.get("cpu", 50.0)),
+        mem=_metric(kwargs.get("mem", 1000)),
+        mem_peak=kwargs.get("mem_peak", 1500),
+        pageins=_metric(kwargs.get("pageins", 0)),
+        faults=_metric(kwargs.get("faults", 0)),
+        disk_io=_metric(kwargs.get("disk_io", 0)),
+        disk_io_rate=_metric(kwargs.get("disk_io_rate", 0.0)),
+        csw=_metric(kwargs.get("csw", 10)),
+        syscalls=_metric(kwargs.get("syscalls", 5)),
+        threads=_metric(kwargs.get("threads", 2)),
+        mach_msgs=_metric(kwargs.get("mach_msgs", 0)),
+        instructions=_metric(kwargs.get("instructions", 0)),
+        cycles=_metric(kwargs.get("cycles", 0)),
+        ipc=_metric(kwargs.get("ipc", 0.0)),
+        energy=_metric(kwargs.get("energy", 0)),
+        energy_rate=_metric(kwargs.get("energy_rate", 0.0)),
+        wakeups=_metric(kwargs.get("wakeups", 0)),
+        state=_metric_str(state),
+        priority=_metric(kwargs.get("priority", 31)),
+        score=_metric(score),
+        band=_metric_str(band),
+        categories=kwargs.get("categories", ["cpu"] if score >= 40 else []),
     )
 
 
@@ -208,12 +244,11 @@ def test_tracker_inserts_entry_snapshot(tmp_path):
         captured_at=1706000100.0,
         cpu=60.0,
         mem=2000,
-        cmprs=100,
         pageins=50,
         csw=20,
-        sysbsd=10,
+        syscalls=10,
         threads=4,
-        categories=frozenset(["cpu", "mem"]),
+        categories=["cpu", "mem"],
     )
     tracker.update([score])
 

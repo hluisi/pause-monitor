@@ -314,14 +314,14 @@ def test_schema_has_process_snapshots_table(tmp_path):
     conn.close()
 
 
-def test_schema_version_11(initialized_db: Path):
-    """Schema version should be 11 (structured snapshot columns)."""
+def test_schema_version_12(initialized_db: Path):
+    """Schema version should be 12 (MetricValue fields + new metrics)."""
     from pause_monitor.storage import get_connection
 
     conn = get_connection(initialized_db)
     version = get_schema_version(conn)
     conn.close()
-    assert version == 11
+    assert version == 12
 
 
 # --- Process Event CRUD Tests ---

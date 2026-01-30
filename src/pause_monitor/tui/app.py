@@ -425,13 +425,26 @@ class ProcessTable(Static):
                     del self._cached_rogues[pid]
                     self._last_seen.pop(pid, None)
 
-        display_list.sort(key=lambda x: x[0].get("score", 0), reverse=True)
+        # Sort by score.current (MetricValue dict)
+        display_list.sort(
+            key=lambda x: x[0].get("score", {}).get("current", 0)
+            if isinstance(x[0].get("score"), dict)
+            else x[0].get("score", 0),
+            reverse=True,
+        )
 
         self._clear_data_rows()
 
         for rogue, is_decayed in display_list:
             pid = rogue.get("pid", 0)
-            score = rogue.get("score", 0)
+
+            # Extract current value from MetricValue dict (new schema) or plain int (legacy)
+            score_data = rogue.get("score", 0)
+            if isinstance(score_data, dict):
+                score = score_data.get("current", 0)
+            else:
+                score = score_data
+
             prev_score = self._prev_scores.get(pid, score)
 
             if is_decayed:
@@ -451,15 +464,34 @@ class ProcessTable(Static):
             else:
                 why = str(categories)
 
+            # Extract .current from MetricValue dicts
+            cpu_data = rogue.get("cpu", 0)
+            cpu = cpu_data.get("current", 0) if isinstance(cpu_data, dict) else cpu_data
+
+            mem_data = rogue.get("mem", 0)
+            mem = mem_data.get("current", 0) if isinstance(mem_data, dict) else mem_data
+
+            pageins_data = rogue.get("pageins", 0)
+            if isinstance(pageins_data, dict):
+                pageins = pageins_data.get("current", 0)
+            else:
+                pageins = pageins_data
+
+            csw_data = rogue.get("csw", 0)
+            csw = csw_data.get("current", 0) if isinstance(csw_data, dict) else csw_data
+
+            state_data = rogue.get("state", "?")
+            state = state_data.get("current", "?") if isinstance(state_data, dict) else state_data
+
             self._add_row(
                 trend,
                 str(rogue.get("command", "?")),
                 score,  # Pass int for color coding
-                f"{rogue.get('cpu', 0):.1f}",
-                format_bytes(rogue.get("mem", 0)),
-                format_count(rogue.get("pageins", 0)),
-                format_count(rogue.get("csw", 0)),
-                str(rogue.get("state", "?")),
+                f"{cpu:.1f}",
+                format_bytes(mem),
+                format_count(pageins),
+                format_count(csw),
+                str(state),
                 why,
                 decayed=is_decayed,
             )
@@ -548,6 +580,13 @@ class TrackedEventsPanel(Static):
         self._table.show_header = True
         self._table.cursor_type = "none"
 
+    def _extract_score(self, rogue: dict) -> int:
+        """Extract score value from rogue dict (handles MetricValue or plain int)."""
+        score_data = rogue.get("score", 0)
+        if isinstance(score_data, dict):
+            return score_data.get("current", 0)
+        return score_data
+
     def update_tracking(self, rogues: list[dict], now: float) -> None:
         """Update tracking based on current rogues.
 
@@ -558,17 +597,21 @@ class TrackedEventsPanel(Static):
         current_pids: set[int] = set()
 
         for r in rogues:
-            score = r.get("score", 0)
+            score = self._extract_score(r)
             if score >= TRACKING_THRESHOLD:
                 cmd = r.get("command", "?")
                 current_pids.add(r.get("pid", 0))
                 # Keep the highest scoring entry per command
-                if cmd not in current_above or score > current_above[cmd].get("score", 0):
+                if cmd in current_above:
+                    existing_score = self._extract_score(current_above[cmd])
+                else:
+                    existing_score = 0
+                if cmd not in current_above or score > existing_score:
                     current_above[cmd] = r
 
         # Check for new/updated active entries
         for cmd, rogue in current_above.items():
-            score = rogue.get("score", 0)
+            score = self._extract_score(rogue)
             categories = rogue.get("categories", [])
             if isinstance(categories, (set, frozenset)):
                 categories = list(categories)

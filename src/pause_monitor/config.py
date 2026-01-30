@@ -75,16 +75,24 @@ class BandsConfig:
 
 @dataclass
 class ScoringWeights:
-    """Weights for per-process stressor scoring (sum to 100, excluding threads)."""
+    """Weights for per-process stressor scoring (sum to 100).
 
-    cpu: int = 25
+    New fields added: disk_io_rate, energy_rate, wakeups, ipc.
+    Removed: cmprs (not reliably available from libproc).
+    Renamed: sysbsd → syscalls.
+    """
+
+    cpu: int = 20
     state: int = 15
-    pageins: int = 15
-    mem: int = 15
-    cmprs: int = 10
+    pageins: int = 12
+    mem: int = 12
     csw: int = 10
-    sysbsd: int = 5
-    threads: int = 5
+    syscalls: int = 8
+    threads: int = 3
+    disk_io_rate: int = 8
+    energy_rate: int = 5
+    wakeups: int = 4
+    ipc: int = 3  # Inverse: low IPC is concerning
 
 
 @dataclass
@@ -114,11 +122,14 @@ class NormalizationConfig:
 
     cpu: float = 100.0  # Percentage (natural max)
     mem_gb: float = 8.0  # Memory in gigabytes
-    cmprs_gb: float = 1.0  # Compressed memory in gigabytes
     pageins: int = 1000  # Page-ins per sample
     csw: int = 100000  # Context switches per sample
-    sysbsd: int = 100000  # Syscalls per sample
+    syscalls: int = 100000  # Syscalls per sample (renamed from sysbsd)
     threads: int = 1000  # Thread count
+    disk_io_rate: float = 100_000_000  # 100 MB/s
+    energy_rate: float = 1_000_000  # Energy units/sec
+    wakeups: int = 10_000  # Wakeups per sample
+    ipc_min: float = 0.5  # IPC below this is concerning (inverse scoring)
 
 
 @dataclass
@@ -154,10 +165,9 @@ class RogueSelectionConfig:
 
     cpu: CategorySelection = field(default_factory=CategorySelection)
     mem: CategorySelection = field(default_factory=CategorySelection)
-    cmprs: CategorySelection = field(default_factory=CategorySelection)
     threads: CategorySelection = field(default_factory=CategorySelection)
     csw: CategorySelection = field(default_factory=CategorySelection)
-    sysbsd: CategorySelection = field(default_factory=CategorySelection)
+    syscalls: CategorySelection = field(default_factory=CategorySelection)
     pageins: CategorySelection = field(default_factory=CategorySelection)
     state: StateSelection = field(default_factory=StateSelection)
 
@@ -322,10 +332,13 @@ def _load_scoring_config(data: dict) -> ScoringConfig:
             state=weights_data.get("state", w.state),
             pageins=weights_data.get("pageins", w.pageins),
             mem=weights_data.get("mem", w.mem),
-            cmprs=weights_data.get("cmprs", w.cmprs),
             csw=weights_data.get("csw", w.csw),
-            sysbsd=weights_data.get("sysbsd", w.sysbsd),
+            syscalls=weights_data.get("syscalls", w.syscalls),
             threads=weights_data.get("threads", w.threads),
+            disk_io_rate=weights_data.get("disk_io_rate", w.disk_io_rate),
+            energy_rate=weights_data.get("energy_rate", w.energy_rate),
+            wakeups=weights_data.get("wakeups", w.wakeups),
+            ipc=weights_data.get("ipc", w.ipc),
         ),
         state_multipliers=StateMultipliers(
             idle=state_mult_data.get("idle", m.idle),
@@ -339,11 +352,14 @@ def _load_scoring_config(data: dict) -> ScoringConfig:
         normalization=NormalizationConfig(
             cpu=norm_data.get("cpu", n.cpu),
             mem_gb=norm_data.get("mem_gb", n.mem_gb),
-            cmprs_gb=norm_data.get("cmprs_gb", n.cmprs_gb),
             pageins=norm_data.get("pageins", n.pageins),
             csw=norm_data.get("csw", n.csw),
-            sysbsd=norm_data.get("sysbsd", n.sysbsd),
+            syscalls=norm_data.get("syscalls", n.syscalls),
             threads=norm_data.get("threads", n.threads),
+            disk_io_rate=norm_data.get("disk_io_rate", n.disk_io_rate),
+            energy_rate=norm_data.get("energy_rate", n.energy_rate),
+            wakeups=norm_data.get("wakeups", n.wakeups),
+            ipc_min=norm_data.get("ipc_min", n.ipc_min),
         ),
     )
 
@@ -373,10 +389,9 @@ def _load_rogue_selection_config(data: dict) -> RogueSelectionConfig:
     return RogueSelectionConfig(
         cpu=_load_category_selection(data.get("cpu", {})),
         mem=_load_category_selection(data.get("mem", {})),
-        cmprs=_load_category_selection(data.get("cmprs", {})),
         threads=_load_category_selection(data.get("threads", {})),
         csw=_load_category_selection(data.get("csw", {})),
-        sysbsd=_load_category_selection(data.get("sysbsd", {})),
+        syscalls=_load_category_selection(data.get("syscalls", {})),
         pageins=_load_category_selection(data.get("pageins", {})),
         state=_load_state_selection(data.get("state", {})),
     )

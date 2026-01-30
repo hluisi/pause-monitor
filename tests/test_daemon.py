@@ -12,12 +12,29 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from pause_monitor.collector import LibprocCollector, ProcessSamples, ProcessScore
+from pause_monitor.collector import (
+    LibprocCollector,
+    MetricValue,
+    MetricValueStr,
+    ProcessSamples,
+    ProcessScore,
+)
 from pause_monitor.config import Config
 from pause_monitor.daemon import Daemon, DaemonState
 
 # Test constants
 TEST_TIMESTAMP = 1706000000.0  # 2024-01-23 UTC
+
+
+def _metric(val: float | int) -> MetricValue:
+    """Create MetricValue with same value for current/low/high."""
+    return MetricValue(current=val, low=val, high=val)
+
+
+def _metric_str(val: str) -> MetricValueStr:
+    """Create MetricValueStr with same value for current/low/high."""
+    return MetricValueStr(current=val, low=val, high=val)
+
 
 # === Test Fixtures ===
 
@@ -582,17 +599,29 @@ async def test_daemon_main_loop_collects_samples(patched_config_paths, monkeypat
                 ProcessScore(
                     pid=123,
                     command="test_proc",
-                    cpu=50.0,
-                    state="running",
-                    mem=1024 * 1024 * 100,
-                    cmprs=0,
-                    pageins=10,
-                    csw=500,
-                    sysbsd=200,
-                    threads=5,
-                    score=25,
-                    categories=frozenset(["cpu"]),
                     captured_at=TEST_TIMESTAMP,
+                    cpu=_metric(50.0),
+                    mem=_metric(1024 * 1024 * 100),
+                    mem_peak=1024 * 1024 * 100,
+                    pageins=_metric(10),
+                    faults=_metric(0),
+                    disk_io=_metric(0),
+                    disk_io_rate=_metric(0.0),
+                    csw=_metric(500),
+                    syscalls=_metric(200),
+                    threads=_metric(5),
+                    mach_msgs=_metric(0),
+                    instructions=_metric(0),
+                    cycles=_metric(0),
+                    ipc=_metric(0.0),
+                    energy=_metric(0),
+                    energy_rate=_metric(0.0),
+                    wakeups=_metric(0),
+                    state=_metric_str("running"),
+                    priority=_metric(31),
+                    score=_metric(25),
+                    band=_metric_str("medium"),
+                    categories=["cpu"],
                 )
             ],
         ),
@@ -605,17 +634,29 @@ async def test_daemon_main_loop_collects_samples(patched_config_paths, monkeypat
                 ProcessScore(
                     pid=456,
                     command="heavy_proc",
-                    cpu=80.0,
-                    state="running",
-                    mem=1024 * 1024 * 500,
-                    cmprs=1024 * 1024 * 50,
-                    pageins=100,
-                    csw=5000,
-                    sysbsd=2000,
-                    threads=20,
-                    score=45,
-                    categories=frozenset(["cpu", "mem"]),
                     captured_at=TEST_TIMESTAMP,
+                    cpu=_metric(80.0),
+                    mem=_metric(1024 * 1024 * 500),
+                    mem_peak=1024 * 1024 * 500,
+                    pageins=_metric(100),
+                    faults=_metric(0),
+                    disk_io=_metric(0),
+                    disk_io_rate=_metric(0.0),
+                    csw=_metric(5000),
+                    syscalls=_metric(2000),
+                    threads=_metric(20),
+                    mach_msgs=_metric(0),
+                    instructions=_metric(0),
+                    cycles=_metric(0),
+                    ipc=_metric(0.0),
+                    energy=_metric(0),
+                    energy_rate=_metric(0.0),
+                    wakeups=_metric(0),
+                    state=_metric_str("running"),
+                    priority=_metric(31),
+                    score=_metric(45),
+                    band=_metric_str("elevated"),
+                    categories=["cpu", "mem"],
                 )
             ],
         ),
@@ -653,16 +694,18 @@ async def test_daemon_main_loop_collects_samples(patched_config_paths, monkeypat
 # === Task 8: ProcessTracker Integration Tests ===
 
 
-def test_daemon_initializes_tracker(patched_config_paths, monkeypatch):
+@pytest.mark.asyncio
+async def test_daemon_initializes_tracker(patched_config_paths, monkeypatch):
     """Daemon creates ProcessTracker on startup."""
-    from pause_monitor.storage import init_database
-
     config = Config.load()
-    init_database(config.db_path)
 
     monkeypatch.setattr("pause_monitor.daemon.get_boot_time", lambda: int(TEST_TIMESTAMP))
 
     daemon = Daemon(config)
+    # tracker is None until _init_database() is called
+    assert daemon.tracker is None
+
+    await daemon._init_database()
 
     assert daemon.tracker is not None
     assert daemon.boot_time == int(TEST_TIMESTAMP)
@@ -697,14 +740,12 @@ async def test_daemon_schema_mismatch_recovery(patched_config_paths, monkeypatch
 @pytest.mark.asyncio
 async def test_daemon_main_loop_updates_tracker(patched_config_paths, monkeypatch):
     """Main loop should call tracker.update() with rogues from samples."""
-    from pause_monitor.storage import init_database
-
     config = Config.load()
-    init_database(config.db_path)
 
     monkeypatch.setattr("pause_monitor.daemon.get_boot_time", lambda: int(TEST_TIMESTAMP))
 
     daemon = Daemon(config)
+    await daemon._init_database()  # Must init before accessing tracker
 
     # Track update calls
     update_calls = []
@@ -726,17 +767,29 @@ async def test_daemon_main_loop_updates_tracker(patched_config_paths, monkeypatc
             ProcessScore(
                 pid=123,
                 command="test_proc",
-                cpu=50.0,
-                state="running",
-                mem=1024 * 1024 * 100,
-                cmprs=0,
-                pageins=10,
-                csw=500,
-                sysbsd=200,
-                threads=5,
-                score=25,
-                categories=frozenset(["cpu"]),
                 captured_at=TEST_TIMESTAMP,
+                cpu=_metric(50.0),
+                mem=_metric(1024 * 1024 * 100),
+                mem_peak=1024 * 1024 * 100,
+                pageins=_metric(10),
+                faults=_metric(0),
+                disk_io=_metric(0),
+                disk_io_rate=_metric(0.0),
+                csw=_metric(500),
+                syscalls=_metric(200),
+                threads=_metric(5),
+                mach_msgs=_metric(0),
+                instructions=_metric(0),
+                cycles=_metric(0),
+                ipc=_metric(0.0),
+                energy=_metric(0),
+                energy_rate=_metric(0.0),
+                wakeups=_metric(0),
+                state=_metric_str("running"),
+                priority=_metric(31),
+                score=_metric(25),
+                band=_metric_str("medium"),
+                categories=["cpu"],
             )
         ],
     )
