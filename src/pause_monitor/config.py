@@ -7,14 +7,6 @@ import tomlkit
 
 
 @dataclass
-class SamplingConfig:
-    """Sampling interval configuration."""
-
-    normal_interval: int = 5
-    elevated_interval: int = 1
-
-
-@dataclass
 class RetentionConfig:
     """Data retention configuration."""
 
@@ -22,80 +14,37 @@ class RetentionConfig:
 
 
 @dataclass
-class AlertsConfig:
-    """Alert notification configuration."""
-
-    enabled: bool = True
-    pause_detected: bool = True
-    pause_min_duration: float = 2.0
-    critical_stress: bool = True
-    critical_duration: int = 30
-    elevated_entered: bool = False
-    forensics_completed: bool = True
-    sound: bool = True
-
-
-@dataclass
-class SuspectsConfig:
-    """Process suspect pattern configuration."""
-
-    patterns: list[str] = field(
-        default_factory=lambda: [
-            "codemeter",
-            "bitdefender",
-            "biomesyncd",
-            "motu",
-            "coreaudiod",
-            "kernel_task",
-            "WindowServer",
-        ]
-    )
-
-
-@dataclass
-class ForensicsConfig:
-    """Forensics capture timeout configuration."""
-
-    spindump_timeout: int = 30  # Seconds to wait for spindump
-    tailspin_timeout: int = 10  # Seconds to wait for tailspin
-    logs_timeout: int = 10  # Seconds to wait for system log capture
-
-
-@dataclass
 class SentinelConfig:
-    """Sentinel timing configuration."""
+    """Ring buffer configuration."""
 
-    fast_interval_ms: int = 100
-    ring_buffer_seconds: int = 30
-    pause_threshold_ratio: float = 2.0  # Latency ratio to detect pause
-    peak_tracking_seconds: int = 30  # Interval to update peak stress
-    sample_interval_ms: int = 1500  # Expected time for top -l 2 -s 1
-    wake_suppress_seconds: float = 10.0  # Suppress pause detection after wake
+    ring_buffer_seconds: int = 60  # Seconds of samples to keep in ring buffer
 
 
 @dataclass
 class BandsConfig:
-    """Band thresholds and behavior triggers."""
+    """Band thresholds and behavior triggers.
 
-    low: int = 20
-    medium: int = 40
-    elevated: int = 60
-    high: int = 80
-    critical: int = 100
+    Each threshold is the minimum score to enter that band.
+    Scores below `medium` are in the "low" band (not tracked).
+    """
+
+    medium: int = 20  # Score to enter "medium" band
+    elevated: int = 40  # Score to enter "elevated" band
+    high: int = 50  # Score to enter "high" band
+    critical: int = 70  # Score to enter "critical" band
     tracking_band: str = "elevated"
     forensics_band: str = "high"
     checkpoint_interval: int = 30  # Seconds between checkpoint snapshots while tracking
-    forensics_cooldown: int = 60  # Seconds between score-based forensics triggers
 
     def get_band(self, score: int) -> str:
         """Return band name for a given score."""
-        if score >= self.high:
+        if score >= self.critical:
             return "critical"
-        if score >= self.elevated:
+        if score >= self.high:
             return "high"
-        if score >= self.medium:
+        if score >= self.elevated:
             return "elevated"
-        if score >= self.low:
+        if score >= self.medium:
             return "medium"
         return "low"
 
@@ -103,10 +52,10 @@ class BandsConfig:
         """Return the minimum score for a band."""
         thresholds = {
             "low": 0,
-            "medium": self.low,
-            "elevated": self.medium,
-            "high": self.elevated,
-            "critical": self.high,
+            "medium": self.medium,
+            "elevated": self.elevated,
+            "high": self.high,
+            "critical": self.critical,
         }
         if band not in thresholds:
             raise ValueError(f"Unknown band: {band!r}. Valid bands: {list(thresholds.keys())}")
@@ -128,13 +77,13 @@ class ScoringWeights:
     """Weights for per-process stressor scoring (sum to 100, excluding threads)."""
 
     cpu: int = 25
-    state: int = 20
+    state: int = 15
     pageins: int = 15
     mem: int = 15
     cmprs: int = 10
     csw: int = 10
     sysbsd: int = 5
-    threads: int = 0
+    threads: int = 5
 
 
 @dataclass
@@ -142,7 +91,7 @@ class StateMultipliers:
     """Post-score multipliers based on process state. Applied after base score calculation."""
 
     idle: float = 0.5
-    sleeping: float = 0.6
+    sleeping: float = 0.5
     stopped: float = 0.7
     halted: float = 0.8
     zombie: float = 0.9
@@ -228,16 +177,11 @@ def _dataclass_to_table(obj: object) -> tomlkit.items.Table:
 class Config:
     """Main configuration container."""
 
-    sampling: SamplingConfig = field(default_factory=SamplingConfig)
     retention: RetentionConfig = field(default_factory=RetentionConfig)
-    alerts: AlertsConfig = field(default_factory=AlertsConfig)
-    suspects: SuspectsConfig = field(default_factory=SuspectsConfig)
-    forensics: ForensicsConfig = field(default_factory=ForensicsConfig)
     sentinel: SentinelConfig = field(default_factory=SentinelConfig)
     bands: BandsConfig = field(default_factory=BandsConfig)
     scoring: ScoringConfig = field(default_factory=ScoringConfig)
     rogue_selection: RogueSelectionConfig = field(default_factory=RogueSelectionConfig)
-    learning_mode: bool = False
 
     @property
     def config_dir(self) -> Path:
@@ -253,11 +197,6 @@ class Config:
     def data_dir(self) -> Path:
         """Data directory."""
         return Path.home() / ".local" / "share" / "pause-monitor"
-
-    @property
-    def events_dir(self) -> Path:
-        """Events directory for forensics."""
-        return self.data_dir / "events"
 
     @property
     def db_path(self) -> Path:
@@ -285,15 +224,8 @@ class Config:
         path.parent.mkdir(parents=True, exist_ok=True)
 
         doc = tomlkit.document()
-        doc.add("learning_mode", self.learning_mode)
-        doc.add(tomlkit.nl())
-
         sections = [
-            "sampling",
             "retention",
-            "alerts",
-            "suspects",
-            "forensics",
             "sentinel",
             "bands",
             "scoring",
@@ -307,11 +239,15 @@ class Config:
 
     @classmethod
     def load(cls, path: Path | None = None) -> "Config":
-        """Load config from TOML file, returning defaults for missing values."""
-        config = cls()
-        path = path or config.config_path
+        """Load config from TOML file, returning defaults for missing values.
+
+        All defaults come from the dataclass definitions - no hardcoded values here.
+        This ensures Config() and Config.load() use identical defaults.
+        """
+        defaults = cls()
+        path = path or defaults.config_path
         if not path.exists():
-            return config
+            return defaults
 
         try:
             with open(path) as f:
@@ -319,65 +255,28 @@ class Config:
         except tomlkit.exceptions.TOMLKitError as e:
             raise ValueError(f"Failed to parse config file {path}: {e}") from e
 
-        sampling_data = data.get("sampling", {})
         retention_data = data.get("retention", {})
-        alerts_data = data.get("alerts", {})
-        suspects_data = data.get("suspects", {})
-        forensics_data = data.get("forensics", {})
         sentinel_data = data.get("sentinel", {})
         bands_data = data.get("bands", {})
         scoring_data = data.get("scoring", {})
         rogue_data = data.get("rogue_selection", {})
 
+        # Use dataclass defaults for any missing values
+        ret_defaults = defaults.retention
+        sen_defaults = defaults.sentinel
+
         return cls(
-            sampling=SamplingConfig(
-                normal_interval=sampling_data.get("normal_interval", 5),
-                elevated_interval=sampling_data.get("elevated_interval", 1),
-            ),
             retention=RetentionConfig(
-                events_days=retention_data.get("events_days", 90),
-            ),
-            alerts=AlertsConfig(
-                enabled=alerts_data.get("enabled", True),
-                pause_detected=alerts_data.get("pause_detected", True),
-                pause_min_duration=alerts_data.get("pause_min_duration", 2.0),
-                critical_stress=alerts_data.get("critical_stress", True),
-                critical_duration=alerts_data.get("critical_duration", 30),
-                elevated_entered=alerts_data.get("elevated_entered", False),
-                forensics_completed=alerts_data.get("forensics_completed", True),
-                sound=alerts_data.get("sound", True),
-            ),
-            suspects=SuspectsConfig(
-                patterns=suspects_data.get(
-                    "patterns",
-                    [
-                        "codemeter",
-                        "bitdefender",
-                        "biomesyncd",
-                        "motu",
-                        "coreaudiod",
-                        "kernel_task",
-                        "WindowServer",
-                    ],
-                ),
-            ),
-            forensics=ForensicsConfig(
-                spindump_timeout=forensics_data.get("spindump_timeout", 30),
-                tailspin_timeout=forensics_data.get("tailspin_timeout", 10),
-                logs_timeout=forensics_data.get("logs_timeout", 10),
+                events_days=retention_data.get("events_days", ret_defaults.events_days),
             ),
             sentinel=SentinelConfig(
-                fast_interval_ms=sentinel_data.get("fast_interval_ms", 100),
-                ring_buffer_seconds=sentinel_data.get("ring_buffer_seconds", 30),
-                pause_threshold_ratio=sentinel_data.get("pause_threshold_ratio", 2.0),
-                peak_tracking_seconds=sentinel_data.get("peak_tracking_seconds", 30),
-                sample_interval_ms=sentinel_data.get("sample_interval_ms", 1500),
-                wake_suppress_seconds=sentinel_data.get("wake_suppress_seconds", 10.0),
+                ring_buffer_seconds=sentinel_data.get(
+                    "ring_buffer_seconds", sen_defaults.ring_buffer_seconds
+                ),
             ),
             bands=_load_bands_config(bands_data),
             scoring=_load_scoring_config(scoring_data),
             rogue_selection=_load_rogue_selection_config(rogue_data),
-            learning_mode=data.get("learning_mode", False),
         )
 
 
@@ -397,7 +296,6 @@ def _load_bands_config(data: dict) -> BandsConfig:
         )
 
     return BandsConfig(
-        low=data.get("low", defaults.low),
         medium=data.get("medium", defaults.medium),
         elevated=data.get("elevated", defaults.elevated),
         high=data.get("high", defaults.high),
@@ -413,54 +311,60 @@ def _load_scoring_config(data: dict) -> ScoringConfig:
     state_mult_data = data.get("state_multipliers", {})
     norm_data = data.get("normalization", {})
 
-    defaults = NormalizationConfig()
+    # Use dataclass instances as single source of truth for defaults
+    w = ScoringWeights()
+    m = StateMultipliers()
+    n = NormalizationConfig()
+
     return ScoringConfig(
         weights=ScoringWeights(
-            cpu=weights_data.get("cpu", 25),
-            state=weights_data.get("state", 20),
-            pageins=weights_data.get("pageins", 15),
-            mem=weights_data.get("mem", 15),
-            cmprs=weights_data.get("cmprs", 10),
-            csw=weights_data.get("csw", 10),
-            sysbsd=weights_data.get("sysbsd", 5),
-            threads=weights_data.get("threads", 0),
+            cpu=weights_data.get("cpu", w.cpu),
+            state=weights_data.get("state", w.state),
+            pageins=weights_data.get("pageins", w.pageins),
+            mem=weights_data.get("mem", w.mem),
+            cmprs=weights_data.get("cmprs", w.cmprs),
+            csw=weights_data.get("csw", w.csw),
+            sysbsd=weights_data.get("sysbsd", w.sysbsd),
+            threads=weights_data.get("threads", w.threads),
         ),
         state_multipliers=StateMultipliers(
-            idle=state_mult_data.get("idle", 0.5),
-            sleeping=state_mult_data.get("sleeping", 0.6),
-            stopped=state_mult_data.get("stopped", 0.7),
-            halted=state_mult_data.get("halted", 0.8),
-            zombie=state_mult_data.get("zombie", 0.9),
-            running=state_mult_data.get("running", 1.0),
-            stuck=state_mult_data.get("stuck", 1.0),
+            idle=state_mult_data.get("idle", m.idle),
+            sleeping=state_mult_data.get("sleeping", m.sleeping),
+            stopped=state_mult_data.get("stopped", m.stopped),
+            halted=state_mult_data.get("halted", m.halted),
+            zombie=state_mult_data.get("zombie", m.zombie),
+            running=state_mult_data.get("running", m.running),
+            stuck=state_mult_data.get("stuck", m.stuck),
         ),
         normalization=NormalizationConfig(
-            cpu=norm_data.get("cpu", defaults.cpu),
-            mem_gb=norm_data.get("mem_gb", defaults.mem_gb),
-            cmprs_gb=norm_data.get("cmprs_gb", defaults.cmprs_gb),
-            pageins=norm_data.get("pageins", defaults.pageins),
-            csw=norm_data.get("csw", defaults.csw),
-            sysbsd=norm_data.get("sysbsd", defaults.sysbsd),
-            threads=norm_data.get("threads", defaults.threads),
+            cpu=norm_data.get("cpu", n.cpu),
+            mem_gb=norm_data.get("mem_gb", n.mem_gb),
+            cmprs_gb=norm_data.get("cmprs_gb", n.cmprs_gb),
+            pageins=norm_data.get("pageins", n.pageins),
+            csw=norm_data.get("csw", n.csw),
+            sysbsd=norm_data.get("sysbsd", n.sysbsd),
+            threads=norm_data.get("threads", n.threads),
         ),
     )
 
 
 def _load_category_selection(data: dict) -> CategorySelection:
     """Load category selection from TOML data."""
+    d = CategorySelection()
     return CategorySelection(
-        enabled=data.get("enabled", True),
-        count=data.get("count", 3),
-        threshold=data.get("threshold", 0.0),
+        enabled=data.get("enabled", d.enabled),
+        count=data.get("count", d.count),
+        threshold=data.get("threshold", d.threshold),
     )
 
 
 def _load_state_selection(data: dict) -> StateSelection:
     """Load state selection from TOML data."""
+    d = StateSelection()
     return StateSelection(
-        enabled=data.get("enabled", True),
-        count=data.get("count", 0),
-        states=data.get("states", ["zombie"]),
+        enabled=data.get("enabled", d.enabled),
+        count=data.get("count", d.count),
+        states=data.get("states", d.states),
     )
 
 

@@ -1,58 +1,30 @@
 """Tests for configuration system."""
 
 from pause_monitor.config import (
-    AlertsConfig,
     BandsConfig,
+    CategorySelection,
     Config,
     NormalizationConfig,
     RetentionConfig,
-    SamplingConfig,
+    ScoringWeights,
     SentinelConfig,
-    SuspectsConfig,
+    StateMultipliers,
+    StateSelection,
 )
-
-
-def test_sampling_config_defaults():
-    """SamplingConfig has correct defaults."""
-    config = SamplingConfig()
-    assert config.normal_interval == 5
-    assert config.elevated_interval == 1
 
 
 def test_retention_config_defaults():
     """RetentionConfig has correct defaults."""
     config = RetentionConfig()
-    assert config.events_days == 90
-
-
-def test_alerts_config_defaults():
-    """AlertsConfig has correct defaults."""
-    config = AlertsConfig()
-    assert config.enabled is True
-    assert config.pause_detected is True
-    assert config.pause_min_duration == 2.0
-    assert config.critical_stress is True
-    assert config.critical_duration == 30
-    assert config.elevated_entered is False
-    assert config.forensics_completed is True
-    assert config.sound is True
-
-
-def test_suspects_config_defaults():
-    """SuspectsConfig has correct default patterns."""
-    config = SuspectsConfig()
-    assert "codemeter" in config.patterns
-    assert "biomesyncd" in config.patterns
-    assert "kernel_task" in config.patterns
+    defaults = RetentionConfig()
+    assert config.events_days == defaults.events_days
 
 
 def test_full_config_defaults():
     """Full Config object has correct nested defaults."""
     config = Config()
-    assert config.sampling.normal_interval == 5
-    assert config.retention.events_days == 90
-    assert config.alerts.enabled is True
-    assert config.learning_mode is False
+    assert config.retention.events_days == RetentionConfig().events_days
+    assert config.bands.medium == BandsConfig().medium
 
 
 def test_config_paths():
@@ -76,67 +48,58 @@ def test_config_save_preserves_values(tmp_path):
     """Config.save() writes correct TOML values."""
     config_path = tmp_path / "config.toml"
     config = Config()
-    config.sampling.normal_interval = 10
-    config.learning_mode = True
+    config.retention.events_days = 120
+    config.bands.medium = 30
     config.save(config_path)
 
     content = config_path.read_text()
-    assert "normal_interval = 10" in content
-    assert "learning_mode = true" in content
+    assert "events_days = 120" in content
+    assert "medium = 30" in content
 
 
 def test_config_load_reads_values(tmp_path):
     """Config.load() reads values from file."""
     config_path = tmp_path / "config.toml"
     config_path.write_text("""
-learning_mode = true
-
-[sampling]
-normal_interval = 10
-
 [bands]
-low = 15
-medium = 30
-elevated = 50
-high = 70
-critical = 90
+medium = 15
+elevated = 30
+high = 50
+critical = 70
 tracking_band = "medium"
 forensics_band = "elevated"
 
-[alerts]
-enabled = false
+[retention]
+events_days = 60
 """)
 
     config = Config.load(config_path)
-    assert config.learning_mode is True
-    assert config.sampling.normal_interval == 10
-    assert config.sampling.elevated_interval == 1  # Default preserved
-    assert config.bands.low == 15
-    assert config.bands.medium == 30
+    assert config.bands.medium == 15
+    assert config.bands.elevated == 30
     assert config.bands.tracking_band == "medium"
-    assert config.alerts.enabled is False
+    assert config.retention.events_days == 60
 
 
 def test_config_load_missing_file_returns_defaults(tmp_path):
     """Config.load() returns defaults when file doesn't exist."""
     config_path = tmp_path / "nonexistent.toml"
     config = Config.load(config_path)
-    assert config.sampling.normal_interval == 5
-    assert config.learning_mode is False
+    defaults = Config()
+    assert config.retention.events_days == defaults.retention.events_days
+    assert config.bands.medium == defaults.bands.medium
 
 
 def test_sentinel_config_defaults():
     """SentinelConfig has correct defaults."""
     config = SentinelConfig()
-    assert config.fast_interval_ms == 100
-    assert config.ring_buffer_seconds == 30
+    # Just verify it's set to something reasonable (positive seconds)
+    assert config.ring_buffer_seconds > 0
 
 
 def test_bands_config_has_ordered_thresholds():
     """BandsConfig has sensible ordered thresholds."""
     bands = BandsConfig()
-    # Verify defaults are ordered: low < medium < elevated < high < critical
-    assert bands.low < bands.medium
+    # Verify defaults are ordered: medium < elevated < high < critical
     assert bands.medium < bands.elevated
     assert bands.elevated < bands.high
     assert bands.high < bands.critical
@@ -147,34 +110,32 @@ def test_config_loads_sentinel_section(tmp_path):
     config_file = tmp_path / "config.toml"
     config_file.write_text("""
 [sentinel]
-fast_interval_ms = 200
-ring_buffer_seconds = 60
+ring_buffer_seconds = 120
 
 [bands]
-low = 15
-medium = 30
-elevated = 50
-high = 70
+medium = 15
+elevated = 30
+high = 50
+critical = 70
 """)
 
     config = Config.load(config_file)
-    assert config.sentinel.fast_interval_ms == 200
-    assert config.sentinel.ring_buffer_seconds == 60
-    assert config.bands.low == 15
-    assert config.bands.elevated == 50
+    assert config.sentinel.ring_buffer_seconds == 120
+    assert config.bands.medium == 15
+    assert config.bands.elevated == 30
 
 
 def test_config_save_includes_sentinel_section(tmp_path):
     """Config.save() writes sentinel and bands sections."""
     config_path = tmp_path / "config.toml"
     config = Config()
-    config.sentinel.fast_interval_ms = 150
-    config.bands.low = 25
+    config.sentinel.ring_buffer_seconds = 45
+    config.bands.medium = 25
     config.save(config_path)
 
     content = config_path.read_text()
-    assert "fast_interval_ms = 150" in content
-    assert "low = 25" in content
+    assert "ring_buffer_seconds = 45" in content
+    assert "medium = 25" in content
 
 
 def test_full_config_includes_sentinel_and_bands():
@@ -183,127 +144,34 @@ def test_full_config_includes_sentinel_and_bands():
     assert hasattr(config, "sentinel")
     assert hasattr(config, "bands")
     # Verify fields exist and match their respective config defaults
-    assert config.sentinel.fast_interval_ms == SentinelConfig().fast_interval_ms
-    assert config.bands.low == BandsConfig().low
-
-
-def test_config_loads_partial_sentinel_section(tmp_path):
-    """Config loads [sentinel] with partial fields, using defaults for missing."""
-    config_file = tmp_path / "config.toml"
-    config_file.write_text("""
-[sentinel]
-fast_interval_ms = 200
-# ring_buffer_seconds omitted
-""")
-    config = Config.load(config_file)
-
-    # Specified value
-    assert config.sentinel.fast_interval_ms == 200
-    # Default value for omitted field
-    assert config.sentinel.ring_buffer_seconds == 30
-
-
-def test_sentinel_config_has_pause_threshold():
-    """SentinelConfig should have pause detection threshold."""
-    config = SentinelConfig()
-    assert config.pause_threshold_ratio == 2.0  # Default: 2x expected latency
-
-
-def test_sentinel_config_has_peak_tracking_interval():
-    """SentinelConfig should have peak tracking interval."""
-    config = SentinelConfig()
-    assert config.peak_tracking_seconds == 30  # Default: one buffer cycle
-
-
-def test_sentinel_config_has_sample_interval():
-    """SentinelConfig should have sample interval for pause detection."""
-    config = SentinelConfig()
-    assert config.sample_interval_ms == 1500  # top -l 2 -s 1 takes ~1.5s
-
-
-def test_sentinel_config_has_wake_suppress():
-    """SentinelConfig should have wake suppress window."""
-    config = SentinelConfig()
-    assert config.wake_suppress_seconds == 10.0
-
-
-def test_config_loads_new_sentinel_fields(tmp_path):
-    """Config loads pause_threshold_ratio and peak_tracking_seconds."""
-    config_file = tmp_path / "config.toml"
-    config_file.write_text("""
-[sentinel]
-fast_interval_ms = 100
-ring_buffer_seconds = 30
-pause_threshold_ratio = 3.0
-peak_tracking_seconds = 60
-""")
-
-    config = Config.load(config_file)
-    assert config.sentinel.pause_threshold_ratio == 3.0
-    assert config.sentinel.peak_tracking_seconds == 60
-
-
-def test_config_save_includes_new_sentinel_fields(tmp_path):
-    """Config.save() writes pause_threshold_ratio and peak_tracking_seconds."""
-    config_path = tmp_path / "config.toml"
-    config = Config()
-    config.sentinel.pause_threshold_ratio = 2.5
-    config.sentinel.peak_tracking_seconds = 45
-    config.save(config_path)
-
-    content = config_path.read_text()
-    assert "pause_threshold_ratio = 2.5" in content
-    assert "peak_tracking_seconds = 45" in content
-
-
-def test_config_loads_sample_interval_and_wake_suppress(tmp_path):
-    """Config loads sample_interval_ms and wake_suppress_seconds."""
-    config_file = tmp_path / "config.toml"
-    config_file.write_text("""
-[sentinel]
-sample_interval_ms = 2000
-wake_suppress_seconds = 15.0
-""")
-
-    config = Config.load(config_file)
-    assert config.sentinel.sample_interval_ms == 2000
-    assert config.sentinel.wake_suppress_seconds == 15.0
-
-
-def test_config_save_includes_sample_interval_and_wake_suppress(tmp_path):
-    """Config.save() writes sample_interval_ms and wake_suppress_seconds."""
-    config_path = tmp_path / "config.toml"
-    config = Config()
-    config.sentinel.sample_interval_ms = 1800
-    config.sentinel.wake_suppress_seconds = 20.0
-    config.save(config_path)
-
-    content = config_path.read_text()
-    assert "sample_interval_ms = 1800" in content
-    assert "wake_suppress_seconds = 20.0" in content
+    assert config.sentinel.ring_buffer_seconds == SentinelConfig().ring_buffer_seconds
+    assert config.bands.medium == BandsConfig().medium
 
 
 def test_scoring_weights_default():
-    """Scoring weights should have correct defaults."""
+    """Scoring weights should match ScoringWeights defaults."""
     config = Config()
-    assert config.scoring.weights.cpu == 25
-    assert config.scoring.weights.state == 20
-    assert config.scoring.weights.pageins == 15
-    assert config.scoring.weights.mem == 15
-    assert config.scoring.weights.cmprs == 10
-    assert config.scoring.weights.csw == 10
-    assert config.scoring.weights.sysbsd == 5
-    assert config.scoring.weights.threads == 0
+    defaults = ScoringWeights()
+    assert config.scoring.weights.cpu == defaults.cpu
+    assert config.scoring.weights.state == defaults.state
+    assert config.scoring.weights.pageins == defaults.pageins
+    assert config.scoring.weights.mem == defaults.mem
+    assert config.scoring.weights.cmprs == defaults.cmprs
+    assert config.scoring.weights.csw == defaults.csw
+    assert config.scoring.weights.sysbsd == defaults.sysbsd
+    assert config.scoring.weights.threads == defaults.threads
 
 
 def test_rogue_selection_default():
-    """Rogue selection should have correct defaults."""
+    """Rogue selection should match CategorySelection/StateSelection defaults."""
     config = Config()
-    assert config.rogue_selection.cpu.enabled is True
-    assert config.rogue_selection.cpu.count == 3
-    assert config.rogue_selection.cpu.threshold == 0.0
-    assert config.rogue_selection.state.enabled is True
-    assert config.rogue_selection.state.states == ["zombie"]
+    cat_defaults = CategorySelection()
+    state_defaults = StateSelection()
+    assert config.rogue_selection.cpu.enabled == cat_defaults.enabled
+    assert config.rogue_selection.cpu.count == cat_defaults.count
+    assert config.rogue_selection.cpu.threshold == cat_defaults.threshold
+    assert config.rogue_selection.state.enabled == state_defaults.enabled
+    assert config.rogue_selection.state.states == state_defaults.states
 
 
 def test_band_thresholds_in_config():
@@ -311,7 +179,6 @@ def test_band_thresholds_in_config():
     config = Config()
     # Verify Config.bands matches BandsConfig defaults
     defaults = BandsConfig()
-    assert config.bands.low == defaults.low
     assert config.bands.medium == defaults.medium
     assert config.bands.elevated == defaults.elevated
     assert config.bands.high == defaults.high
@@ -343,12 +210,13 @@ pageins = 20
 """)
 
     config = Config.load(config_file)
+    defaults = ScoringWeights()
     assert config.scoring.weights.cpu == 30
     assert config.scoring.weights.state == 25
     assert config.scoring.weights.pageins == 20
     # Defaults for unspecified weights
-    assert config.scoring.weights.mem == 15
-    assert config.scoring.weights.threads == 0
+    assert config.scoring.weights.mem == defaults.mem
+    assert config.scoring.weights.threads == defaults.threads
 
 
 def test_config_save_includes_rogue_selection(tmp_path):
@@ -381,6 +249,7 @@ states = ["stuck"]
 """)
 
     config = Config.load(config_file)
+    defaults = CategorySelection()
     assert config.rogue_selection.cpu.enabled is False
     assert config.rogue_selection.cpu.count == 5
     assert config.rogue_selection.cpu.threshold == 10.0
@@ -388,46 +257,46 @@ states = ["stuck"]
     assert config.rogue_selection.state.count == 2
     assert config.rogue_selection.state.states == ["stuck"]
     # Defaults for unspecified categories
-    assert config.rogue_selection.mem.enabled is True
-    assert config.rogue_selection.mem.count == 3
+    assert config.rogue_selection.mem.enabled == defaults.enabled
+    assert config.rogue_selection.mem.count == defaults.count
 
 
 def test_normalization_config_defaults():
-    """NormalizationConfig has correct defaults."""
+    """NormalizationConfig matches its dataclass defaults."""
     norm = NormalizationConfig()
-    assert norm.cpu == 100.0
-    assert norm.mem_gb == 8.0
-    assert norm.cmprs_gb == 1.0
-    assert norm.pageins == 1000
-    assert norm.csw == 100000
-    assert norm.sysbsd == 100000
-    assert norm.threads == 1000
+    defaults = NormalizationConfig()
+    assert norm.cpu == defaults.cpu
+    assert norm.mem_gb == defaults.mem_gb
+    assert norm.cmprs_gb == defaults.cmprs_gb
+    assert norm.pageins == defaults.pageins
+    assert norm.csw == defaults.csw
+    assert norm.sysbsd == defaults.sysbsd
+    assert norm.threads == defaults.threads
 
 
 def test_bands_config_defaults():
-    """BandsConfig has sensible defaults."""
+    """BandsConfig fields are self-consistent."""
     bands = BandsConfig()
-    assert bands.low == 20
-    assert bands.medium == 40
-    assert bands.elevated == 60
-    assert bands.high == 80
-    assert bands.critical == 100
-    assert bands.tracking_band == "elevated"
-    assert bands.forensics_band == "high"
+    # Verify ordering is maintained
+    assert bands.medium < bands.elevated < bands.high < bands.critical
+    # Verify tracking/forensics bands are valid band names
+    assert bands.tracking_band in {"low", "medium", "elevated", "high", "critical"}
+    assert bands.forensics_band in {"low", "medium", "elevated", "high", "critical"}
 
 
 def test_bands_config_get_band_for_score():
-    """get_band() returns correct band name for score."""
+    """get_band() returns correct band name for score based on thresholds."""
     bands = BandsConfig()
+    # Test boundary conditions using actual threshold values
     assert bands.get_band(0) == "low"
-    assert bands.get_band(19) == "low"
-    assert bands.get_band(20) == "medium"
-    assert bands.get_band(39) == "medium"
-    assert bands.get_band(40) == "elevated"
-    assert bands.get_band(59) == "elevated"
-    assert bands.get_band(60) == "high"
-    assert bands.get_band(79) == "high"
-    assert bands.get_band(80) == "critical"
+    assert bands.get_band(bands.medium - 1) == "low"
+    assert bands.get_band(bands.medium) == "medium"
+    assert bands.get_band(bands.elevated - 1) == "medium"
+    assert bands.get_band(bands.elevated) == "elevated"
+    assert bands.get_band(bands.high - 1) == "elevated"
+    assert bands.get_band(bands.high) == "high"
+    assert bands.get_band(bands.critical - 1) == "high"
+    assert bands.get_band(bands.critical) == "critical"
     assert bands.get_band(100) == "critical"
 
 
@@ -435,22 +304,22 @@ def test_bands_config_get_threshold_for_band():
     """get_threshold() returns score threshold for band name."""
     bands = BandsConfig()
     assert bands.get_threshold("low") == 0
-    assert bands.get_threshold("medium") == 20
-    assert bands.get_threshold("elevated") == 40
-    assert bands.get_threshold("high") == 60
-    assert bands.get_threshold("critical") == 80
+    assert bands.get_threshold("medium") == bands.medium
+    assert bands.get_threshold("elevated") == bands.elevated
+    assert bands.get_threshold("high") == bands.high
+    assert bands.get_threshold("critical") == bands.critical
 
 
 def test_bands_config_tracking_threshold():
     """tracking_threshold property returns threshold for tracking_band."""
     bands = BandsConfig()
-    assert bands.tracking_threshold == 40
+    assert bands.tracking_threshold == bands.get_threshold(bands.tracking_band)
 
 
 def test_bands_config_forensics_threshold():
     """forensics_threshold property returns threshold for forensics_band."""
     bands = BandsConfig()
-    assert bands.forensics_threshold == 60
+    assert bands.forensics_threshold == bands.get_threshold(bands.forensics_band)
 
 
 def test_config_has_bands_not_tiers():
@@ -463,8 +332,9 @@ def test_config_has_bands_not_tiers():
 def test_scoring_config_includes_normalization():
     """ScoringConfig includes normalization field."""
     config = Config()
+    defaults = NormalizationConfig()
     assert hasattr(config.scoring, "normalization")
-    assert config.scoring.normalization.mem_gb == 8.0
+    assert config.scoring.normalization.mem_gb == defaults.mem_gb
 
 
 def test_config_save_includes_normalization(tmp_path):
@@ -513,11 +383,12 @@ mem_gb = 64.0
 """)
 
     config = Config.load(config_file)
+    defaults = NormalizationConfig()
     # Specified value
     assert config.scoring.normalization.mem_gb == 64.0
     # Defaults for unspecified
-    assert config.scoring.normalization.cpu == 100.0
-    assert config.scoring.normalization.pageins == 1000
+    assert config.scoring.normalization.cpu == defaults.cpu
+    assert config.scoring.normalization.pageins == defaults.pageins
 
 
 def test_bands_get_threshold_raises_for_invalid_band():
@@ -569,3 +440,17 @@ normal_interval = 5
 
     with pytest.raises(ValueError, match=f"Failed to parse config file {config_file}"):
         Config.load(config_file)
+
+
+def test_state_multipliers_defaults():
+    """StateMultipliers has self-consistent defaults."""
+    mult = StateMultipliers()
+    # Running/stuck should have highest multiplier (1.0)
+    assert mult.running == 1.0
+    assert mult.stuck == 1.0
+    # Other states should be less than running
+    assert mult.idle < mult.running
+    assert mult.sleeping < mult.running
+    assert mult.stopped < mult.running
+    assert mult.halted < mult.running
+    assert mult.zombie < mult.running

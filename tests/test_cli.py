@@ -9,11 +9,9 @@ from click.testing import CliRunner
 
 from pause_monitor.cli import main
 from pause_monitor.config import (
-    AlertsConfig,
     BandsConfig,
     Config,
     RetentionConfig,
-    SamplingConfig,
 )
 from pause_monitor.storage import create_process_event, init_database
 
@@ -77,7 +75,6 @@ class TestEventsCommand:
             entry_band="elevated",
             peak_score=50,
             peak_band="high",
-            peak_snapshot="{}",
         )
         conn.close()
 
@@ -103,7 +100,11 @@ class TestEventsCommand:
         db_path = tmp_path / "data.db"
         init_database(db_path)
 
+        from pause_monitor.storage import insert_process_snapshot, update_process_event_peak
+        from tests.conftest import make_process_score
+
         conn = sqlite3.connect(db_path)
+        conn.execute("PRAGMA foreign_keys=ON")
         event_id = create_process_event(
             conn,
             pid=1234,
@@ -113,8 +114,11 @@ class TestEventsCommand:
             entry_band="elevated",
             peak_score=75,
             peak_band="high",
-            peak_snapshot='{"cpu": 80.0}',
         )
+        # Insert a snapshot so peak_snapshot is available for display
+        score = make_process_score(pid=1234, command="test_proc", score=75, cpu=80.0)
+        snap_id = insert_process_snapshot(conn, event_id, "entry", score)
+        update_process_event_peak(conn, event_id, 75, "high", snap_id)
         conn.close()
 
         with patch("pause_monitor.config.Config.load") as mock_load:
@@ -161,7 +165,6 @@ class TestEventsCommand:
                 entry_band="elevated",
                 peak_score=50 + i,
                 peak_band="high",
-                peak_snapshot="{}",
             )
         conn.close()
 
@@ -233,7 +236,6 @@ class TestHistoryCommand:
                 entry_band="elevated",
                 peak_score=50 + i * 10,
                 peak_band="elevated",
-                peak_snapshot="{}",
             )
             # Close the event
             conn.execute(
@@ -274,7 +276,6 @@ class TestHistoryCommand:
             entry_band="elevated",
             peak_score=50,
             peak_band="elevated",
-            peak_snapshot="{}",
         )
         conn.execute("UPDATE process_events SET exit_time = ? WHERE id = ?", (entry + 45, event_id))
         conn.commit()
@@ -313,7 +314,6 @@ class TestHistoryCommand:
             entry_band="elevated",
             peak_score=50,
             peak_band="elevated",
-            peak_snapshot="{}",
         )
         conn.execute("UPDATE process_events SET exit_time = ? WHERE id = ?", (entry + 30, event_id))
         conn.commit()
@@ -352,7 +352,6 @@ class TestHistoryCommand:
             entry_band="elevated",
             peak_score=50,
             peak_band="elevated",
-            peak_snapshot="{}",
         )
         conn.close()
 
@@ -463,18 +462,13 @@ class TestConfigCommand:
         assert result.exit_code == 0
         assert "Config file:" in result.output
         assert "Exists: False" in result.output
-        assert "[sampling]" in result.output
-        assert "normal_interval = 5" in result.output
-        assert "elevated_interval = 1" in result.output
-        assert "[bands]" in result.output
-        assert "low = 20" in result.output
-        assert "critical = 100" in result.output
         assert "[retention]" in result.output
-        assert "events_days = 90" in result.output
-        assert "[alerts]" in result.output
-        assert "enabled = True" in result.output
-        assert "sound = True" in result.output
-        assert "learning_mode = False" in result.output
+        # Verify output contains actual default values from config dataclasses
+        defaults = Config()
+        assert f"events_days = {defaults.retention.events_days}" in result.output
+        assert "[bands]" in result.output
+        assert f"medium = {defaults.bands.medium}" in result.output
+        assert f"critical = {defaults.bands.critical}" in result.output
 
     def test_config_show_custom_values(self, runner: CliRunner, tmp_path: Path) -> None:
         """config show displays custom values from config file."""
@@ -482,20 +476,13 @@ class TestConfigCommand:
 
         # Create a custom config
         custom_config = Config(
-            sampling=SamplingConfig(
-                normal_interval=10,
-                elevated_interval=2,
-            ),
             bands=BandsConfig(
-                low=15,
-                medium=30,
-                elevated=50,
-                high=70,
-                critical=90,
+                medium=15,
+                elevated=30,
+                high=50,
+                critical=70,
             ),
             retention=RetentionConfig(events_days=60),
-            alerts=AlertsConfig(enabled=False, sound=False),
-            learning_mode=True,
         )
         custom_config.save(config_path)
 
@@ -504,14 +491,9 @@ class TestConfigCommand:
 
         assert result.exit_code == 0
         assert "Exists: True" in result.output
-        assert "normal_interval = 10" in result.output
-        assert "elevated_interval = 2" in result.output
-        assert "low = 15" in result.output
-        assert "critical = 90" in result.output
+        assert "medium = 15" in result.output
+        assert "critical = 70" in result.output
         assert "events_days = 60" in result.output
-        assert "enabled = False" in result.output
-        assert "sound = False" in result.output
-        assert "learning_mode = True" in result.output
 
     def test_config_edit_creates_default(self, runner: CliRunner, tmp_path: Path) -> None:
         """config edit creates default config if it doesn't exist."""
@@ -536,8 +518,7 @@ class TestConfigCommand:
 
         # Create custom config first
         custom_config = Config(
-            sampling=SamplingConfig(normal_interval=99),
-            learning_mode=True,
+            retention=RetentionConfig(events_days=999),
         )
         custom_config.save(config_path)
 
@@ -552,8 +533,8 @@ class TestConfigCommand:
 
         # Verify defaults were written
         reset_config = Config.load(config_path)
-        assert reset_config.sampling.normal_interval == 5
-        assert reset_config.learning_mode is False
+        assert reset_config.retention.events_days == 90
+        assert reset_config.bands.medium == 20
 
 
 class TestInstallCommand:
@@ -715,7 +696,6 @@ class TestStatusCommand:
             entry_band="elevated",
             peak_score=65,
             peak_band="high",
-            peak_snapshot="{}",
         )
         conn.close()
 

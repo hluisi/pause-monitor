@@ -446,7 +446,8 @@ def test_score_process_stuck():
 
     scored = collector._score_process(proc)
 
-    assert scored.score >= 15  # State weight is 20, stuck gives exactly 20
+    # Stuck state with 1.0 multiplier should contribute the full state weight
+    assert scored.score >= config.scoring.weights.state
 
 
 def test_score_process_state_multiplier():
@@ -474,9 +475,10 @@ def test_score_process_state_multiplier():
     running_score = collector._score_process(running_proc).score
     sleeping_score = collector._score_process(sleeping_proc).score
 
-    # Running gets 1.0x, sleeping gets 0.6x
+    # Running gets 1.0x, sleeping gets its configured multiplier
+    sleeping_mult = config.scoring.state_multipliers.sleeping
     assert running_score > sleeping_score
-    assert sleeping_score == int(running_score * 0.6)
+    assert sleeping_score == int(running_score * sleeping_mult)
 
 
 def test_score_process_categories_preserved():
