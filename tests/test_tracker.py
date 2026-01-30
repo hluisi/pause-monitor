@@ -1,8 +1,6 @@
 # tests/test_tracker.py
 """Tests for per-process band tracker."""
 
-import json
-
 from pause_monitor.collector import ProcessScore
 
 
@@ -144,6 +142,8 @@ def test_tracker_restores_state_from_db(tmp_path):
         create_process_event,
         get_connection,
         init_database,
+        insert_process_snapshot,
+        update_process_event_peak,
     )
     from pause_monitor.tracker import ProcessTracker
 
@@ -151,8 +151,8 @@ def test_tracker_restores_state_from_db(tmp_path):
     init_database(db_path)
     conn = get_connection(db_path)
 
-    # Pre-create an open event in DB
-    create_process_event(
+    # Pre-create an open event in DB with a snapshot
+    event_id = create_process_event(
         conn,
         pid=456,
         command="preexisting",
@@ -161,8 +161,12 @@ def test_tracker_restores_state_from_db(tmp_path):
         entry_band="elevated",
         peak_score=60,
         peak_band="high",
-        peak_snapshot='{"pid": 456}',
     )
+
+    # Insert entry snapshot and set as peak
+    entry_score = make_score(pid=456, command="preexisting", score=60, captured_at=1706000050.0)
+    snapshot_id = insert_process_snapshot(conn, event_id, "entry", entry_score)
+    update_process_event_peak(conn, event_id, 60, "high", snapshot_id)
 
     bands = BandsConfig()
     tracker = ProcessTracker(conn, bands, boot_time=1706000000)
@@ -170,6 +174,7 @@ def test_tracker_restores_state_from_db(tmp_path):
     # Tracker should have loaded the open event
     assert 456 in tracker.tracked
     assert tracker.tracked[456].peak_score == 60
+    assert tracker.tracked[456].peak_snapshot_id == snapshot_id
 
     # If we update with that PID still in bad state, it should update peak
     tracker.update([make_score(pid=456, command="preexisting", score=85, captured_at=1706000200.0)])
@@ -186,7 +191,7 @@ def test_tracker_restores_state_from_db(tmp_path):
 def test_tracker_inserts_entry_snapshot(tmp_path):
     """ProcessTracker inserts entry snapshot when event opens."""
     from pause_monitor.config import BandsConfig
-    from pause_monitor.storage import get_connection, init_database
+    from pause_monitor.storage import get_connection, get_process_snapshots, init_database
     from pause_monitor.tracker import ProcessTracker
 
     db_path = tmp_path / "test.db"
@@ -215,17 +220,15 @@ def test_tracker_inserts_entry_snapshot(tmp_path):
     # Get the event ID
     event_id = tracker.tracked[789].event_id
 
-    # Check snapshot was inserted
-    row = conn.execute(
-        "SELECT snapshot_type, snapshot FROM process_snapshots WHERE event_id = ?",
-        (event_id,),
-    ).fetchone()
-    assert row is not None
-    assert row[0] == "entry"
-    snapshot = json.loads(row[1])
-    assert snapshot["pid"] == 789
-    assert snapshot["command"] == "snap_test"
-    assert snapshot["score"] == 55
+    # Check snapshot was inserted with structured columns
+    snapshots = get_process_snapshots(conn, event_id)
+    assert len(snapshots) == 1
+    snap = snapshots[0]
+    assert snap["snapshot_type"] == "entry"
+    assert snap["score"] == 55
+    assert snap["cpu"] == 60.0
+    assert snap["mem"] == 2000
+    assert set(snap["categories"]) == {"cpu", "mem"}
 
     conn.close()
 
@@ -233,7 +236,7 @@ def test_tracker_inserts_entry_snapshot(tmp_path):
 def test_tracker_inserts_exit_snapshot_on_score_drop(tmp_path):
     """ProcessTracker inserts exit snapshot when score drops below threshold."""
     from pause_monitor.config import BandsConfig
-    from pause_monitor.storage import get_connection, init_database
+    from pause_monitor.storage import get_connection, get_process_snapshots, init_database
     from pause_monitor.tracker import ProcessTracker
 
     db_path = tmp_path / "test.db"
@@ -251,19 +254,14 @@ def test_tracker_inserts_exit_snapshot_on_score_drop(tmp_path):
     tracker.update([make_score(pid=123, score=30, captured_at=1706000200.0)])
 
     # Check both entry and exit snapshots exist
-    rows = conn.execute(
-        """SELECT snapshot_type, snapshot FROM process_snapshots
-        WHERE event_id = ? ORDER BY snapshot_type""",
-        (event_id,),
-    ).fetchall()
-    assert len(rows) == 2
-    types = {row[0] for row in rows}
+    snapshots = get_process_snapshots(conn, event_id)
+    assert len(snapshots) == 2
+    types = {s["snapshot_type"] for s in snapshots}
     assert types == {"entry", "exit"}
 
     # Verify exit snapshot has the low score
-    exit_row = [row for row in rows if row[0] == "exit"][0]
-    exit_snapshot = json.loads(exit_row[1])
-    assert exit_snapshot["score"] == 30
+    exit_snap = [s for s in snapshots if s["snapshot_type"] == "exit"][0]
+    assert exit_snap["score"] == 30
 
     conn.close()
 
@@ -302,7 +300,7 @@ def test_tracker_no_exit_snapshot_for_disappeared_pid(tmp_path):
 def test_tracker_does_not_update_peak_for_equal_score(tmp_path):
     """ProcessTracker does NOT update peak when new score equals current peak."""
     from pause_monitor.config import BandsConfig
-    from pause_monitor.storage import get_connection, init_database
+    from pause_monitor.storage import get_connection, get_snapshot, init_database
     from pause_monitor.tracker import ProcessTracker
 
     db_path = tmp_path / "test.db"
@@ -315,22 +313,23 @@ def test_tracker_does_not_update_peak_for_equal_score(tmp_path):
     # Enter at 50
     tracker.update([make_score(pid=123, score=50, captured_at=1706000100.0)])
 
-    # Get initial peak_snapshot
-    initial_snapshot = conn.execute(
-        "SELECT peak_snapshot FROM process_events WHERE pid = 123"
+    # Get initial peak_snapshot_id
+    initial_snapshot_id = conn.execute(
+        "SELECT peak_snapshot_id FROM process_events WHERE pid = 123"
     ).fetchone()[0]
 
     # Update with same score (different timestamp)
     tracker.update([make_score(pid=123, score=50, captured_at=1706000200.0)])
 
-    # Peak snapshot should be unchanged (same object, not updated)
-    new_snapshot = conn.execute(
-        "SELECT peak_snapshot FROM process_events WHERE pid = 123"
+    # Peak snapshot_id should be unchanged (same snapshot, not updated)
+    new_snapshot_id = conn.execute(
+        "SELECT peak_snapshot_id FROM process_events WHERE pid = 123"
     ).fetchone()[0]
-    assert initial_snapshot == new_snapshot
+    assert initial_snapshot_id == new_snapshot_id
+
     # Verify timestamp in snapshot is still the original
-    snapshot_data = json.loads(new_snapshot)
-    assert snapshot_data["captured_at"] == 1706000100.0
+    snapshot = get_snapshot(conn, new_snapshot_id)
+    assert snapshot["captured_at"] == 1706000100.0
 
     conn.close()
 
@@ -397,10 +396,15 @@ def test_tracker_handles_multiple_simultaneous_processes(tmp_path):
 
 
 def test_tracker_inserts_checkpoint_snapshots(tmp_path):
-    """ProcessTracker inserts checkpoint snapshots periodically while tracking."""
+    """ProcessTracker inserts periodic checkpoint snapshots while tracking.
+
+    Note: Peak updates also insert checkpoint snapshots (since the peak snapshot
+    is stored by ID), so we use scores that don't exceed the entry peak to
+    isolate the periodic checkpoint behavior.
+    """
     from pause_monitor.config import BandsConfig
     from pause_monitor.storage import get_connection, init_database
-    from pause_monitor.tracker import SNAPSHOT_CHECKPOINT, ProcessTracker
+    from pause_monitor.tracker import SNAPSHOT_CHECKPOINT, SNAPSHOT_ENTRY, ProcessTracker
 
     db_path = tmp_path / "test.db"
     init_database(db_path)
@@ -410,41 +414,33 @@ def test_tracker_inserts_checkpoint_snapshots(tmp_path):
     bands = BandsConfig(checkpoint_interval=10)  # 10 seconds
     tracker = ProcessTracker(conn, bands, boot_time=1706000000)
 
-    # Enter bad state at t=100
+    # Enter bad state at t=100 with score=50
     tracker.update([make_score(pid=123, score=50, captured_at=1706000100.0)])
     event_id = tracker.tracked[123].event_id
 
-    # Update at t=105 (only 5 seconds - no checkpoint yet)
-    tracker.update([make_score(pid=123, score=52, captured_at=1706000105.0)])
+    # Update at t=105 with same score (no peak update, no checkpoint yet)
+    tracker.update([make_score(pid=123, score=50, captured_at=1706000105.0)])
 
-    # Check no checkpoint snapshot yet
+    # Check only entry snapshot exists (no checkpoint yet - only 5 seconds)
     rows = conn.execute(
         "SELECT snapshot_type FROM process_snapshots WHERE event_id = ?",
         (event_id,),
     ).fetchall()
     types = [row[0] for row in rows]
-    assert SNAPSHOT_CHECKPOINT not in types
+    assert types == [SNAPSHOT_ENTRY]
 
-    # Update at t=115 (15 seconds since entry - checkpoint should trigger)
-    tracker.update([make_score(pid=123, score=53, captured_at=1706000115.0)])
+    # Update at t=115 with same score (15 seconds since entry - checkpoint triggers)
+    tracker.update([make_score(pid=123, score=50, captured_at=1706000115.0)])
 
-    # Now we should have a checkpoint snapshot
-    rows = conn.execute(
-        "SELECT snapshot_type FROM process_snapshots WHERE event_id = ?",
-        (event_id,),
-    ).fetchall()
-    types = [row[0] for row in rows]
-    assert SNAPSHOT_CHECKPOINT in types
-
-    # Verify checkpoint count
+    # Now we should have entry + 1 checkpoint
     checkpoint_count = conn.execute(
         "SELECT COUNT(*) FROM process_snapshots WHERE event_id = ? AND snapshot_type = ?",
         (event_id, SNAPSHOT_CHECKPOINT),
     ).fetchone()[0]
     assert checkpoint_count == 1
 
-    # Another update at t=130 (should trigger another checkpoint)
-    tracker.update([make_score(pid=123, score=54, captured_at=1706000130.0)])
+    # Another update at t=130 (25 seconds since last checkpoint - another checkpoint)
+    tracker.update([make_score(pid=123, score=50, captured_at=1706000130.0)])
 
     checkpoint_count = conn.execute(
         "SELECT COUNT(*) FROM process_snapshots WHERE event_id = ? AND snapshot_type = ?",

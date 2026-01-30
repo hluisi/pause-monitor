@@ -5,7 +5,6 @@ import os
 import resource
 import signal
 import sqlite3
-import time
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -15,20 +14,10 @@ from termcolor import colored
 from pause_monitor.boottime import get_boot_time
 from pause_monitor.collector import TopCollector
 from pause_monitor.config import Config
-from pause_monitor.forensics import (
-    ForensicsCapture,
-    run_full_capture,
-)
-from pause_monitor.notifications import Notifier
-from pause_monitor.ringbuffer import BufferContents, RingBuffer
-from pause_monitor.sleepwake import was_recently_asleep
+from pause_monitor.forensics import ForensicsCapture
+from pause_monitor.ringbuffer import RingBuffer
 from pause_monitor.socket_server import SocketServer
-from pause_monitor.storage import (
-    get_last_system_sample_time,
-    init_database,
-    insert_system_sample,
-    prune_old_data,
-)
+from pause_monitor.storage import init_database, prune_old_data
 from pause_monitor.tracker import ProcessTracker
 
 log = structlog.get_logger()
@@ -58,8 +47,6 @@ class Daemon:
         self.config = config
         self.state = DaemonState()
 
-        self.notifier = Notifier(config.alerts)
-
         # TopCollector for per-process sampling at 1Hz
         self.collector = TopCollector(config)
 
@@ -77,7 +64,12 @@ class Daemon:
         if config.db_path.exists():
             try:
                 self._conn = sqlite3.connect(config.db_path)
-                self.tracker = ProcessTracker(self._conn, config.bands, self.boot_time)
+                self.tracker = ProcessTracker(
+                    self._conn,
+                    config.bands,
+                    self.boot_time,
+                    on_forensics_trigger=self._forensics_callback,
+                )
             except sqlite3.OperationalError:
                 # DB exists but wrong schema; will be recreated in _init_database
                 if self._conn:
@@ -87,9 +79,39 @@ class Daemon:
         self._caffeinate_proc: asyncio.subprocess.Process | None = None
         self._shutdown_event = asyncio.Event()
         self._auto_prune_task: asyncio.Task | None = None
-        self._hourly_sample_task: asyncio.Task | None = None
         self._socket_server: SocketServer | None = None
-        self._last_forensics_time: float = 0.0  # For score-based forensics debouncing
+
+    async def _forensics_callback(self, event_id: int, trigger: str) -> None:
+        """Forensics callback for tracker band transitions.
+
+        Called by ProcessTracker when a process enters high/critical band
+        or escalates into one. Captures forensic data and stores in database.
+
+        Args:
+            event_id: The process event ID
+            trigger: What triggered this capture (e.g., 'band_entry_high')
+        """
+        if self._conn is None:
+            log.warning("forensics_skipped_no_db", event_id=event_id, trigger=trigger)
+            return
+
+        try:
+            contents = self.ring_buffer.freeze()
+            capture = ForensicsCapture(self._conn, event_id)
+            capture_id = await capture.capture_and_store(contents, trigger)
+            log.info(
+                "forensics_triggered",
+                event_id=event_id,
+                capture_id=capture_id,
+                trigger=trigger,
+            )
+        except Exception as e:
+            log.exception(
+                "forensics_callback_failed",
+                event_id=event_id,
+                trigger=trigger,
+                error=str(e),
+            )
 
     async def _init_database(self) -> None:
         """Initialize database connection.
@@ -97,6 +119,11 @@ class Daemon:
         Extracted from start() so tests can initialize DB without full daemon startup.
         No migrations - if schema version mismatches, init_database() deletes and recreates.
         """
+        # Create config file with defaults if it doesn't exist
+        if not self.config.config_path.exists():
+            self.config.save()
+            log.info("config_created", path=str(self.config.config_path))
+
         self.config.data_dir.mkdir(parents=True, exist_ok=True)
         db_existed = self.config.db_path.exists()
         init_database(self.config.db_path)  # Handles version check + recreate
@@ -105,7 +132,12 @@ class Daemon:
         if self._conn is None:
             self._conn = sqlite3.connect(self.config.db_path)
         if self.tracker is None:
-            self.tracker = ProcessTracker(self._conn, self.config.bands, self.boot_time)
+            self.tracker = ProcessTracker(
+                self._conn,
+                self.config.bands,
+                self.boot_time,
+                on_forensics_trigger=self._forensics_callback,
+            )
 
         # Log database state
         restored_count = len(self.tracker.tracked) if self.tracker else 0
@@ -125,13 +157,10 @@ class Daemon:
         bands = self.config.bands
         log.info(
             "daemon_config",
-            sample_interval_ms=self.config.sentinel.sample_interval_ms,
-            pause_threshold_ratio=self.config.sentinel.pause_threshold_ratio,
             ring_buffer_seconds=self.config.sentinel.ring_buffer_seconds,
             tracking_threshold=bands.tracking_threshold,
             tracking_band=bands.tracking_band,
-            band_thresholds=f"low={bands.low}/med={bands.medium}/elev={bands.elevated}/high={bands.high}/crit={bands.critical}",
-            pause_min_duration=self.config.alerts.pause_min_duration,
+            band_thresholds=f"med={bands.medium}/elev={bands.elevated}/high={bands.high}/crit={bands.critical}",
         )
         log.info("daemon_boot_time", boot_time=self.boot_time)
 
@@ -174,9 +203,6 @@ class Daemon:
         # Start auto-prune task
         self._auto_prune_task = asyncio.create_task(self._auto_prune())
 
-        # Start hourly system sampling task
-        self._hourly_sample_task = asyncio.create_task(self._hourly_system_sample())
-
         # Run main loop (TopCollector -> stress -> ring buffer -> tiers)
         await self._main_loop()
 
@@ -198,15 +224,6 @@ class Daemon:
             except asyncio.CancelledError:
                 pass
             self._auto_prune_task = None
-
-        # Cancel hourly sample task
-        if self._hourly_sample_task:
-            self._hourly_sample_task.cancel()
-            try:
-                await self._hourly_sample_task
-            except asyncio.CancelledError:
-                pass
-            self._hourly_sample_task = None
 
         # Stop caffeinate
         await self._stop_caffeinate()
@@ -293,204 +310,31 @@ class Daemon:
                 # Run prune
                 if self._conn:
                     log.info("auto_prune_starting")
-                    events_deleted, samples_deleted = prune_old_data(
+                    events_deleted = prune_old_data(
                         self._conn,
                         events_days=self.config.retention.events_days,
                     )
                     log.info(
                         "auto_prune_completed",
                         events_deleted=events_deleted,
-                        samples_deleted=samples_deleted,
                     )
-
-    async def _hourly_system_sample(self) -> None:
-        """Save full system sample hourly for trend analysis."""
-        HOUR_SECONDS = 3600
-
-        while not self._shutdown_event.is_set():
-            try:
-                # Check when the last sample was taken
-                last_time = None
-                if self._conn:
-                    last_time = get_last_system_sample_time(self._conn)
-
-                # Calculate time until next sample
-                now = time.time()
-                if last_time is None:
-                    # No previous sample — take one immediately
-                    wait_seconds = 0.0
-                else:
-                    elapsed = now - last_time
-                    wait_seconds = max(0.0, HOUR_SECONDS - elapsed)
-
-                if wait_seconds > 0:
-                    # Wait for the next hour (or shutdown)
-                    try:
-                        await asyncio.wait_for(
-                            self._shutdown_event.wait(),
-                            timeout=wait_seconds,
-                        )
-                        break  # Shutdown requested
-                    except asyncio.TimeoutError:
-                        pass  # Time to sample
-
-                # Take a fresh sample and save it
-                if self._conn and not self._shutdown_event.is_set():
-                    samples = await self.collector.collect()
-                    insert_system_sample(self._conn, samples.to_json())
-                    log.info(
-                        "system_sample_saved",
-                        max_score=samples.max_score,
-                        process_count=samples.process_count,
-                    )
-
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                log.error("hourly_sample_failed", error=str(e))
-                # Wait a bit before retrying
-                try:
-                    await asyncio.wait_for(self._shutdown_event.wait(), timeout=60.0)
-                    break
-                except asyncio.TimeoutError:
-                    pass
-
-    async def _run_heavy_capture(self, capture: ForensicsCapture) -> None:
-        """Run heavy forensics capture (spindump, tailspin, logs) and notify on completion."""
-        try:
-            await run_full_capture(capture, config=self.config.forensics)
-            self.notifier.forensics_completed(capture.event_dir)
-        except Exception as e:
-            log.exception(
-                "forensics_capture_failed",
-                event_dir=str(capture.event_dir),
-                error=str(e),
-            )
-
-    async def _run_forensics(
-        self, contents: BufferContents, *, duration: float, trigger: str = "pause"
-    ) -> None:
-        """Run full forensics capture.
-
-        Captures forensics data (ring buffer, spindump, tailspin, logs) for pause events.
-
-        Args:
-            contents: Frozen ring buffer contents
-            duration: Pause duration in seconds
-            trigger: What triggered this capture ("pause" or "score")
-        """
-        # Create event directory
-        timestamp = datetime.now()
-        event_dir = self.config.events_dir / timestamp.strftime("%Y%m%d_%H%M%S")
-        event_dir.mkdir(parents=True, exist_ok=True)
-
-        # Create capture context
-        capture = ForensicsCapture(event_dir)
-
-        # Write ring buffer data
-        capture.write_ring_buffer(contents)
-
-        # Find peak sample for metadata (by max_score)
-        peak_sample = (
-            max(contents.samples, key=lambda s: s.samples.max_score) if contents.samples else None
-        )
-        peak_score = peak_sample.samples.max_score if peak_sample else 0
-
-        # Extract top process names from peak sample's rogues
-        culprit_names = []
-        if peak_sample and peak_sample.samples.rogues:
-            for rogue in peak_sample.samples.rogues:
-                if rogue.command and rogue.command not in culprit_names:
-                    culprit_names.append(rogue.command)
-
-        # Write metadata
-        capture.write_metadata(
-            {
-                "timestamp": timestamp.isoformat(),
-                "trigger": trigger,
-                "duration": duration,
-                "peak_score": peak_score,
-                "culprits": culprit_names,
-                "sample_count": len(contents.samples),
-            }
-        )
-
-        # Run heavy captures (spindump, tailspin, logs) in background
-        asyncio.create_task(
-            run_full_capture(
-                capture,
-                window_seconds=self.config.sentinel.ring_buffer_seconds,
-                config=self.config.forensics,
-            )
-        )
-
-        # Notify user
-        self.notifier.pause_detected(duration=duration, event_dir=event_dir)
-
-        log.info("forensics_started", event_dir=str(event_dir), culprits=culprit_names)
-
-    async def _handle_pause(self, elapsed_ms: int, expected_ms: int) -> None:
-        """Handle detected pause - run full forensics.
-
-        A pause is when our loop was delayed >threshold (system was frozen).
-
-        Args:
-            elapsed_ms: How long the sample actually took (ms)
-            expected_ms: How long it should have taken (ms)
-        """
-        # Convert to seconds for compatibility
-        elapsed_sec = elapsed_ms / 1000.0
-
-        # Check if we just woke from sleep (not a real pause)
-        if was_recently_asleep(within_seconds=elapsed_sec):
-            log.info("pause_was_sleep_wake", elapsed_ms=elapsed_ms)
-            return
-
-        # Check minimum duration threshold
-        if elapsed_sec < self.config.alerts.pause_min_duration:
-            log.debug(
-                "pause_below_threshold",
-                elapsed_ms=elapsed_ms,
-                min_duration=self.config.alerts.pause_min_duration,
-            )
-            return
-
-        log.warning(
-            "pause_detected",
-            elapsed_ms=elapsed_ms,
-            expected_ms=expected_ms,
-            ratio=elapsed_ms / expected_ms if expected_ms > 0 else 0,
-        )
-
-        # Freeze ring buffer (immutable snapshot)
-        contents = self.ring_buffer.freeze()
-
-        # Run forensics in background
-        await self._run_forensics(contents, duration=elapsed_sec)
 
     async def _main_loop(self) -> None:
         """Main 1Hz loop collecting process samples.
 
         Each iteration:
         1. Collect samples via TopCollector
-        2. Update per-process tracking with rogue processes
+        2. Update per-process tracking with rogue processes (triggers forensics on band entry)
         3. Push to ring buffer
-        4. Check for pause (elapsed_ms > threshold)
-        5. Broadcast to socket for TUI
+        4. Broadcast to socket for TUI
 
         The loop runs until shutdown event is set.
         """
-        expected_ms = self.config.sentinel.sample_interval_ms
-        pause_threshold = self.config.sentinel.pause_threshold_ratio
-
         # Heartbeat tracking (log every 60 samples = ~1 minute)
         heartbeat_interval = 60
         heartbeat_count = 0
         heartbeat_max_score = 0
         heartbeat_score_sum = 0
-
-        # Near-miss threshold: log when ratio exceeds this but is below pause_threshold
-        near_miss_ratio = 2.0
 
         # Track rogue selection churn (PIDs entering/leaving selection)
         previous_rogues: dict[int, str] = {}  # pid -> command
@@ -530,7 +374,7 @@ class Daemon:
 
                 previous_rogues = current_rogues
 
-                # Update per-process tracking
+                # Update per-process tracking (may trigger forensics callback)
                 if self.tracker is not None:
                     self.tracker.update(samples.rogues)
 
@@ -552,36 +396,6 @@ class Daemon:
                 heartbeat_count += 1
                 heartbeat_score_sum += samples.max_score
                 heartbeat_max_score = max(heartbeat_max_score, samples.max_score)
-
-                # Calculate timing ratio for pause detection
-                timing_ratio = samples.elapsed_ms / expected_ms if expected_ms > 0 else 0
-
-                # Check for pause (elapsed_ms much larger than expected)
-                if timing_ratio > pause_threshold:
-                    await self._handle_pause(samples.elapsed_ms, expected_ms)
-                elif timing_ratio > near_miss_ratio:
-                    # Near-miss: elevated timing but below pause threshold
-                    log.info(
-                        "pause_near_miss",
-                        elapsed_ms=samples.elapsed_ms,
-                        expected_ms=expected_ms,
-                        ratio=round(timing_ratio, 2),
-                        threshold=pause_threshold,
-                    )
-
-                # Score-based forensics trigger (critical band = 80+)
-                if samples.max_score >= self.config.bands.high:
-                    now = time.time()
-                    cooldown = self.config.bands.forensics_cooldown
-                    if now - self._last_forensics_time > cooldown:
-                        contents = self.ring_buffer.freeze()
-                        await self._run_forensics(contents, duration=0.0, trigger="score")
-                        self._last_forensics_time = now
-                        log.info(
-                            "score_based_forensics_trigger",
-                            max_score=samples.max_score,
-                            threshold=self.config.bands.high,
-                        )
 
                 # Broadcast to TUI clients
                 if self._socket_server and self._socket_server.has_clients:
@@ -631,7 +445,7 @@ class Daemon:
                     await asyncio.wait_for(self._shutdown_event.wait(), timeout=1.0)
                     break
                 except asyncio.TimeoutError:
-                    pass  # Continue with next sample  # Continue with next sample
+                    pass  # Continue with next sample
 
 
 async def run_daemon(config: Config | None = None) -> None:

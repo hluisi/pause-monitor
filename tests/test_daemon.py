@@ -15,7 +15,6 @@ import pytest
 from pause_monitor.collector import ProcessSamples, ProcessScore, TopCollector
 from pause_monitor.config import Config
 from pause_monitor.daemon import Daemon, DaemonState
-from pause_monitor.ringbuffer import RingBuffer
 
 # Test constants
 TEST_TIMESTAMP = 1706000000.0  # 2024-01-23 UTC
@@ -36,7 +35,7 @@ def short_tmp_path() -> Iterator[Path]:
         yield Path(tmpdir)
 
 
-def _patch_config_paths(stack: ExitStack, base_path: Path) -> None:
+def _patch_config_paths(stack: ExitStack, base_path: Path, config_path: Path) -> None:
     """Apply all Config path property patches to the given ExitStack.
 
     This helper eliminates deep nested `with patch.object()` blocks by using
@@ -44,9 +43,14 @@ def _patch_config_paths(stack: ExitStack, base_path: Path) -> None:
 
     Args:
         stack: ExitStack to register patches with
-        base_path: Directory to use for all Config paths
+        base_path: Directory to use for data paths (db, pid, socket)
+        config_path: Path to the config file
     """
     # fmt: off
+    stack.enter_context(patch.object(
+        Config, "config_path",
+        new_callable=lambda: property(lambda self: config_path)
+    ))
     stack.enter_context(patch.object(
         Config, "data_dir",
         new_callable=lambda: property(lambda self: base_path)
@@ -54,10 +58,6 @@ def _patch_config_paths(stack: ExitStack, base_path: Path) -> None:
     stack.enter_context(patch.object(
         Config, "db_path",
         new_callable=lambda: property(lambda self: base_path / "test.db")
-    ))
-    stack.enter_context(patch.object(
-        Config, "events_dir",
-        new_callable=lambda: property(lambda self: base_path / "events")
     ))
     stack.enter_context(patch.object(
         Config, "pid_path",
@@ -70,14 +70,35 @@ def _patch_config_paths(stack: ExitStack, base_path: Path) -> None:
     # fmt: on
 
 
+def load_config_from_file(tmp_path: Path, **overrides) -> Config:
+    """Create a config file with defaults (plus overrides) and load it.
+
+    This exercises the actual Config.load() code path that production uses.
+    Tests should use this instead of Config() to catch config loading bugs.
+    """
+    config_path = tmp_path / "config.toml"
+
+    # Create config with any overrides, save to file
+    config = Config(**overrides) if overrides else Config()
+    config.save(config_path)
+
+    # Load it back - this is what production does
+    return Config.load(config_path)
+
+
 @pytest.fixture
 def patched_config_paths(tmp_path: Path) -> Iterator[Path]:
     """Fixture that patches all Config path properties to use tmp_path.
 
+    Creates a real config file and patches Config.load() paths.
     Yields the base path for tests that need to reference it directly.
     """
+    config_path = tmp_path / "config.toml"
+    # Create default config file
+    Config().save(config_path)
+
     with ExitStack() as stack:
-        _patch_config_paths(stack, tmp_path)
+        _patch_config_paths(stack, tmp_path, config_path)
         yield tmp_path
 
 
@@ -87,8 +108,12 @@ def patched_config_short_paths(short_tmp_path: Path) -> Iterator[Path]:
 
     Use this instead of patched_config_paths when tests involve socket operations.
     """
+    config_path = short_tmp_path / "config.toml"
+    # Create default config file
+    Config().save(config_path)
+
     with ExitStack() as stack:
-        _patch_config_paths(stack, short_tmp_path)
+        _patch_config_paths(stack, short_tmp_path, config_path)
         yield short_tmp_path
 
 
@@ -120,7 +145,6 @@ def test_daemon_init_creates_components():
 
     assert daemon.config is config
     assert daemon.state is not None
-    assert daemon.notifier is not None
     assert daemon.ring_buffer is not None
     assert daemon.collector is not None
 
@@ -128,7 +152,7 @@ def test_daemon_init_creates_components():
 @pytest.mark.asyncio
 async def test_daemon_start_initializes_database(patched_config_paths):
     """Daemon.start() initializes database."""
-    config = Config()
+    config = Config.load()  # Load from file created by fixture
     daemon = Daemon(config)
 
     with patch.object(daemon, "_start_caffeinate", new_callable=AsyncMock):
@@ -256,7 +280,7 @@ def test_check_already_running_current_process(tmp_path: Path):
 @pytest.mark.asyncio
 async def test_daemon_start_rejects_duplicate(patched_config_paths):
     """Daemon.start() raises if already running."""
-    config = Config()
+    config = Config.load()
     pid_file = patched_config_paths / "daemon.pid"
     # Simulate existing running daemon (use current PID)
     pid_file.write_text(str(os.getpid()))
@@ -270,7 +294,7 @@ async def test_daemon_start_rejects_duplicate(patched_config_paths):
 @pytest.mark.asyncio
 async def test_daemon_start_writes_pid_file(patched_config_paths):
     """Daemon.start() writes PID file."""
-    config = Config()
+    config = Config.load()
     pid_file = patched_config_paths / "daemon.pid"
     daemon = Daemon(config)
 
@@ -309,19 +333,19 @@ async def test_auto_prune_runs_on_timeout(patched_config_paths):
     """Auto-prune runs prune_old_data when timeout expires."""
     from pause_monitor.storage import init_database
 
-    config = Config()
+    config = Config.load()
     daemon = Daemon(config)
 
     init_database(config.db_path)
     daemon._conn = sqlite3.connect(config.db_path)
 
     # Patch prune_old_data to track calls and signal shutdown after first call
-    # Returns tuple (events_deleted, samples_deleted)
-    with patch("pause_monitor.daemon.prune_old_data", return_value=(0, 0)) as mock_prune:
+    # Returns int (events_deleted) - system_samples table was removed
+    with patch("pause_monitor.daemon.prune_old_data", return_value=0) as mock_prune:
 
         def prune_side_effect(*args, **kwargs):
             daemon._shutdown_event.set()
-            return (0, 0)
+            return 0
 
         mock_prune.side_effect = prune_side_effect
 
@@ -351,7 +375,7 @@ async def test_auto_prune_runs_on_timeout(patched_config_paths):
 @pytest.mark.asyncio
 async def test_auto_prune_exits_on_shutdown(patched_config_paths):
     """Auto-prune exits cleanly when shutdown event is set."""
-    config = Config()
+    config = Config.load()
     daemon = Daemon(config)
 
     # Set shutdown event immediately
@@ -366,7 +390,7 @@ async def test_auto_prune_exits_on_shutdown(patched_config_paths):
 @pytest.mark.asyncio
 async def test_auto_prune_skips_if_no_connection(patched_config_paths):
     """Auto-prune skips pruning if database connection is None."""
-    config = Config()
+    config = Config.load()
     daemon = Daemon(config)
     daemon._conn = None  # No connection
 
@@ -392,21 +416,22 @@ async def test_auto_prune_uses_config_retention_days(patched_config_paths):
     from pause_monitor.config import RetentionConfig
     from pause_monitor.storage import init_database
 
-    config = Config(
-        retention=RetentionConfig(events_days=14),
-    )
+    # Save custom config and load it (exercises actual load path)
+    config = Config(retention=RetentionConfig(events_days=14))
+    config.save(patched_config_paths / "config.toml")
+    config = Config.load()
     daemon = Daemon(config)
 
     init_database(config.db_path)
     daemon._conn = sqlite3.connect(config.db_path)
 
     # Patch prune_old_data to track calls and signal shutdown after first call
-    # Returns tuple (events_deleted, samples_deleted)
-    with patch("pause_monitor.daemon.prune_old_data", return_value=(0, 0)) as mock_prune:
+    # Returns int (events_deleted) - system_samples table was removed
+    with patch("pause_monitor.daemon.prune_old_data", return_value=0) as mock_prune:
 
         def prune_side_effect(*args, **kwargs):
             daemon._shutdown_event.set()
-            return (0, 0)
+            return 0
 
         mock_prune.side_effect = prune_side_effect
 
@@ -439,7 +464,7 @@ async def test_auto_prune_uses_config_retention_days(patched_config_paths):
 @pytest.mark.asyncio
 async def test_daemon_uses_main_loop(patched_config_paths):
     """Daemon runs _main_loop for powermetrics-driven monitoring."""
-    config = Config()
+    config = Config.load()
     daemon = Daemon(config)
 
     # Verify ring_buffer is initialized
@@ -467,39 +492,9 @@ async def test_daemon_uses_main_loop(patched_config_paths):
     assert main_loop_called
 
 
-@pytest.mark.asyncio
-async def test_daemon_handles_pause_with_forensics(patched_config_paths):
-    """Daemon handles pause by running forensics capture."""
-    from pause_monitor.storage import init_database
-
-    config = Config()
-    daemon = Daemon(config)
-
-    init_database(config.db_path)
-    daemon._conn = sqlite3.connect(config.db_path)
-
-    # Initialize ring buffer so freeze() works
-    daemon.ring_buffer = RingBuffer(max_samples=100)
-
-    # Mock was_recently_asleep and _run_forensics
-    # Note: actual duration must be >= config.alerts.pause_min_duration (default 2.0)
-    with patch("pause_monitor.daemon.was_recently_asleep", return_value=None):
-        with patch.object(daemon, "_run_forensics", new_callable=AsyncMock) as mock_forensics:
-            await daemon._handle_pause(
-                elapsed_ms=2500,  # 2.5 seconds in ms
-                expected_ms=100,
-            )
-
-            # Verify forensics was called
-            mock_forensics.assert_called_once()
-            # First arg should be the frozen buffer contents
-            call_args = mock_forensics.call_args
-            assert call_args.kwargs.get("duration") == 2.5  # Converted to seconds
-
-
-# Note: Per-process tracking via ProcessTracker replaces the tier system.
+# Note: Pause detection and _handle_pause were removed from the daemon.
+# Forensics are now triggered by ProcessTracker band transitions (entering high/critical).
 # ProcessTracker is tested in test_tracker.py.
-# ProcessTracker integration with daemon is in Task 8.
 
 
 # === Socket Server Integration Tests ===
@@ -508,7 +503,7 @@ async def test_daemon_handles_pause_with_forensics(patched_config_paths):
 @pytest.mark.asyncio
 async def test_daemon_socket_available_after_start(patched_config_short_paths, monkeypatch):
     """Daemon should have socket server listening after start."""
-    config = Config()
+    config = Config.load()
     daemon = Daemon(config)
 
     # Mock _main_loop to exit immediately (we just want to test socket wiring)
@@ -539,7 +534,7 @@ async def test_daemon_socket_available_after_start(patched_config_short_paths, m
 
 def test_daemon_uses_top_collector(patched_config_paths):
     """Daemon should use TopCollector instead of PowermetricsStream."""
-    config = Config()
+    config = Config.load()
     daemon = Daemon(config)
 
     assert hasattr(daemon, "collector")
@@ -556,7 +551,7 @@ async def test_daemon_main_loop_collects_samples(patched_config_paths, monkeypat
     """
     from pause_monitor.storage import init_database
 
-    config = Config()
+    config = Config.load()
     daemon = Daemon(config)
 
     # Verify tracker is None (DB didn't exist at daemon init time)
@@ -662,7 +657,7 @@ def test_daemon_initializes_tracker(patched_config_paths, monkeypatch):
     """Daemon creates ProcessTracker on startup."""
     from pause_monitor.storage import init_database
 
-    config = Config()
+    config = Config.load()
     init_database(config.db_path)
 
     monkeypatch.setattr("pause_monitor.daemon.get_boot_time", lambda: int(TEST_TIMESTAMP))
@@ -676,7 +671,7 @@ def test_daemon_initializes_tracker(patched_config_paths, monkeypatch):
 @pytest.mark.asyncio
 async def test_daemon_schema_mismatch_recovery(patched_config_paths, monkeypatch):
     """Daemon handles incompatible DB schema: tracker=None at init, created in _init_database."""
-    config = Config()
+    config = Config.load()
 
     # Create a DB with incompatible schema (missing required tables)
     db_path = config.db_path
@@ -704,7 +699,7 @@ async def test_daemon_main_loop_updates_tracker(patched_config_paths, monkeypatc
     """Main loop should call tracker.update() with rogues from samples."""
     from pause_monitor.storage import init_database
 
-    config = Config()
+    config = Config.load()
     init_database(config.db_path)
 
     monkeypatch.setattr("pause_monitor.daemon.get_boot_time", lambda: int(TEST_TIMESTAMP))
@@ -766,52 +761,6 @@ async def test_daemon_main_loop_updates_tracker(patched_config_paths, monkeypatc
     assert update_calls[0] == mock_samples.rogues
 
 
-@pytest.mark.asyncio
-async def test_daemon_main_loop_handles_pause_detection(patched_config_paths, monkeypatch):
-    """Main loop should detect pauses from elapsed_ms."""
-    from pause_monitor.storage import init_database
-
-    config = Config()
-    config.alerts.pause_min_duration = 0.1  # Lower threshold for testing
-    daemon = Daemon(config)
-
-    init_database(config.db_path)
-    daemon._conn = sqlite3.connect(config.db_path)
-
-    # Track pause handler calls
-    pause_calls = []
-
-    async def mock_handle_pause(elapsed_ms, expected_ms):
-        pause_calls.append((elapsed_ms, expected_ms))
-
-    monkeypatch.setattr(daemon, "_handle_pause", mock_handle_pause)
-
-    # Create a sample with long elapsed_ms indicating a pause
-    # pause_threshold_ratio default is 2.0, expected is 1500ms
-    # So 4500ms elapsed (3x expected) should trigger pause detection
-    pause_sample = ProcessSamples(
-        timestamp=datetime.now(),
-        elapsed_ms=4500,  # 3x expected = definitely a pause
-        process_count=100,
-        max_score=20,
-        rogues=[],
-    )
-
-    call_count = 0
-
-    async def mock_collect():
-        nonlocal call_count
-        call_count += 1
-        if call_count > 1:
-            daemon._shutdown_event.set()
-        return pause_sample
-
-    monkeypatch.setattr(daemon.collector, "collect", mock_collect)
-
-    # Run main loop
-    await daemon._main_loop()
-
-    # Should have called pause handler
-    assert len(pause_calls) == 1
-    assert pause_calls[0][0] == 4500  # elapsed_ms
-    assert pause_calls[0][1] == 1500  # expected_ms
+# Note: Pause detection was removed from the daemon's main loop.
+# The main loop now only: collect → track → buffer → broadcast.
+# Forensics are triggered by ProcessTracker band transitions instead.

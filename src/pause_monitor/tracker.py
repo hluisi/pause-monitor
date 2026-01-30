@@ -3,9 +3,9 @@
 
 from __future__ import annotations
 
-import json
 import sqlite3
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
 import structlog
@@ -37,6 +37,7 @@ class TrackedProcess:
     pid: int
     command: str
     peak_score: int
+    peak_snapshot_id: int
     last_checkpoint: float = 0.0  # Timestamp of last checkpoint snapshot
 
 
@@ -48,11 +49,23 @@ class ProcessTracker:
         conn: sqlite3.Connection,
         bands: BandsConfig,
         boot_time: int,
+        on_forensics_trigger: Callable[[int, str], Awaitable[None]] | None = None,
     ) -> None:
+        """Initialize process tracker.
+
+        Args:
+            conn: Database connection
+            bands: Band threshold configuration
+            boot_time: System boot time for identifying this boot session
+            on_forensics_trigger: Optional async callback for forensics capture.
+                                  Called with (event_id, trigger_reason) when a process
+                                  enters high/critical band or escalates into it.
+        """
         self.conn = conn
         self.bands = bands
         self.boot_time = boot_time
         self.tracked: dict[int, TrackedProcess] = {}
+        self._on_forensics_trigger = on_forensics_trigger
         self._restore_open_events()
 
     def _restore_open_events(self) -> None:
@@ -63,6 +76,7 @@ class ProcessTracker:
                 pid=event["pid"],
                 command=event["command"],
                 peak_score=event["peak_score"],
+                peak_snapshot_id=event["peak_snapshot_id"],
             )
 
     def update(self, scores: list[ProcessScore]) -> None:
@@ -103,9 +117,11 @@ class ProcessTracker:
 
     def _open_event(self, score: ProcessScore) -> None:
         """Create new event for process entering bad state."""
-        snapshot_json = json.dumps(score.to_dict())
+        import asyncio
+
         band = self.bands.get_band(score.score)
 
+        # Create event (peak_snapshot_id starts NULL)
         event_id = create_process_event(
             self.conn,
             pid=score.pid,
@@ -115,16 +131,24 @@ class ProcessTracker:
             entry_band=band,
             peak_score=score.score,
             peak_band=band,
-            peak_snapshot=snapshot_json,
         )
 
-        insert_process_snapshot(self.conn, event_id, SNAPSHOT_ENTRY, snapshot_json)
+        # Insert entry snapshot and set as peak
+        snapshot_id = insert_process_snapshot(self.conn, event_id, SNAPSHOT_ENTRY, score)
+        update_process_event_peak(
+            self.conn,
+            event_id,
+            peak_score=score.score,
+            peak_band=band,
+            peak_snapshot_id=snapshot_id,
+        )
 
         self.tracked[score.pid] = TrackedProcess(
             event_id=event_id,
             pid=score.pid,
             command=score.command,
             peak_score=score.score,
+            peak_snapshot_id=snapshot_id,
             last_checkpoint=score.captured_at,  # Start checkpoint timer from entry
         )
 
@@ -135,6 +159,10 @@ class ProcessTracker:
             f"{colored(f'[{band}]', 'magenta')}"
         )
         log.info(msg)
+
+        # Trigger forensics if entering high or critical band
+        if band in ("high", "critical") and self._on_forensics_trigger:
+            asyncio.create_task(self._on_forensics_trigger(event_id, f"band_entry_{band}"))
 
     def _close_event(
         self,
@@ -158,8 +186,7 @@ class ProcessTracker:
 
         # Insert exit snapshot if we have the score (only when score dropped below threshold)
         if exit_score is not None:
-            snapshot_json = json.dumps(exit_score.to_dict())
-            insert_process_snapshot(self.conn, tracked.event_id, SNAPSHOT_EXIT, snapshot_json)
+            insert_process_snapshot(self.conn, tracked.event_id, SNAPSHOT_EXIT, exit_score)
 
         close_process_event(self.conn, tracked.event_id, exit_time)
 
@@ -177,12 +204,13 @@ class ProcessTracker:
 
     def _update_peak(self, score: ProcessScore) -> None:
         """Update peak for tracked process."""
+        import asyncio
+
         tracked = self.tracked[score.pid]
         old_score = tracked.peak_score
         old_band = self.bands.get_band(old_score)
         tracked.peak_score = score.score
 
-        snapshot_json = json.dumps(score.to_dict())
         band = self.bands.get_band(score.score)
 
         # Log band transitions (escalations)
@@ -195,12 +223,25 @@ class ProcessTracker:
             )
             log.info(msg)
 
+            # Trigger forensics on escalation INTO high/critical (from lower band)
+            if band in ("high", "critical") and old_band not in ("high", "critical"):
+                if self._on_forensics_trigger:
+                    asyncio.create_task(
+                        self._on_forensics_trigger(tracked.event_id, f"peak_escalation_{band}")
+                    )
+
+        # Insert checkpoint snapshot as new peak
+        snapshot_id = insert_process_snapshot(
+            self.conn, tracked.event_id, SNAPSHOT_CHECKPOINT, score
+        )
+        tracked.peak_snapshot_id = snapshot_id
+
         update_process_event_peak(
             self.conn,
             tracked.event_id,
             peak_score=score.score,
             peak_band=band,
-            peak_snapshot=snapshot_json,
+            peak_snapshot_id=snapshot_id,
         )
 
         log.debug(
@@ -210,14 +251,12 @@ class ProcessTracker:
         )
 
     def _insert_checkpoint(self, score: ProcessScore, tracked: TrackedProcess) -> None:
-        """Insert periodic checkpoint snapshot for a tracked process."""
-        snapshot_json = json.dumps(score.to_dict())
-        insert_process_snapshot(
-            self.conn,
-            tracked.event_id,
-            SNAPSHOT_CHECKPOINT,
-            snapshot_json,
-        )
+        """Insert periodic checkpoint snapshot for a tracked process.
+
+        Note: This is for periodic checkpoints only, NOT peak updates.
+        The snapshot is recorded but doesn't update peak_snapshot_id.
+        """
+        insert_process_snapshot(self.conn, tracked.event_id, SNAPSHOT_CHECKPOINT, score)
         tracked.last_checkpoint = score.captured_at
 
         log.debug(
