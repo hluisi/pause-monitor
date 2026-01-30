@@ -204,9 +204,18 @@ class DaemonState:
     current_score: int = 0
 ```
 
+### QoS Priority
+
+The daemon sets `QOS_CLASS_USER_INITIATED` via `pthread_set_qos_class_self_np` at startup. This:
+- Elevates CPU scheduling priority
+- Improves I/O priority
+- Reduces timer coalescing (more timely wakeups)
+
+Unlike `nice -10`, QoS doesn't require root — it's a scheduler hint. Falls back to default priority if QoS fails.
+
 ### Daemon Attributes
 | Attribute | Purpose |
-|-----------|---------|
+|-----------|---------
 | `config` | Config instance |
 | `collector` | LibprocCollector |
 | `ring_buffer` | RingBuffer for recent samples |
@@ -418,8 +427,8 @@ id, capture_id (FK), sample_count, peak_score, culprits (JSON)
 | `data_dir` | `~/.local/share/pause-monitor/` |
 | `db_path` | `~/.local/share/pause-monitor/data.db` |
 | `log_path` | `~/.local/share/pause-monitor/daemon.log` |
-| `pid_path` | `~/.local/share/pause-monitor/daemon.pid` |
-| `socket_path` | `~/.local/share/pause-monitor/daemon.sock` |
+| `pid_path` | `/tmp/pause-monitor/daemon.pid` |
+| `socket_path` | `/tmp/pause-monitor/daemon.sock` |
 
 ---
 
@@ -451,7 +460,7 @@ id, capture_id (FK), sample_count, peak_score, culprits (JSON)
 **Purpose:** Real-time daemon-to-TUI streaming.
 
 ### Protocol
-Newline-delimited JSON over Unix socket at `~/.local/share/pause-monitor/daemon.sock`
+Newline-delimited JSON over Unix socket at `/tmp/pause-monitor/daemon.sock`
 
 ### Message Types
 | Type | Contents |

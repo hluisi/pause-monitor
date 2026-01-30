@@ -8,6 +8,8 @@ pause-monitor needs root privileges for:
 - `tailspin save` — extracts kernel trace buffer (requires root)
 - `spindump` — samples all process callstacks (requires root)
 
+**Note:** Process scheduling priority does NOT require root. Use macOS QoS classes via `pthread_set_qos_class_self_np` instead of `nice -10`. See `daemon.py` for implementation.
+
 But running the entire daemon as root causes issues:
 - Files created with root ownership in wrong locations
 - `~` expands to `/var/root` instead of user's home

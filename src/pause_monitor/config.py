@@ -229,8 +229,11 @@ class Config:
 
     @property
     def socket_path(self) -> Path:
-        """Unix socket path for daemon IPC."""
-        return self.data_dir / "daemon.sock"
+        """Unix socket path for daemon IPC.
+
+        Stored in /tmp/ so it's cleared on reboot, avoiding stale socket issues.
+        """
+        return Path("/tmp/pause-monitor/daemon.sock")
 
     def save(self, path: Path | None = None) -> None:
         """Save config to TOML file."""

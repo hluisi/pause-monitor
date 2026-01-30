@@ -109,6 +109,13 @@ Push is inherently simpler — server knows when to send, no timing coordination
 - macOS entitlements for these APIs are reserved for Apple-signed code
 - **Standard workaround:** sudoers with NOPASSWD for specific commands
 
+**QoS class elevation doesn't require root** — use `pthread_set_qos_class_self_np`:
+- Sets scheduler hints for CPU priority, I/O priority, and timer coalescing
+- `QOS_CLASS_USER_INITIATED` (0x19) is appropriate for daemons needing timely wakeups
+- Called via ctypes to `/usr/lib/libSystem.B.dylib`
+- Unlike `nice -10`, this works without elevated privileges
+- Better than nice anyway: affects I/O priority and timer behavior, not just CPU
+
 ### `top -l 2` Two-Sample Requirement
 
 macOS `top` first sample is instantaneous snapshot (inaccurate CPU%), second sample is delta over interval (accurate). Parser must use the LAST `PID` header, not the first, or CPU% will be 5-20x inflated.

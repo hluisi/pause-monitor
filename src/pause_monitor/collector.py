@@ -479,7 +479,7 @@ class LibprocCollector:
         scored = [self._score_process(p) for p in rogues]
 
         elapsed_ms = int((time.monotonic() - start) * 1000)
-        # Hybrid: max(peak_score, rms) - single bad actor never hidden, cumulative stress can push higher
+        # Hybrid: max(peak, rms) - bad actors visible, cumulative stress can push higher
         scores = [p.score.high for p in scored]
         if scores:
             peak = max(scores)
