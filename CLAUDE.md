@@ -2,6 +2,13 @@
 
 System health monitoring daemon that tracks down intermittent macOS system pauses.
 
+## Session Start
+
+1. Activate Serena: `mcp__serena__activate_project("pause-monitor")`
+2. Read: `session_context` memory
+
+Then proceed with the user's request.
+
 ## Commands
 
 ```bash

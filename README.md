@@ -326,12 +326,13 @@ uv run pause-monitor tui
 
 ### "Permission denied" errors
 
-Some features require elevated permissions:
+Forensic capture requires a sudoers rule for tailspin. Run the install command to set it up:
 
 ```bash
-# spindump and tailspin need sudo for full capture
-sudo pause-monitor daemon
+sudo pause-monitor install
 ```
+
+This creates `/etc/sudoers.d/pause-monitor` with a narrow rule allowing tailspin captures to `/tmp/pause-monitor/`. The daemon itself runs unprivileged.
 
 ### Daemon won't start
 
