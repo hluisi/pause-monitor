@@ -564,10 +564,10 @@ async def run_daemon(config: Config | None = None) -> None:
     if config is None:
         config = Config.load()
 
-    # Setup logging
+    # Setup logging (utc=False to match sample timestamps which use local time)
     structlog.configure(
         processors=[
-            structlog.processors.TimeStamper(fmt="%H:%M:%S"),
+            structlog.processors.TimeStamper(fmt="%H:%M:%S", utc=False),
             structlog.processors.add_log_level,
             structlog.dev.ConsoleRenderer(),
         ],

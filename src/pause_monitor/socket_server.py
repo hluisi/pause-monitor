@@ -11,15 +11,16 @@ from __future__ import annotations
 
 import asyncio
 import json
-import logging
 from pathlib import Path
 from typing import TYPE_CHECKING
+
+import structlog
 
 if TYPE_CHECKING:
     from pause_monitor.collector import ProcessSamples
     from pause_monitor.ringbuffer import RingBuffer
 
-log = logging.getLogger(__name__)
+log = structlog.get_logger()
 
 
 class SocketServer:
@@ -69,7 +70,7 @@ class SocketServer:
         os.chmod(self.socket_path, stat.S_IRWXU | stat.S_IRWXG | stat.S_IRWXO)
 
         self._running = True
-        log.info("socket_server_started path=%s", self.socket_path)
+        log.info("socket_server_started", path=str(self.socket_path))
 
     async def stop(self) -> None:
         """Stop the socket server."""
@@ -93,7 +94,7 @@ class SocketServer:
         if self.socket_path.exists():
             self.socket_path.unlink()
 
-        log.info("socket_server_stopped")
+        log.info("socket_server_stopped", path=str(self.socket_path))
 
     async def broadcast(self, samples: ProcessSamples) -> None:
         """Broadcast sample to all connected TUI clients.
@@ -134,7 +135,7 @@ class SocketServer:
     ) -> None:
         """Handle a new client connection."""
         self._clients.add(writer)
-        log.info("socket_client_connected count=%d", len(self._clients))
+        log.info("tui_connected", clients=len(self._clients))
 
         try:
             # Send initial state with ring buffer history for sparkline
@@ -166,4 +167,4 @@ class SocketServer:
                 await writer.wait_closed()
             except Exception:
                 pass
-            log.info("socket_client_disconnected count=%d", len(self._clients))
+            log.info("tui_disconnected", clients=len(self._clients))
