@@ -483,5 +483,68 @@ async def test_forensics_capture_handles_failures_gracefully(forensics_db):
 
     captures = get_forensic_captures(conn, event_id)
     assert len(captures) == 1
-    assert captures[0]["spindump_status"] == "failed"
+    # spindump is no longer captured (tailspin provides same data via spindump -i)
+    assert captures[0]["tailspin_status"] == "failed"
     assert captures[0]["logs_status"] == "failed"
+
+
+@pytest.mark.asyncio
+async def test_tailspin_capture_uses_sudo(forensics_db):
+    """Tailspin capture uses sudo -n for non-interactive sudo."""
+    conn, event_id = forensics_db
+
+    capture = ForensicsCapture(conn, event_id)
+
+    with patch("pause_monitor.forensics.asyncio.create_subprocess_exec") as mock_exec:
+        # Simulate successful sudo tailspin
+        mock_process = AsyncMock()
+        mock_process.communicate.return_value = (b"", b"")
+        mock_process.returncode = 0
+        mock_exec.return_value = mock_process
+
+        # Create the expected output file so the check passes
+        from pause_monitor.forensics import TAILSPIN_DIR
+
+        TAILSPIN_DIR.mkdir(parents=True, exist_ok=True)
+        expected_path = TAILSPIN_DIR / f"capture_{event_id}.tailspin"
+        expected_path.write_bytes(b"dummy")
+
+        try:
+            result = await capture._capture_tailspin()
+
+            # Verify sudo was called with correct args
+            mock_exec.assert_called_once()
+            call_args = mock_exec.call_args[0]
+            assert call_args[0] == "/usr/bin/sudo"
+            assert call_args[1] == "-n"  # Non-interactive
+            assert call_args[2] == "/usr/bin/tailspin"
+            assert call_args[3] == "save"
+            assert call_args[4] == "-o"
+            assert "/tmp/pause-monitor/capture_" in call_args[5]
+
+            assert result == expected_path
+        finally:
+            # Cleanup
+            if expected_path.exists():
+                expected_path.unlink()
+
+
+@pytest.mark.asyncio
+async def test_tailspin_capture_permission_error(forensics_db):
+    """Tailspin capture raises PermissionError when sudo -n fails."""
+    conn, event_id = forensics_db
+
+    capture = ForensicsCapture(conn, event_id)
+
+    with patch("pause_monitor.forensics.asyncio.create_subprocess_exec") as mock_exec:
+        # Simulate sudo -n failure (password required)
+        mock_process = AsyncMock()
+        mock_process.communicate.return_value = (b"", b"sudo: a password is required")
+        mock_process.returncode = 1
+        mock_exec.return_value = mock_process
+
+        with pytest.raises(PermissionError) as exc_info:
+            await capture._capture_tailspin()
+
+        assert "sudo -n" in str(exc_info.value)
+        assert "password is required" in str(exc_info.value)

@@ -467,11 +467,51 @@ def config_reset() -> None:
     click.echo(f"Config reset to defaults at {cfg.config_path}")
 
 
+def _setup_sudoers(username: str) -> None:
+    """Create sudoers rule for tailspin save.
+
+    Creates /etc/sudoers.d/pause-monitor with a narrow rule allowing
+    tailspin to write only to /tmp/pause-monitor/.
+
+    Args:
+        username: The user to grant sudo access to
+
+    Raises:
+        RuntimeError: If the sudoers rule is invalid
+    """
+    import os
+    import subprocess
+    from pathlib import Path
+
+    sudoers_path = Path("/etc/sudoers.d/pause-monitor")
+
+    # Narrow rule: only allow tailspin save to /tmp/pause-monitor/
+    rule = f"{username} ALL = (root) NOPASSWD: /usr/bin/tailspin save -o /tmp/pause-monitor/*\n"
+
+    # Write with correct permissions (must be done atomically)
+    sudoers_path.write_text(rule)
+    os.chmod(sudoers_path, 0o440)
+    os.chown(sudoers_path, 0, 0)  # root:wheel (wheel is gid 0 on macOS)
+
+    # Validate with visudo
+    result = subprocess.run(
+        ["/usr/sbin/visudo", "-c", "-f", str(sudoers_path)],
+        capture_output=True,
+    )
+    if result.returncode != 0:
+        # Invalid syntax - remove and raise
+        sudoers_path.unlink()
+        raise RuntimeError(f"Invalid sudoers syntax: {result.stderr.decode()}")
+
+
 @main.command()
 @click.option("--system", "system_wide", is_flag=True, help="Install system-wide (requires root)")
 @click.option("--force", is_flag=True, help="Overwrite existing plist without prompting")
 def install(system_wide: bool, force: bool) -> None:
-    """Set up launchd service."""
+    """Set up launchd service and sudoers for forensics.
+
+    Must be run with sudo to configure sudoers rule for tailspin.
+    """
     import os
     import subprocess
     import sys
@@ -479,29 +519,54 @@ def install(system_wide: bool, force: bool) -> None:
 
     label = "com.pause-monitor.daemon"
 
-    # Check root for system-wide install
-    if system_wide and os.getuid() != 0:
-        click.echo("Error: --system requires root privileges. Use sudo.", err=True)
+    # Require root for sudoers setup
+    if os.getuid() != 0:
+        click.echo("Error: install requires root privileges. Use sudo.", err=True)
         raise SystemExit(1)
 
-    # Determine paths
+    # Get the actual user (not root)
+    username = os.environ.get("SUDO_USER")
+    if not username:
+        click.echo("Error: Could not determine user. Run with sudo, not as root.", err=True)
+        raise SystemExit(1)
+
+    # 1. Set up sudoers for tailspin
+    click.echo("Setting up sudoers rule for tailspin...")
+    _setup_sudoers(username)
+    click.echo("  Created /etc/sudoers.d/pause-monitor")
+
+    # 2. Enable tailspin (requires root, which we have)
+    click.echo("Enabling tailspin...")
+    subprocess.run(["/usr/bin/tailspin", "enable"], check=True)
+    click.echo("  tailspin enabled")
+
+    # 3. Determine launchd paths
     if system_wide:
         plist_dir = Path("/Library/LaunchDaemons")
         service_target = "system"
     else:
-        plist_dir = Path.home() / "Library" / "LaunchAgents"
-        service_target = f"gui/{os.getuid()}"
+        # Get UID of actual user, not root
+        import pwd
+
+        user_uid = pwd.getpwnam(username).pw_uid
+        plist_dir = Path(f"/Users/{username}/Library/LaunchAgents")
+        service_target = f"gui/{user_uid}"
 
     plist_path = plist_dir / f"{label}.plist"
 
     # Check for existing plist
     if plist_path.exists() and not force:
         if not click.confirm(f"Plist already exists at {plist_path}. Overwrite?"):
+            click.echo("\nSudoers and tailspin configured. Service not modified.")
             return
 
-    # Create log directory if needed
-    log_dir = Path.home() / ".local" / "share" / "pause-monitor"
+    # Create log directory if needed (owned by actual user)
+    import pwd
+
+    user_info = pwd.getpwnam(username)
+    log_dir = Path(f"/Users/{username}/.local/share/pause-monitor")
     log_dir.mkdir(parents=True, exist_ok=True)
+    os.chown(log_dir, user_info.pw_uid, user_info.pw_gid)
 
     # Get Python path
     python_path = sys.executable
@@ -525,9 +590,9 @@ def install(system_wide: bool, force: bool) -> None:
     <key>KeepAlive</key>
     <true/>
     <key>StandardOutPath</key>
-    <string>{Path.home()}/.local/share/pause-monitor/daemon.log</string>
+    <string>/Users/{username}/.local/share/pause-monitor/daemon.log</string>
     <key>StandardErrorPath</key>
-    <string>{Path.home()}/.local/share/pause-monitor/daemon.log</string>
+    <string>/Users/{username}/.local/share/pause-monitor/daemon.log</string>
     <key>ProcessType</key>
     <string>Background</string>
     <key>LegacyTimers</key>
@@ -561,15 +626,18 @@ def install(system_wide: bool, force: bool) -> None:
             click.echo(f"Warning: Could not start service: {stderr_text}")
 
     click.echo(f"\nTo check status: launchctl print {service_target}/{label}")
-    click.echo("To view logs: tail -f ~/.local/share/pause-monitor/daemon.log")
+    click.echo(f"To view logs: tail -f /Users/{username}/.local/share/pause-monitor/daemon.log")
 
 
 @main.command()
-@click.option("--system", "system_wide", is_flag=True, help="Uninstall system-wide (requires root)")
+@click.option("--system", "system_wide", is_flag=True, help="Uninstall system-wide service")
 @click.option("--keep-data", is_flag=True, help="Keep database and config files")
 @click.option("--force", is_flag=True, help="Skip confirmation prompts")
 def uninstall(system_wide: bool, keep_data: bool, force: bool) -> None:
-    """Remove launchd service."""
+    """Remove launchd service and sudoers rule.
+
+    Must be run with sudo to remove sudoers configuration.
+    """
     import os
     import shutil
     import subprocess
@@ -577,22 +645,39 @@ def uninstall(system_wide: bool, keep_data: bool, force: bool) -> None:
 
     label = "com.pause-monitor.daemon"
 
-    # Check root for system-wide uninstall
-    if system_wide and os.getuid() != 0:
-        click.echo("Error: --system requires root privileges. Use sudo.", err=True)
+    # Require root for sudoers removal
+    if os.getuid() != 0:
+        click.echo("Error: uninstall requires root privileges. Use sudo.", err=True)
         raise SystemExit(1)
 
-    # Determine paths
+    # Get the actual user (not root)
+    username = os.environ.get("SUDO_USER")
+    if not username:
+        click.echo("Error: Could not determine user. Run with sudo, not as root.", err=True)
+        raise SystemExit(1)
+
+    # 1. Remove sudoers rule
+    sudoers_path = Path("/etc/sudoers.d/pause-monitor")
+    if sudoers_path.exists():
+        sudoers_path.unlink()
+        click.echo("Removed /etc/sudoers.d/pause-monitor")
+    else:
+        click.echo("Sudoers rule was not installed")
+
+    # 2. Determine launchd paths
     if system_wide:
         plist_dir = Path("/Library/LaunchDaemons")
         service_target = "system"
     else:
-        plist_dir = Path.home() / "Library" / "LaunchAgents"
-        service_target = f"gui/{os.getuid()}"
+        import pwd
+
+        user_uid = pwd.getpwnam(username).pw_uid
+        plist_dir = Path(f"/Users/{username}/Library/LaunchAgents")
+        service_target = f"gui/{user_uid}"
 
     plist_path = plist_dir / f"{label}.plist"
 
-    # Bootout the service (modern launchctl syntax)
+    # 3. Bootout the service (modern launchctl syntax)
     if plist_path.exists():
         try:
             subprocess.run(
@@ -612,7 +697,7 @@ def uninstall(system_wide: bool, keep_data: bool, force: bool) -> None:
     else:
         click.echo("Service was not installed")
 
-    # Optionally remove data
+    # 4. Optionally remove data
     if not keep_data:
         from pause_monitor.config import Config
 

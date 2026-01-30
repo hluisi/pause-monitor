@@ -540,109 +540,67 @@ class TestConfigCommand:
 class TestInstallCommand:
     """Tests for the install command."""
 
-    def test_install_user_default(self, runner: CliRunner, tmp_path: Path) -> None:
-        """install creates plist in ~/Library/LaunchAgents by default."""
-        plist_dir = tmp_path / "Library" / "LaunchAgents"
-
-        with (
-            patch("pathlib.Path.home", return_value=tmp_path),
-            patch("os.getuid", return_value=501),
-            patch("subprocess.run") as mock_run,
-        ):
+    def test_install_requires_root(self, runner: CliRunner, tmp_path: Path) -> None:
+        """install fails without root privileges."""
+        with patch("os.getuid", return_value=501):  # Non-root user
             result = runner.invoke(main, ["install"])
 
-        assert result.exit_code == 0
-        assert "Created" in result.output
+        assert result.exit_code == 1
+        assert "requires root privileges" in result.output
 
-        # Verify plist was created
-        plist_path = plist_dir / "com.pause-monitor.daemon.plist"
-        assert plist_path.exists()
-
-        # Verify plist content
-        content = plist_path.read_text()
-        assert "<key>Label</key>" in content
-        assert "<string>com.pause-monitor.daemon</string>" in content
-
-        # Verify launchctl bootstrap was called
-        mock_run.assert_called_once()
-        call_args = mock_run.call_args[0][0]
-        assert call_args[0] == "launchctl"
-        assert call_args[1] == "bootstrap"
-
-    def test_install_system_requires_root(self, runner: CliRunner, tmp_path: Path) -> None:
-        """install --system fails without root privileges."""
+    def test_install_requires_sudo_user(self, runner: CliRunner, tmp_path: Path) -> None:
+        """install fails when run as root directly (not via sudo)."""
         with (
-            patch("pathlib.Path.home", return_value=tmp_path),
-            patch("os.getuid", return_value=501),  # Non-root user
+            patch("os.getuid", return_value=0),  # Root user
+            patch.dict("os.environ", {"SUDO_USER": ""}, clear=False),
         ):
-            result = runner.invoke(main, ["install", "--system"])
+            # Clear SUDO_USER to simulate running as root directly
+            import os
+
+            original = os.environ.get("SUDO_USER")
+            if "SUDO_USER" in os.environ:
+                del os.environ["SUDO_USER"]
+            try:
+                result = runner.invoke(main, ["install"])
+            finally:
+                if original is not None:
+                    os.environ["SUDO_USER"] = original
 
         assert result.exit_code == 1
-        assert "Error: --system requires root privileges" in result.output
+        assert "Could not determine user" in result.output
 
 
 class TestUninstallCommand:
     """Tests for the uninstall command."""
 
-    def test_uninstall_user_default(self, runner: CliRunner, tmp_path: Path) -> None:
-        """uninstall removes plist from ~/Library/LaunchAgents by default."""
-        plist_dir = tmp_path / "Library" / "LaunchAgents"
-        plist_dir.mkdir(parents=True)
-        plist_path = plist_dir / "com.pause-monitor.daemon.plist"
-        plist_path.write_text("<plist>test</plist>")
-
-        # Create config directories that would be prompted for deletion
-        config_dir = tmp_path / ".config" / "pause-monitor"
-        data_dir = tmp_path / ".local" / "share" / "pause-monitor"
-
-        with (
-            patch("pathlib.Path.home", return_value=tmp_path),
-            patch("os.getuid", return_value=501),
-            patch("subprocess.run") as mock_run,
-            patch.object(Config, "config_dir", new_callable=lambda: _make_path_prop(config_dir)),
-            patch.object(Config, "data_dir", new_callable=lambda: _make_path_prop(data_dir)),
-        ):
-            # Use --keep-data to avoid prompts
-            result = runner.invoke(main, ["uninstall", "--keep-data"])
-
-        assert result.exit_code == 0
-        assert f"Removed {plist_path}" in result.output
-        assert "Uninstall complete" in result.output
-        assert not plist_path.exists()
-
-        # Verify launchctl bootout was called
-        mock_run.assert_called_once()
-        call_args = mock_run.call_args[0][0]
-        assert call_args[0] == "launchctl"
-        assert call_args[1] == "bootout"
-
-    def test_uninstall_not_installed(self, runner: CliRunner, tmp_path: Path) -> None:
-        """uninstall shows message when service was not installed."""
-        config_dir = tmp_path / ".config" / "pause-monitor"
-        data_dir = tmp_path / ".local" / "share" / "pause-monitor"
-
-        with (
-            patch("pathlib.Path.home", return_value=tmp_path),
-            patch("os.getuid", return_value=501),
-            patch.object(Config, "config_dir", new_callable=lambda: _make_path_prop(config_dir)),
-            patch.object(Config, "data_dir", new_callable=lambda: _make_path_prop(data_dir)),
-        ):
-            result = runner.invoke(main, ["uninstall", "--keep-data"])
-
-        assert result.exit_code == 0
-        assert "Service was not installed" in result.output
-        assert "Uninstall complete" in result.output
-
-    def test_uninstall_system_requires_root(self, runner: CliRunner, tmp_path: Path) -> None:
-        """uninstall --system fails without root privileges."""
-        with (
-            patch("pathlib.Path.home", return_value=tmp_path),
-            patch("os.getuid", return_value=501),  # Non-root user
-        ):
-            result = runner.invoke(main, ["uninstall", "--system"])
+    def test_uninstall_requires_root(self, runner: CliRunner, tmp_path: Path) -> None:
+        """uninstall fails without root privileges."""
+        with patch("os.getuid", return_value=501):  # Non-root user
+            result = runner.invoke(main, ["uninstall"])
 
         assert result.exit_code == 1
-        assert "Error: --system requires root privileges" in result.output
+        assert "requires root privileges" in result.output
+
+    def test_uninstall_requires_sudo_user(self, runner: CliRunner, tmp_path: Path) -> None:
+        """uninstall fails when run as root directly (not via sudo)."""
+        with (
+            patch("os.getuid", return_value=0),  # Root user
+            patch.dict("os.environ", {"SUDO_USER": ""}, clear=False),
+        ):
+            # Clear SUDO_USER to simulate running as root directly
+            import os
+
+            original = os.environ.get("SUDO_USER")
+            if "SUDO_USER" in os.environ:
+                del os.environ["SUDO_USER"]
+            try:
+                result = runner.invoke(main, ["uninstall"])
+            finally:
+                if original is not None:
+                    os.environ["SUDO_USER"] = original
+
+        assert result.exit_code == 1
+        assert "Could not determine user" in result.output
 
 
 class TestStatusCommand:

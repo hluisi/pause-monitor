@@ -31,6 +31,9 @@ if TYPE_CHECKING:
 
 log = structlog.get_logger()
 
+# Tailspin captures are written here (sudoers rule restricts to this path)
+TAILSPIN_DIR = Path("/tmp/pause-monitor")
+
 
 # --- Parsing Data Structures ---
 
@@ -320,6 +323,10 @@ class ForensicsCapture:
     ) -> int:
         """Run full forensics capture: raw → parse → DB → cleanup.
 
+        Captures tailspin (via sudo) and system logs. Live spindump is not
+        captured because tailspin provides better data (kernel activity during
+        the pause, not just process state after recovery).
+
         Args:
             contents: Frozen ring buffer contents
             trigger: What triggered this capture (e.g., 'band_entry_high')
@@ -327,7 +334,7 @@ class ForensicsCapture:
         Returns:
             The capture_id of the created forensic_captures record
         """
-        # Create temp directory
+        # Create temp directory (for logs capture)
         self._temp_dir = Path(tempfile.mkdtemp(prefix="pause-monitor-"))
         log.debug("forensics_temp_dir", path=str(self._temp_dir))
 
@@ -335,27 +342,26 @@ class ForensicsCapture:
             # Create capture record
             capture_id = create_forensic_capture(self.conn, self.event_id, trigger)
 
-            # Run all captures in parallel to temp files (no timeouts - let them complete)
-            spindump_result, tailspin_result, logs_result = await asyncio.gather(
-                self._capture_spindump(),
+            # Run captures in parallel (no timeouts - let them complete)
+            # Note: tailspin writes to TAILSPIN_DIR, logs to _temp_dir
+            tailspin_result, logs_result = await asyncio.gather(
                 self._capture_tailspin(),
                 self._capture_logs(),
                 return_exceptions=True,
             )
 
             # Parse and store each capture type
-            spindump_status = self._process_spindump(capture_id, spindump_result)
             tailspin_status = self._process_tailspin(capture_id, tailspin_result)
             logs_status = self._process_logs(capture_id, logs_result)
 
             # Store buffer context
             self._store_buffer_context(capture_id, contents)
 
-            # Update capture status
+            # Update capture status (spindump no longer captured)
             update_forensic_capture_status(
                 self.conn,
                 capture_id,
-                spindump_status=spindump_status,
+                spindump_status=None,
                 tailspin_status=tailspin_status,
                 logs_status=logs_status,
             )
@@ -365,7 +371,6 @@ class ForensicsCapture:
                 capture_id=capture_id,
                 event_id=self.event_id,
                 trigger=trigger,
-                spindump=spindump_status,
                 tailspin=tailspin_status,
                 logs=logs_status,
             )
@@ -378,49 +383,37 @@ class ForensicsCapture:
                 shutil.rmtree(self._temp_dir)
                 log.debug("forensics_temp_cleanup", path=str(self._temp_dir))
 
-    async def _capture_spindump(self) -> bytes:
-        """Capture spindump to stdout, return raw bytes.
-
-        Returns:
-            Raw spindump output bytes
-
-        Raises:
-            Exception on failure (not found, permission error)
-        """
-        process = await asyncio.create_subprocess_exec(
-            "/usr/sbin/spindump",
-            "-notarget",
-            "-stdout",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL,
-        )
-
-        stdout, _ = await process.communicate()
-
-        return stdout
-
     async def _capture_tailspin(self) -> Path:
-        """Capture tailspin to temp file, return path.
+        """Capture tailspin to temp directory. Requires sudo.
+
+        Writes to TAILSPIN_DIR (/tmp/pause-monitor/) which is allowed by
+        the sudoers rule installed during `pause-monitor install`.
 
         Returns:
             Path to the tailspin file
 
         Raises:
-            Exception on failure
+            PermissionError: If sudo -n fails (sudoers not configured)
+            FileNotFoundError: If tailspin doesn't create output
         """
-        assert self._temp_dir is not None
-        output_path = self._temp_dir / "capture.tailspin"
+        TAILSPIN_DIR.mkdir(parents=True, exist_ok=True)
+        output_path = TAILSPIN_DIR / f"capture_{self.event_id}.tailspin"
 
         process = await asyncio.create_subprocess_exec(
+            "/usr/bin/sudo",
+            "-n",  # Non-interactive, fail if password needed
             "/usr/bin/tailspin",
             "save",
             "-o",
             str(output_path),
             stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,  # Capture stderr for error messages
         )
+        _, stderr = await process.communicate()
 
-        await process.wait()
+        if process.returncode != 0:
+            error_msg = stderr.decode("utf-8", errors="replace").strip()
+            raise PermissionError(f"tailspin save failed (sudo -n): {error_msg}")
 
         if not output_path.exists():
             raise FileNotFoundError(f"Tailspin did not create output: {output_path}")
@@ -457,63 +450,6 @@ class ForensicsCapture:
         stdout, _ = await process.communicate()
 
         return stdout
-
-    def _process_spindump(
-        self,
-        capture_id: int,
-        result: bytes | BaseException,
-    ) -> str:
-        """Parse spindump output and store in DB.
-
-        Args:
-            capture_id: The forensic capture ID
-            result: Raw spindump bytes or exception
-
-        Returns:
-            Status string: 'success' or 'failed'
-        """
-        if isinstance(result, BaseException):
-            log.warning("spindump_failed", error=str(result))
-            return "failed"
-
-        try:
-            text = result.decode("utf-8", errors="replace")
-            processes = parse_spindump(text)
-
-            for proc in processes:
-                proc_id = insert_spindump_process(
-                    self.conn,
-                    capture_id=capture_id,
-                    pid=proc.pid,
-                    name=proc.name,
-                    path=proc.path,
-                    parent_pid=proc.parent_pid,
-                    parent_name=proc.parent_name,
-                    footprint_mb=proc.footprint_mb,
-                    cpu_time_sec=proc.cpu_time_sec,
-                    thread_count=proc.thread_count,
-                )
-
-                if proc.threads:
-                    for thread in proc.threads:
-                        insert_spindump_thread(
-                            self.conn,
-                            process_id=proc_id,
-                            thread_id=thread.thread_id,
-                            thread_name=thread.thread_name,
-                            sample_count=thread.sample_count,
-                            priority=thread.priority,
-                            cpu_time_sec=thread.cpu_time_sec,
-                            state=thread.state,
-                            blocked_on=thread.blocked_on,
-                        )
-
-            log.info("spindump_parsed", process_count=len(processes))
-            return "success"
-
-        except Exception as e:
-            log.warning("spindump_parse_failed", error=str(e))
-            return "failed"
 
     def _process_tailspin(
         self,
