@@ -349,7 +349,7 @@ class Daemon:
                 current_pids = set(current_rogues.keys())
                 previous_pids = set(previous_rogues.keys())
 
-                # New processes entering rogue selection
+                # New processes entering rogue selection (debug - use -v to see)
                 for pid in current_pids - previous_pids:
                     rogue = next(r for r in samples.rogues if r.pid == pid)
                     cats = ",".join(sorted(rogue.categories))
@@ -359,15 +359,15 @@ class Daemon:
                         f"{colored(f'pid={pid}', 'dark_grey')} "
                         f"{colored(f'[{cats}]', 'blue')}"
                     )
-                    log.info(msg)
+                    log.debug(msg)
 
-                # Processes exiting rogue selection
+                # Processes exiting rogue selection (debug - use -v to see)
                 for pid in previous_pids - current_pids:
                     msg = (
                         f"rogue_exited: {colored(previous_rogues[pid], 'cyan')} "
                         f"{colored(f'pid={pid}', 'dark_grey')}"
                     )
-                    log.info(msg)
+                    log.debug(msg)
 
                 previous_rogues = current_rogues
 
