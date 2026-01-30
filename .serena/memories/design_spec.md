@@ -279,5 +279,5 @@ class BandsConfig:
 | Config | `~/.config/pause-monitor/config.toml` |
 | Database | `~/.local/share/pause-monitor/data.db` |
 | Events | `~/.local/share/pause-monitor/events/` |
-| Daemon log | `~/.local/share/pause-monitor/daemon.log` |
-| Socket | `~/.local/share/pause-monitor/daemon.sock` |
+| Daemon log | `~/.local/state/pause-monitor/daemon.log` |
+| Socket | `/tmp/pause-monitor/daemon.sock` |

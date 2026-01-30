@@ -2,6 +2,8 @@
 
 import asyncio
 import ctypes
+import logging
+import logging.handlers
 import os
 import resource
 import signal
@@ -632,6 +634,99 @@ class Daemon:
         )
 
 
+def _add_source(source: str) -> structlog.types.Processor:
+    """Create a processor that adds a source field to log events."""
+
+    def processor(
+        logger: structlog.types.WrappedLogger,
+        method_name: str,
+        event_dict: structlog.types.EventDict,
+    ) -> structlog.types.EventDict:
+        event_dict["source"] = source
+        return event_dict
+
+    return processor
+
+
+def _setup_logging(config: "Config") -> None:
+    """Configure structlog with dual output: console + JSON file.
+
+    Console output uses human-readable format with colors.
+    File output uses JSON Lines format for machine parsing.
+    Both use local time to match sample timestamps.
+    """
+    # Ensure state directory exists for log file
+    config.state_dir.mkdir(parents=True, exist_ok=True)
+
+    # Set up rotating file handler for JSON output
+    # 5MB max size, keep 3 backup files
+    file_handler = logging.handlers.RotatingFileHandler(
+        config.log_path,
+        maxBytes=5 * 1024 * 1024,  # 5MB
+        backupCount=3,
+        encoding="utf-8",
+    )
+    file_handler.setLevel(logging.INFO)
+
+    # Configure stdlib logging for file output
+    # structlog will use this for JSON output via ProcessorFormatter
+    stdlib_root = logging.getLogger()
+    stdlib_root.setLevel(logging.INFO)
+
+    # Clear any existing handlers
+    stdlib_root.handlers.clear()
+
+    # Add file handler with JSON formatter
+    file_handler.setFormatter(
+        structlog.stdlib.ProcessorFormatter(
+            processor=structlog.processors.JSONRenderer(),
+            foreign_pre_chain=[
+                structlog.contextvars.merge_contextvars,
+                structlog.processors.TimeStamper(fmt="iso", utc=False, key="ts"),
+                structlog.processors.add_log_level,
+                _add_source("daemon"),
+                structlog.processors.format_exc_info,
+            ],
+        )
+    )
+    stdlib_root.addHandler(file_handler)
+
+    # Configure structlog with console output (primary) and stdlib passthrough (for file)
+    structlog.configure(
+        processors=[
+            structlog.contextvars.merge_contextvars,
+            structlog.stdlib.filter_by_level,
+            structlog.processors.TimeStamper(fmt="%H:%M:%S", utc=False),
+            structlog.processors.add_log_level,
+            structlog.stdlib.PositionalArgumentsFormatter(),
+            structlog.processors.StackInfoRenderer(),
+            structlog.processors.format_exc_info,
+            structlog.stdlib.ProcessorFormatter.wrap_for_formatter,
+        ],
+        wrapper_class=structlog.stdlib.BoundLogger,
+        context_class=dict,
+        logger_factory=structlog.stdlib.LoggerFactory(),
+        cache_logger_on_first_use=True,
+    )
+
+    # Also add a console handler for human-readable output
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.INFO)
+    console_handler.setFormatter(
+        structlog.stdlib.ProcessorFormatter(
+            processor=structlog.dev.ConsoleRenderer(),
+            foreign_pre_chain=[
+                structlog.contextvars.merge_contextvars,
+                structlog.processors.TimeStamper(fmt="%H:%M:%S", utc=False),
+                structlog.processors.add_log_level,
+                structlog.processors.StackInfoRenderer(),
+                structlog.processors.format_exc_info,
+            ],
+        )
+    )
+    stdlib_root.addHandler(console_handler)
+
+
 async def run_daemon(config: Config | None = None) -> None:
     """Run the daemon until shutdown.
 
@@ -641,15 +736,8 @@ async def run_daemon(config: Config | None = None) -> None:
     if config is None:
         config = Config.load()
 
-    # Setup logging (utc=False to match sample timestamps which use local time)
-    structlog.configure(
-        processors=[
-            structlog.processors.TimeStamper(fmt="%H:%M:%S", utc=False),
-            structlog.processors.add_log_level,
-            structlog.dev.ConsoleRenderer(),
-        ],
-        wrapper_class=structlog.make_filtering_bound_logger(20),  # INFO
-    )
+    # Setup dual logging: console (human-readable) + file (JSON Lines)
+    _setup_logging(config)
 
     daemon = Daemon(config)
 

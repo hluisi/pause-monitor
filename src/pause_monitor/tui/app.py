@@ -7,7 +7,6 @@ Philosophy: TUI = Real-time window into daemon state. Nothing more.
 """
 
 import asyncio
-import logging
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -21,9 +20,6 @@ from textual.widgets import DataTable, Footer, Label, Static
 
 from pause_monitor.config import Config
 from pause_monitor.socket_client import SocketClient
-
-log = logging.getLogger(__name__)
-
 
 # Score band thresholds (matches daemon's tracking threshold)
 TRACKING_THRESHOLD = 40
@@ -847,12 +843,19 @@ class PauseMonitorApp(App):
         ("q", "quit", "Quit"),
     ]
 
+    # Reconnect backoff settings
+    _RECONNECT_INITIAL_DELAY = 1.0  # Start with 1 second
+    _RECONNECT_MAX_DELAY = 30.0  # Cap at 30 seconds
+    _RECONNECT_MULTIPLIER = 2.0  # Double each time
+
     def __init__(self, config: Config | None = None):
         super().__init__()
         self.config = config or Config.load()
         self._socket_client: SocketClient | None = None
         self._use_socket: bool = False
         self._socket_read_task: asyncio.Task | None = None
+        self._reconnect_task: asyncio.Task | None = None
+        self._stopping: bool = False
 
     def compose(self) -> ComposeResult:
         """Create the TUI layout."""
@@ -869,40 +872,114 @@ class PauseMonitorApp(App):
         """Initialize on startup."""
         self.title = "pause-monitor"
         self.sub_title = "Real-time Dashboard"
-        asyncio.create_task(self._try_socket_connect())
+        asyncio.create_task(self._initial_connect())
 
     def on_unmount(self) -> None:
         """Cleanup on shutdown."""
+        self._stopping = True
+        if self._reconnect_task and not self._reconnect_task.done():
+            self._reconnect_task.cancel()
         if self._socket_read_task and not self._socket_read_task.done():
             self._socket_read_task.cancel()
         if self._socket_client:
             asyncio.create_task(self._socket_client.disconnect())
 
-    async def _try_socket_connect(self) -> None:
-        """Try to connect to daemon via socket."""
-        self._socket_client = SocketClient(socket_path=self.config.socket_path)
+    async def _try_socket_connect(self, show_notification: bool = True) -> bool:
+        """Try to connect to daemon via socket.
+
+        Args:
+            show_notification: Whether to show notification on failure
+
+        Returns:
+            True if connected successfully, False otherwise
+        """
+        if self._socket_client is None:
+            self._socket_client = SocketClient(socket_path=self.config.socket_path)
+
         try:
             await self._socket_client.connect()
             self._use_socket = True
             self.sub_title = "Real-time Dashboard (live)"
-            log.info("tui_socket_connected path=%s", self.config.socket_path)
+            # Log connection to daemon's log file
+            try:
+                await self._socket_client.send_message(
+                    {
+                        "type": "log",
+                        "level": "info",
+                        "event": "tui_connected",
+                        "path": str(self.config.socket_path),
+                    }
+                )
+            except Exception:
+                pass  # Connection logging is best-effort
             try:
                 self.query_one("#activity", ActivityLog).connected()
             except Exception:
                 pass
             self._socket_read_task = asyncio.create_task(self._read_socket_loop())
+            return True
         except FileNotFoundError:
-            self._set_disconnected("socket not found")
-            self.notify(
-                "Daemon not running. Start with: pause-monitor daemon",
-                severity="warning",
-            )
+            self._set_disconnected("socket not found", start_reconnect=False)
+            if show_notification:
+                self.notify(
+                    "Daemon not running. Start with: pause-monitor daemon",
+                    severity="warning",
+                )
+            return False
         except PermissionError as e:
-            self._set_disconnected(f"permission denied: {e}")
-            self.notify(f"Socket permission denied: {e}", severity="error")
+            self._set_disconnected(f"permission denied: {e}", start_reconnect=False)
+            if show_notification:
+                self.notify(f"Socket permission denied: {e}", severity="error")
+            return False
         except Exception as e:
-            self._set_disconnected(f"{type(e).__name__}: {e}")
-            self.notify(f"Socket connection failed: {e}", severity="error")
+            self._set_disconnected(f"{type(e).__name__}: {e}", start_reconnect=False)
+            if show_notification:
+                self.notify(f"Socket connection failed: {e}", severity="error")
+            return False
+
+    async def _initial_connect(self) -> None:
+        """Initial connection attempt with notification, then start reconnect if needed."""
+        connected = await self._try_socket_connect(show_notification=True)
+        if not connected:
+            # Start reconnect loop for initial connection failures
+            self._reconnect_task = asyncio.create_task(self._reconnect_loop())
+
+    async def _reconnect_loop(self) -> None:
+        """Attempt to reconnect with exponential backoff.
+
+        Backoff schedule: 1s → 2s → 4s → 8s → 16s → 30s (capped)
+        """
+        delay = self._RECONNECT_INITIAL_DELAY
+
+        while not self._stopping:
+            self.sub_title = f"Real-time Dashboard (reconnecting in {delay:.0f}s...)"
+
+            try:
+                await asyncio.sleep(delay)
+            except asyncio.CancelledError:
+                return
+
+            if self._stopping:
+                return
+
+            # Disconnect existing client if any
+            if self._socket_client:
+                try:
+                    await self._socket_client.disconnect()
+                except Exception:
+                    pass
+                self._socket_client = None
+
+            # Try to connect
+            self.sub_title = "Real-time Dashboard (reconnecting...)"
+            connected = await self._try_socket_connect(show_notification=False)
+
+            if connected:
+                self.notify("Reconnected to daemon", severity="information")
+                return  # Success! Exit reconnect loop
+
+            # Increase delay with exponential backoff
+            delay = min(delay * self._RECONNECT_MULTIPLIER, self._RECONNECT_MAX_DELAY)
 
     async def _read_socket_loop(self) -> None:
         """Read messages from socket and update UI."""
@@ -919,12 +996,15 @@ class PauseMonitorApp(App):
             self._set_disconnected(f"{type(e).__name__}: {e}")
             self.notify(f"Socket error: {e}", severity="error")
 
-    def _set_disconnected(self, error: str | None = None) -> None:
-        """Update UI to show disconnected state."""
+    def _set_disconnected(self, error: str | None = None, start_reconnect: bool = True) -> None:
+        """Update UI to show disconnected state and optionally start reconnection.
+
+        Args:
+            error: Optional error message (unused, kept for API compatibility)
+            start_reconnect: Whether to start auto-reconnect loop (default True)
+        """
         self._use_socket = False
         self.sub_title = "Real-time Dashboard (disconnected)"
-        if error:
-            log.warning("tui_socket_disconnected error=%s", error)
         try:
             self.query_one("#header", HeaderBar).set_disconnected()
         except Exception:
@@ -933,6 +1013,11 @@ class PauseMonitorApp(App):
             self.query_one("#main-area", ProcessTable).set_disconnected()
         except Exception:
             pass
+
+        # Start reconnect loop if not already running and not shutting down
+        if start_reconnect and not self._stopping:
+            if self._reconnect_task is None or self._reconnect_task.done():
+                self._reconnect_task = asyncio.create_task(self._reconnect_loop())
 
     def _handle_socket_data(self, data: dict[str, Any]) -> None:
         """Handle messages from daemon socket."""

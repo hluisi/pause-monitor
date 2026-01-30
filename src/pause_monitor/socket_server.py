@@ -128,12 +128,48 @@ class SocketServer:
             except Exception:
                 self._clients.discard(writer)
 
+    def _handle_log_message(self, msg: dict) -> None:
+        """Handle a log message from TUI.
+
+        TUI sends log messages via the socket connection, which the daemon
+        writes to the unified log file with source="tui".
+
+        Args:
+            msg: Log message dict with level, event, and optional fields
+        """
+        level = msg.get("level", "info")
+        event = msg.get("event", "tui_log")
+
+        # Extract extra fields (everything except type, level, event)
+        extra = {k: v for k, v in msg.items() if k not in ("type", "level", "event")}
+
+        # Log at appropriate level with source=tui (added by processor)
+        log_method = getattr(log, level, log.info)
+        log_method(event, source="tui", **extra)
+
+    def _handle_client_message(self, msg: dict) -> None:
+        """Route incoming message to appropriate handler.
+
+        Args:
+            msg: Parsed JSON message from client
+        """
+        msg_type = msg.get("type")
+
+        if msg_type == "log":
+            self._handle_log_message(msg)
+        # Add other message types here as needed
+
     async def _handle_client(
         self,
         reader: asyncio.StreamReader,
         writer: asyncio.StreamWriter,
     ) -> None:
-        """Handle a new client connection."""
+        """Handle a new client connection.
+
+        Bidirectional communication:
+        - Daemon → TUI: broadcasts via broadcast() method
+        - TUI → Daemon: receives JSON messages (type: "log", etc.)
+        """
         self._clients.add(writer)
         log.info("tui_connected", clients=len(self._clients))
 
@@ -149,15 +185,22 @@ class SocketServer:
             writer.write(data)
             await writer.drain()
 
-            # Keep connection alive until client disconnects
-            # Client just needs to stay connected; data comes via broadcast()
+            # Read loop: process incoming messages from client
             while self._running:
                 try:
-                    data = await asyncio.wait_for(reader.read(1), timeout=1.0)
-                    if not data:
-                        break
+                    line = await asyncio.wait_for(reader.readline(), timeout=1.0)
+                    if not line:
+                        break  # Client disconnected
+
+                    # Parse and handle the message
+                    try:
+                        msg = json.loads(line.decode())
+                        self._handle_client_message(msg)
+                    except json.JSONDecodeError:
+                        log.warning("invalid_client_message", raw=line[:100])
+
                 except TimeoutError:
-                    continue
+                    continue  # No message, check running flag and loop
                 except ConnectionError:
                     break
         finally:

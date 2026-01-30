@@ -250,6 +250,13 @@ while not shutdown:
     8. Sleep remaining interval (default 0.2s = 5Hz)
 ```
 
+### Logging
+Daemon uses structlog with dual output:
+- **Console:** Human-readable format for development
+- **File:** JSON Lines format at `~/.local/state/pause-monitor/daemon.log`
+  - Rotating: 5MB max, 3 backup files
+  - Source field: `"source": "daemon"` or `"source": "tui"` (forwarded via socket)
+
 ---
 
 ## Module: tracker.py
@@ -458,16 +465,21 @@ id, capture_id (FK), sample_count, peak_score, culprits (JSON)
 
 ## Module: socket_server.py / socket_client.py
 
-**Purpose:** Real-time daemon-to-TUI streaming.
+**Purpose:** Bidirectional daemon-TUI communication via Unix socket.
 
 ### Protocol
 Newline-delimited JSON over Unix socket at `/tmp/pause-monitor/daemon.sock`
 
+**Bidirectional:** Socket supports messages in both directions:
+- Daemon → TUI: sample broadcasts, initial state
+- TUI → Daemon: log messages (type: "log")
+
 ### Message Types
-| Type | Contents |
-|------|----------|
-| `initial_state` | Ring buffer state on connect |
-| `sample` (default) | ProcessSamples per iteration |
+| Type | Direction | Contents |
+|------|-----------|----------|
+| `initial_state` | Daemon → TUI | Ring buffer state on connect |
+| `sample` (default) | Daemon → TUI | ProcessSamples per iteration |
+| `log` | TUI → Daemon | Log message forwarded to daemon's log file |
 
 ### SocketServer Methods
 | Method | Purpose |
@@ -476,6 +488,8 @@ Newline-delimited JSON over Unix socket at `/tmp/pause-monitor/daemon.sock`
 | `stop()` | Close all clients, remove socket |
 | `broadcast(samples)` | Send to all connected clients |
 | `has_clients` | Property: any clients connected? |
+| `_handle_client_message()` | Route incoming messages by type |
+| `_handle_log_message()` | Forward TUI logs to structlog |
 
 ### SocketClient Methods
 | Method | Purpose |
@@ -483,6 +497,7 @@ Newline-delimited JSON over Unix socket at `/tmp/pause-monitor/daemon.sock`
 | `connect()` | Connect to daemon socket |
 | `disconnect()` | Close connection |
 | `read_message()` | Read next JSON message |
+| `send_message(msg)` | Send JSON message to daemon |
 | `connected` | Property: is connected? |
 
 ---
@@ -596,9 +611,17 @@ The `pause-monitor install` command (requires sudo) sets up:
 | `on_mount()` | Start socket connection |
 | `on_unmount()` | Cleanup on exit |
 | `_try_socket_connect()` | Connect to daemon |
+| `_initial_connect()` | First connection attempt + start reconnect on failure |
+| `_reconnect_loop()` | Auto-reconnect with exponential backoff (1s→30s) |
 | `_read_socket_loop()` | Continuous message reading |
 | `_handle_socket_data()` | Update widgets from message |
-| `_set_disconnected()` | Show disconnected state |
+| `_set_disconnected()` | Show disconnected state, trigger reconnect |
+
+### Auto-Reconnect
+TUI automatically reconnects when daemon restarts:
+- Exponential backoff: 1s → 2s → 4s → 8s → 16s → 30s (capped)
+- UI shows "reconnecting in Xs..." during backoff
+- Reconnect loop cancelled on TUI exit
 
 ---
 

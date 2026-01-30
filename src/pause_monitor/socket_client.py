@@ -6,11 +6,8 @@ from __future__ import annotations
 
 import asyncio
 import json
-import logging
 from pathlib import Path
 from typing import Any, Callable
-
-log = logging.getLogger(__name__)
 
 
 class SocketClient:
@@ -40,7 +37,6 @@ class SocketClient:
             raise FileNotFoundError(f"Socket not found: {self.socket_path}")
 
         self._reader, self._writer = await asyncio.open_unix_connection(str(self.socket_path))
-        log.info("socket_client_connected path=%s", self.socket_path)
 
     async def disconnect(self) -> None:
         """Disconnect from the daemon socket."""
@@ -52,7 +48,6 @@ class SocketClient:
                 pass
             self._writer = None
             self._reader = None
-        log.info("socket_client_disconnected")
 
     async def read_message(self) -> dict[str, Any]:
         """Read next message from socket.
@@ -72,3 +67,24 @@ class SocketClient:
             raise ConnectionError("Connection closed by server")
 
         return json.loads(line.decode())
+
+    async def send_message(self, msg: dict[str, Any]) -> None:
+        """Send a message to the daemon.
+
+        Messages are JSON-encoded with a newline delimiter.
+
+        Args:
+            msg: Dictionary to send (must be JSON-serializable)
+
+        Raises:
+            ConnectionError: If not connected or write fails
+        """
+        if not self._writer or self._writer.is_closing():
+            raise ConnectionError("Not connected")
+
+        try:
+            data = json.dumps(msg).encode() + b"\n"
+            self._writer.write(data)
+            await self._writer.drain()
+        except Exception as e:
+            raise ConnectionError(f"Send failed: {e}") from e

@@ -101,8 +101,8 @@ def test_tui_set_disconnected_updates_subtitle():
     app.sub_title = "Real-time Dashboard (live)"
     app._use_socket = True
 
-    # Simulate connection error
-    app._set_disconnected()
+    # Simulate connection error (no reconnect since this is sync test without event loop)
+    app._set_disconnected(start_reconnect=False)
 
     assert app._use_socket is False
     assert "disconnected" in app.sub_title.lower()
