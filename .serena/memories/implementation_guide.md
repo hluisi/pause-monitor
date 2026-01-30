@@ -425,8 +425,9 @@ id, capture_id (FK), sample_count, peak_score, culprits (JSON)
 | `config_dir` | `~/.config/pause-monitor/` |
 | `config_path` | `~/.config/pause-monitor/config.toml` |
 | `data_dir` | `~/.local/share/pause-monitor/` |
+| `state_dir` | `~/.local/state/pause-monitor/` |
 | `db_path` | `~/.local/share/pause-monitor/data.db` |
-| `log_path` | `~/.local/share/pause-monitor/daemon.log` |
+| `log_path` | `~/.local/state/pause-monitor/daemon.log` |
 | `pid_path` | `/tmp/pause-monitor/daemon.pid` |
 | `socket_path` | `/tmp/pause-monitor/daemon.sock` |
 

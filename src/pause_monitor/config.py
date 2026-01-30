@@ -210,14 +210,22 @@ class Config:
         return Path.home() / ".local" / "share" / "pause-monitor"
 
     @property
+    def state_dir(self) -> Path:
+        """State directory for logs and other expendable persistent state."""
+        return Path.home() / ".local" / "state" / "pause-monitor"
+
+    @property
     def db_path(self) -> Path:
         """Database path."""
         return self.data_dir / "data.db"
 
     @property
     def log_path(self) -> Path:
-        """Daemon log path."""
-        return self.data_dir / "daemon.log"
+        """Daemon log path.
+
+        Logs are expendable persistent state, so they go in XDG_STATE_HOME.
+        """
+        return self.state_dir / "daemon.log"
 
     @property
     def pid_path(self) -> Path:
