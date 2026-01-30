@@ -133,13 +133,25 @@ def events(ctx, limit: int, open_only: bool) -> None:
 
 @events.command("show")
 @click.argument("event_id", type=int)
+@click.option("--forensics", "-f", is_flag=True, help="Show forensic capture details")
+@click.option("--threads", "-t", is_flag=True, help="Show spindump thread states")
+@click.option("--logs", "-l", is_flag=True, help="Show system log entries")
 @click.pass_context
-def events_show(ctx, event_id: int) -> None:
+def events_show(ctx, event_id: int, forensics: bool, threads: bool, logs: bool) -> None:
     """Show details of a specific process event."""
     import json
     from datetime import datetime
 
-    from pause_monitor.storage import get_process_event_detail, require_database
+    from pause_monitor.storage import (
+        get_buffer_context,
+        get_forensic_captures,
+        get_log_entries,
+        get_process_event_detail,
+        get_process_snapshots,
+        get_spindump_processes,
+        get_spindump_threads,
+        require_database,
+    )
 
     config = ctx.obj["config"]
 
@@ -169,23 +181,77 @@ def events_show(ctx, event_id: int) -> None:
         # Show peak snapshot
         if event["peak_snapshot"]:
             click.echo("\nPeak Snapshot:")
-            try:
-                snapshot = json.loads(event["peak_snapshot"])
-                for key, val in snapshot.items():
-                    click.echo(f"  {key}: {val}")
-            except json.JSONDecodeError:
-                click.echo(f"  {event['peak_snapshot']}")
+            snapshot = event["peak_snapshot"]
+            for key, val in snapshot.items():
+                click.echo(f"  {key}: {val}")
 
-        # Show any snapshots
-        snapshots = conn.execute(
-            "SELECT snapshot_type, snapshot FROM process_snapshots WHERE event_id = ?",
-            (event_id,),
-        ).fetchall()
-
+        # Show all snapshots
+        snapshots = get_process_snapshots(conn, event_id)
         if snapshots:
             click.echo(f"\nSnapshots: {len(snapshots)}")
-            for stype, sdata in snapshots:
-                click.echo(f"  [{stype}] {sdata[:100]}...")
+            for snap in snapshots:
+                cats = ", ".join(snap["categories"]) if snap["categories"] else "none"
+                click.echo(
+                    f"  [{snap['snapshot_type']}] score={snap['score']} "
+                    f"cpu={snap['cpu']:.1f} mem={snap['mem']} [{cats}]"
+                )
+
+        # Show forensic captures
+        captures = get_forensic_captures(conn, event_id)
+        if captures:
+            click.echo(f"\nForensic Captures: {len(captures)}")
+            for cap in captures:
+                cap_time = datetime.fromtimestamp(cap["captured_at"])
+                click.echo(f"\n  [{cap['trigger']}] at {cap_time.strftime('%H:%M:%S')}")
+                click.echo(f"    Spindump: {cap['spindump_status'] or 'pending'}")
+                click.echo(f"    Tailspin: {cap['tailspin_status'] or 'pending'}")
+                click.echo(f"    Logs: {cap['logs_status'] or 'pending'}")
+
+                if forensics:
+                    # Show buffer context
+                    context = get_buffer_context(conn, cap["id"])
+                    if context:
+                        click.echo(
+                            f"    Buffer: {context['sample_count']} samples, "
+                            f"peak {context['peak_score']}"
+                        )
+                        try:
+                            culprits = json.loads(context["culprits"])
+                            for culprit in culprits[:5]:
+                                cats = ", ".join(culprit.get("categories", []))
+                                click.echo(
+                                    f"      - {culprit['command']} ({culprit['score']}) [{cats}]"
+                                )
+                        except json.JSONDecodeError:
+                            pass
+
+                if threads:
+                    # Show spindump thread states
+                    procs = get_spindump_processes(conn, cap["id"])
+                    if procs:
+                        click.echo(f"    Spindump Processes: {len(procs)}")
+                        for proc in procs[:10]:
+                            footprint = (
+                                f"{proc['footprint_mb']:.1f}MB" if proc["footprint_mb"] else "?"
+                            )
+                            click.echo(f"      {proc['name']} [{proc['pid']}] ({footprint})")
+                            proc_threads = get_spindump_threads(conn, proc["id"])
+                            for t in proc_threads[:5]:
+                                state = t["state"] or "unknown"
+                                name = t["thread_name"] or "unnamed"
+                                click.echo(f"        Thread {t['thread_id']}: {state} ({name})")
+
+                if logs:
+                    # Show log entries
+                    entries = get_log_entries(conn, cap["id"], limit=20)
+                    if entries:
+                        click.echo(f"    Log Entries: {len(entries)}")
+                        for entry in entries:
+                            subsys = entry["subsystem"] or "system"
+                            msg = entry["event_message"][:80]
+                            click.echo(f"      [{entry['timestamp'][:19]}] {subsys}: {msg}")
+        elif forensics or threads or logs:
+            click.echo("\nNo forensic captures for this event.")
 
 
 @main.command()
@@ -325,11 +391,11 @@ def prune(events_days: int | None, dry_run: bool, force: bool) -> None:
 
     conn = get_connection(config.db_path)
     try:
-        events_deleted, samples_deleted = prune_old_data(conn, events_days=events_days)
+        events_deleted = prune_old_data(conn, events_days=events_days)
     finally:
         conn.close()
 
-    click.echo(f"Deleted {events_deleted} events and {samples_deleted} system samples")
+    click.echo(f"Deleted {events_deleted} events")
 
 
 @main.group()
@@ -348,27 +414,19 @@ def config_show() -> None:
     click.echo(f"Config file: {cfg.config_path}")
     click.echo(f"Exists: {cfg.config_path.exists()}")
     click.echo()
-    click.echo("[sampling]")
-    click.echo(f"  normal_interval = {cfg.sampling.normal_interval}")
-    click.echo(f"  elevated_interval = {cfg.sampling.elevated_interval}")
+    click.echo("[retention]")
+    click.echo(f"  events_days = {cfg.retention.events_days}")
+    click.echo()
+    click.echo("[sentinel]")
+    click.echo(f"  ring_buffer_seconds = {cfg.sentinel.ring_buffer_seconds}")
     click.echo()
     click.echo("[bands]")
-    click.echo(f"  low = {cfg.bands.low}")
     click.echo(f"  medium = {cfg.bands.medium}")
     click.echo(f"  elevated = {cfg.bands.elevated}")
     click.echo(f"  high = {cfg.bands.high}")
     click.echo(f"  critical = {cfg.bands.critical}")
     click.echo(f"  tracking_band = {cfg.bands.tracking_band}")
     click.echo(f"  forensics_band = {cfg.bands.forensics_band}")
-    click.echo()
-    click.echo("[retention]")
-    click.echo(f"  events_days = {cfg.retention.events_days}")
-    click.echo()
-    click.echo("[alerts]")
-    click.echo(f"  enabled = {cfg.alerts.enabled}")
-    click.echo(f"  sound = {cfg.alerts.sound}")
-    click.echo()
-    click.echo(f"learning_mode = {cfg.learning_mode}")
 
 
 @config.command("edit")

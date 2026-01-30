@@ -107,7 +107,7 @@ def test_tui_set_disconnected_updates_subtitle():
 
     config = Config()
     app = PauseMonitorApp(config)
-    app.sub_title = "System Health Monitor (live)"
+    app.sub_title = "Real-time Dashboard (live)"
     app._use_socket = True
 
     # Simulate connection error
@@ -117,7 +117,7 @@ def test_tui_set_disconnected_updates_subtitle():
     assert "disconnected" in app.sub_title.lower()
 
 
-def test_tui_handle_socket_data_updates_score():
+def test_tui_handle_socket_data_updates_widgets():
     """TUI should update widgets with socket data (new ProcessSamples format)."""
     from pause_monitor.tui.app import PauseMonitorApp
 
@@ -125,18 +125,21 @@ def test_tui_handle_socket_data_updates_score():
     app = PauseMonitorApp(config)
 
     # Create mock widgets
-    mock_gauge = MagicMock()
-    mock_sample_info = MagicMock()
-    mock_processes = MagicMock()
+    mock_header = MagicMock()
+    mock_process_table = MagicMock()
+    mock_activity = MagicMock()
+    mock_tracked = MagicMock()
 
     # Patch query_one to return our mocks
     def mock_query_one(selector, widget_type=None):
-        if selector == "#stress-gauge":
-            return mock_gauge
-        elif selector == "#sample-info":
-            return mock_sample_info
-        elif selector == "#processes":
-            return mock_processes
+        if selector == "#header":
+            return mock_header
+        elif selector == "#main-area":
+            return mock_process_table
+        elif selector == "#activity":
+            return mock_activity
+        elif selector == "#tracked":
+            return mock_tracked
         raise ValueError(f"Unknown selector: {selector}")
 
     app.query_one = mock_query_one
@@ -169,14 +172,21 @@ def test_tui_handle_socket_data_updates_score():
 
     app._handle_socket_data(data)
 
-    # Verify score gauge was updated with max_score
-    mock_gauge.update_score.assert_called_once_with(75)
+    # Verify header was updated
+    mock_header.update_from_sample.assert_called_once()
+    call_args = mock_header.update_from_sample.call_args
+    assert call_args[0][0] == 75  # max_score
+    assert call_args[0][1] == 500  # process_count
+    assert call_args[0][2] == 15  # sample_count
 
-    # Verify sample info panel was updated with max_score, process_count, sample_count
-    mock_sample_info.update_info.assert_called_once_with(75, 500, 15)
+    # Verify process table was updated with rogues
+    mock_process_table.update_rogues.assert_called_once()
+    rogues_arg = mock_process_table.update_rogues.call_args[0][0]
+    assert len(rogues_arg) == 1
+    assert rogues_arg[0]["command"] == "test_proc"
 
-    # Verify processes panel was updated with rogues
-    mock_processes.update_rogues.assert_called_once_with(data["rogues"])
+    # Verify activity log was checked for transitions
+    mock_activity.check_transitions.assert_called_once()
 
 
 def test_tui_handle_initial_state():
@@ -187,17 +197,20 @@ def test_tui_handle_initial_state():
     app = PauseMonitorApp(config)
 
     # Create mock widgets
-    mock_gauge = MagicMock()
-    mock_sample_info = MagicMock()
-    mock_processes = MagicMock()
+    mock_header = MagicMock()
+    mock_process_table = MagicMock()
+    mock_activity = MagicMock()
+    mock_tracked = MagicMock()
 
     def mock_query_one(selector, widget_type=None):
-        if selector == "#stress-gauge":
-            return mock_gauge
-        elif selector == "#sample-info":
-            return mock_sample_info
-        elif selector == "#processes":
-            return mock_processes
+        if selector == "#header":
+            return mock_header
+        elif selector == "#main-area":
+            return mock_process_table
+        elif selector == "#activity":
+            return mock_activity
+        elif selector == "#tracked":
+            return mock_tracked
         raise ValueError(f"Unknown selector: {selector}")
 
     app.query_one = mock_query_one
@@ -235,11 +248,17 @@ def test_tui_handle_initial_state():
 
     app._handle_socket_data(data)
 
-    # Verify score gauge was updated with max_score
-    mock_gauge.update_score.assert_called_once_with(25)
+    # Verify header was updated with max_score
+    mock_header.update_from_sample.assert_called_once()
+    call_args = mock_header.update_from_sample.call_args
+    assert call_args[0][0] == 25  # max_score
+    assert call_args[0][1] == 400  # process_count
+    assert call_args[0][2] == 1  # sample_count
+    # history should be passed as 5th argument
+    history_arg = call_args[0][4] if len(call_args[0]) > 4 else call_args[1].get("history")
+    assert history_arg == [25]  # History from samples
 
-    # Verify sample info panel was updated with max_score, process_count, sample_count
-    mock_sample_info.update_info.assert_called_once_with(25, 400, 1)
-
-    # Verify processes panel was updated with rogues from last sample
-    mock_processes.update_rogues.assert_called_once_with(data["samples"][-1]["rogues"])
+    # Verify process table was updated with rogues from last sample
+    mock_process_table.update_rogues.assert_called_once()
+    rogues_arg = mock_process_table.update_rogues.call_args[0][0]
+    assert rogues_arg == data["samples"][-1]["rogues"]
