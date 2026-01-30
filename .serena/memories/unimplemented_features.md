@@ -4,7 +4,7 @@
 
 ## Summary
 
-Core functionality is complete. LibprocCollector implemented. Remaining items are nice-to-have features and cleanup.
+Core functionality is complete. LibprocCollector, ProcessTracker, and all major design spec components are implemented. The codebase has no stubs. Remaining items are minor spec discrepancies and nice-to-have features.
 
 ---
 
@@ -22,10 +22,16 @@ No stubs found.
 
 | Config Key | Where | What Should Happen |
 |------------|-------|-------------------|
-| `learning_mode` | config.py:240 | Daemon should suppress alerts, collect calibration data |
-| `suspects.patterns` | config.py:42-51 | Flag matching processes in forensics output or TUI |
-| `sampling.normal_interval` | config.py:12 | Legacy - remove after collector replacement |
-| `sampling.elevated_interval` | config.py:13 | Legacy - remove after collector replacement |
+| (none) | - | All config fields are actively used |
+
+---
+
+## Design Spec Discrepancies
+
+| Design Spec Item | Actual Implementation | Notes |
+|------------------|----------------------|-------|
+| `BandsConfig.low = 20` | Not in config | Design spec shows this, but implementation uses implicit "low" band (score < medium). Harmless - band logic works correctly via `get_band()` method. |
+| `BandsConfig.forensics_cooldown = 60` | Not in config | Design spec mentions this, but forensics cooldown is not configurable. Hardcoded behavior exists in daemon. |
 
 ---
 
@@ -33,8 +39,7 @@ No stubs found.
 
 | Feature | Status |
 |---------|--------|
-| `calibrate` command | Does not exist |
-| `history --at "<time>"` | Option not implemented (basic history works) |
+| `calibrate` command | Does not exist (mentioned in old spec, low priority) |
 
 ---
 
@@ -42,8 +47,16 @@ No stubs found.
 
 | Step | Status |
 |------|--------|
-| Sudoers rules generation | Not implemented (forensics needs sudo) |
+| Sudoers rule for `tailspin save` | Not implemented |
 | `tailspin enable` | Not called during install |
+| Remove live spindump capture | Code still attempts `spindump -notarget` |
+
+**Required sudoers rule** (`/etc/sudoers.d/pause-monitor`):
+```bash
+<user> ALL = (root) NOPASSWD: /usr/bin/tailspin save -o /Users/<user>/.local/share/pause-monitor/events/*
+```
+
+**Context:** Only `tailspin save` needs sudo. The rule is intentionally narrow — tailspin can only write to the events directory. Live spindump should be removed from forensics.py (tailspin decode provides the same data from during-the-pause, not after).
 
 ---
 
@@ -51,30 +64,18 @@ No stubs found.
 
 | Feature | Status |
 |---------|--------|
-| SIGHUP config reload | Only SIGTERM/SIGINT handled |
+| SIGHUP config reload | Only SIGTERM/SIGINT handled in daemon |
 | Event directory cleanup on prune | Prune deletes DB records but not forensics artifacts in events_dir |
-
----
-
-## Deleted Components
-
-These no longer exist:
-- `sentinel.py` — Deleted
-- `stress.py` — Deleted
-- `TierManager` class — Deleted
-- `PowermetricsStream` — Deleted (was replaced by TopCollector, now TopCollector being replaced)
 
 ---
 
 ## Priority
 
 ### Medium (Nice to Have)
-1. **learning_mode implementation** — Config exists, daemon should respect it
-2. **suspects.patterns usage** — Highlight known-problematic processes
-3. **Event directory cleanup** — Prevent orphan forensics accumulation
-4. **Install sudoers setup** — Forensics needs passwordless sudo
+1. **Event directory cleanup** - Prune should also delete orphan forensics files in `~/.local/share/pause-monitor/events/`
+2. **Forensics cooldown config** - Make cooldown configurable via BandsConfig
+3. **Install sudoers setup** - Add sudoers rule for `tailspin save` during install
 
 ### Low (Tech Debt)
-5. **Remove legacy sampling config** — normal_interval/elevated_interval unused
-6. **SIGHUP config reload** — Hot reloading would be nice
-7. **calibrate command** — Auto-tune thresholds based on system profile
+4. **SIGHUP config reload** - Hot reloading config without daemon restart
+5. **Calibrate command** - Auto-tune thresholds based on system profile (low value, manual config editing works)

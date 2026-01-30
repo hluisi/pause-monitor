@@ -16,7 +16,7 @@
 | docs/plans/phase-6-cleanup.md | 2026-01-23 | Archived |
 | docs/plans/2026-01-23-per-process-stressor-scoring-design.md | 2026-01-24 | **SUPERSEDED** |
 | docs/plans/2026-01-23-per-process-stressor-scoring-plan.md | 2026-01-24 | **SUPERSEDED** |
-| docs/plans/2026-01-23-tui-redesign-design.md | 2026-01-24 | Active |
+| docs/plans/2026-01-23-tui-redesign-design.md | 2026-01-24 | Implemented |
 | docs/plans/2026-01-25-per-process-band-tracking-design.md | 2026-01-27 | Implemented |
 | docs/plans/2026-01-27-per-process-band-tracking-plan.md | 2026-01-27 | Implemented |
 
@@ -29,36 +29,55 @@ A **real-time** system health monitoring tool for macOS that tracks down intermi
 2. Historical trending - Track process behavior over days/weeks to spot patterns via ProcessTracker events
 3. Real-time alerting - Know when the system is under stress before it freezes
 
-## Architecture (Target)
+## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                        pause-monitor                             │
-├─────────────────────────────────────────────────────────────────┤
-│  ┌──────────────┐    ┌──────────────┐    ┌──────────────┐       │
-│  │    Daemon    │───▶│   Storage    │◀───│     CLI      │       │
-│  │  (libproc)   │    │   (SQLite)   │    │   Queries    │       │
-│  └──────┬───────┘    └──────────────┘    └──────────────┘       │
-│         │                   ▲                                    │
-│         │                   │ process_events                     │
-│  ┌──────▼───────┐           │                                    │
-│  │ProcessTracker│───────────┘                                    │
-│  │ (band track) │                                                │
-│  └──────────────┘                                                │
-│         │                                                        │
-│         │ socket                                                 │
-│         ▼                                                        │
-│  ┌──────────────┐    ┌──────────────┐                           │
-│  │ SocketServer │───▶│     TUI      │                           │
-│  │  (real-time) │    │  Dashboard   │                           │
-│  └──────────────┘    └──────────────┘                           │
-│         │                                                        │
-│         ▼                                                        │
-│  ┌──────────────┐                                               │
-│  │   Forensics  │                                               │
-│  │  (on pause)  │                                               │
-│  └──────────────┘                                               │
-└─────────────────────────────────────────────────────────────────┘
+                              pause-monitor Architecture
+================================================================================
+
+                    ┌─────────────────────────────────────┐
+                    │              CLI (cli.py)           │
+                    │  daemon │ tui │ status │ events    │
+                    └─────────┬───────────────┬──────────┘
+                              │               │
+                              ▼               ▼
+┌─────────────────────────────────────┐   ┌──────────────────────────────────┐
+│           DAEMON (daemon.py)        │   │          TUI (tui/app.py)        │
+│                                     │   │                                  │
+│  ┌─────────────┐   ┌─────────────┐  │   │  ┌──────────┐  ┌─────────────┐  │
+│  │LibprocColl- │   │ProcessTrack-│  │   │  │HeaderBar │  │ProcessTable │  │
+│  │ector        │   │er           │  │   │  │(sparkline)│  │             │  │
+│  │(collector.py│   │(tracker.py) │  │   │  └──────────┘  └─────────────┘  │
+│  │)            │   │             │  │   │  ┌──────────┐  ┌─────────────┐  │
+│  └──────┬──────┘   └──────┬──────┘  │   │  │Activity  │  │TrackedEvents│  │
+│         │                 │         │   │  │Log       │  │Panel        │  │
+│         ▼                 ▼         │   │  └──────────┘  └─────────────┘  │
+│  ┌─────────────────────────────┐    │   │                                  │
+│  │      RingBuffer             │    │   └──────────────────────────────────┘
+│  │      (ringbuffer.py)        │    │                 ▲
+│  └─────────────┬───────────────┘    │                 │
+│                │                    │                 │ JSON over Unix socket
+│                ▼                    │                 │
+│  ┌─────────────────────────────┐    │   ┌────────────┴────────────┐
+│  │    SocketServer             │◄───┼───│     SocketClient        │
+│  │    (socket_server.py)       │    │   │     (socket_client.py)  │
+│  └─────────────────────────────┘    │   └─────────────────────────┘
+│                                     │
+│  ┌─────────────────────────────┐    │
+│  │   ForensicsCapture          │    │
+│  │   (forensics.py)            │    │
+│  │   • tailspin (sudo)         │    │
+│  │   • log show                │    │
+│  └─────────────────────────────┘    │
+│                │                    │
+└────────────────┼────────────────────┘
+                 ▼
+        ┌────────────────────────────────────────────┐
+        │              SQLite (storage.py)           │
+        │                                            │
+        │  daemon_state │ process_events │ snapshots │
+        │  forensic_captures │ spindump_* │ log_*   │
+        └────────────────────────────────────────────┘
 ```
 
 ## Components
@@ -93,13 +112,13 @@ A **real-time** system health monitoring tool for macOS that tracks down intermi
 
 ### Daemon (daemon.py)
 - **Purpose:** Background daemon orchestrating sampling, tracking, and forensics
-- **Loop:** Continuous loop driven by collector
+- **Loop:** Continuous loop driven by collector at 5Hz (0.2s interval)
 - **Integration:** Feeds ProcessSamples to ProcessTracker for persistence
-- **Forensics:** Triggers spindump/tailspin on high scores or timing anomalies
+- **Forensics:** Triggers spindump/tailspin when process enters high band
 
 ### RingBuffer (ringbuffer.py)
 - **Purpose:** In-memory circular buffer for pre-pause context
-- **Size:** 30 samples (30 seconds at 1Hz)
+- **Size:** 150 samples (30 seconds at 5Hz)
 - **Contents:** ProcessSamples batches
 
 ### SocketServer / SocketClient
@@ -107,14 +126,15 @@ A **real-time** system health monitoring tool for macOS that tracks down intermi
 - **Protocol:** Newline-delimited JSON at `~/.local/share/pause-monitor/daemon.sock`
 
 ### Storage (storage.py)
-- **Purpose:** SQLite with WAL mode, schema v9
+- **Purpose:** SQLite with WAL mode, schema v13
 - **Primary tables:** `process_events`, `process_snapshots`
-- **Support tables:** `daemon_state` (key-value store)
+- **Support tables:** `daemon_state`, `forensic_captures`, `spindump_*`, `log_*`, `buffer_context`
 
 ### TUI (tui/app.py)
-- **Purpose:** Live dashboard with score gauge, rogue processes, tracked events
+- **Purpose:** Single-screen btop-style dashboard
 - **Framework:** Textual
-- **Data:** Real-time via socket, events from SQLite
+- **Data:** Real-time via socket only (no DB queries)
+- **Widgets:** HeaderBar (sparkline), ProcessTable, ActivityLog, TrackedEventsPanel
 
 ---
 
@@ -147,13 +167,29 @@ A **real-time** system health monitoring tool for macOS that tracks down intermi
 
 ## Data Models
 
+### MetricValue (collector.py)
+
+```python
+@dataclass
+class MetricValue:
+    current: float | int  # Current sample value
+    low: float | int      # Minimum in ring buffer window
+    high: float | int     # Maximum in ring buffer window
+```
+
 ### ProcessScore (collector.py)
 
-See `data_schema` memory for complete field documentation. Key structure:
-- Identity: pid, command, captured_at
-- Metrics with ranges: cpu, mem, pageins, faults, disk_io, disk_io_rate, csw, syscalls, threads, mach_msgs, instructions, cycles, ipc, energy, energy_rate, wakeups, priority (all `MetricValue`)
-- Categorical with hierarchy: state, band (both `MetricValueStr`)
-- Scoring: score (`MetricValue`), categories (`list[str]`)
+**Identity:** `pid`, `command`, `captured_at`
+
+**All metrics use MetricValue (current/low/high):**
+- CPU: `cpu`
+- Memory: `mem`, `mem_peak` (int), `pageins`, `faults`
+- Disk I/O: `disk_io`, `disk_io_rate`
+- Activity: `csw`, `syscalls`, `threads`, `mach_msgs`
+- Efficiency: `instructions`, `cycles`, `ipc`
+- Power: `energy`, `energy_rate`, `wakeups`
+- State: `state` (MetricValueStr), `priority`
+- Scoring: `score`, `band` (MetricValueStr), `categories` (list[str])
 
 ### ProcessSamples (collector.py)
 ```python
@@ -180,7 +216,7 @@ class ProcessSamples:
 | entry_band | TEXT | Band at entry (elevated, high, critical) |
 | peak_band | TEXT | Highest band reached |
 | peak_score | INTEGER | Highest score during event |
-| peak_snapshot | TEXT | JSON ProcessScore at peak |
+| peak_snapshot_id | INTEGER | FK to process_snapshots |
 
 **process_snapshots:**
 | Field | Type | Purpose |
@@ -188,7 +224,8 @@ class ProcessSamples:
 | id | INTEGER PRIMARY KEY | Auto-increment ID |
 | event_id | INTEGER FK | References process_events(id) |
 | snapshot_type | TEXT | 'entry', 'checkpoint', 'exit' |
-| snapshot | TEXT | JSON ProcessScore |
+| captured_at | REAL | Timestamp |
+| (metric columns) | Various | Each MetricValue has current/low/high columns |
 
 ## Configuration
 
@@ -198,15 +235,13 @@ Location: `~/.config/pause-monitor/config.toml`
 ```python
 @dataclass
 class BandsConfig:
-    low: int = 20        # 0-19 = low
-    medium: int = 40     # 20-39 = medium
-    elevated: int = 60   # 40-59 = elevated
-    high: int = 80       # 60-79 = high
-    critical: int = 100  # 80-100 = critical
+    medium: int = 40      # 0-39 = low
+    elevated: int = 60    # 40-59 = medium
+    high: int = 80        # 60-79 = elevated
+    critical: int = 100   # 80-99 = high, 100 = critical
     tracking_band: str = "elevated"
     forensics_band: str = "high"
     checkpoint_interval: int = 30
-    forensics_cooldown: int = 60
 ```
 
 ## CLI Commands
@@ -230,10 +265,12 @@ class BandsConfig:
 |----------|-----------|
 | Per-process scoring over system-wide stress | Identifies specific culprits, not just "system stressed" |
 | **libproc (not top)** | Direct API = no subprocess, no parsing, more data |
-| 8-factor weighted scoring with multi-category bonus | Flexible, configurable identification of stress types |
+| MetricValue (current/low/high) | Shows volatility and trends in single view |
+| 8-factor weighted scoring | Flexible, configurable identification of stress types |
 | ProcessTracker per-process events | Historical record of which processes caused stress |
 | Boot time for PID disambiguation | PIDs can be reused across reboots |
 | Binary NORMAL/BAD states | Actions are binary; five bands are just descriptive labels |
+| Socket-only TUI | Real-time streaming, no DB queries, minimal latency |
 
 ## Data Locations
 
