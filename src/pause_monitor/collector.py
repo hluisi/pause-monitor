@@ -479,7 +479,14 @@ class LibprocCollector:
         scored = [self._score_process(p) for p in rogues]
 
         elapsed_ms = int((time.monotonic() - start) * 1000)
-        max_score = max((p.score.current for p in scored), default=0)
+        # Hybrid: max(peak_score, rms) - single bad actor never hidden, cumulative stress can push higher
+        scores = [p.score.high for p in scored]
+        if scores:
+            peak = max(scores)
+            rms = int((sum(s * s for s in scores) / len(scores)) ** 0.5)
+            max_score = max(peak, rms)
+        else:
+            max_score = 0
 
         return ProcessSamples(
             timestamp=datetime.now(),
