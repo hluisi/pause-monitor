@@ -17,7 +17,7 @@ from textual.app import App, ComposeResult
 from textual.containers import Container, Grid, Horizontal, ScrollableContainer
 from textual.css.query import NoMatches
 from textual.reactive import reactive
-from textual.widgets import DataTable, Footer, Label, Sparkline, Static
+from textual.widgets import DataTable, Footer, Label, Static
 
 from pause_monitor.config import Config
 from pause_monitor.socket_client import SocketClient
@@ -144,11 +144,17 @@ class HeaderBar(Static):
         text-align: right;
     }
 
-    HeaderBar Sparkline {
-        width: 100%;
+    HeaderBar #sparkline {
+        width: 1fr;
         height: 1;
+        text-align: right;
     }
     """
+
+    # Default buffer size, will be resized to match actual width
+    DEFAULT_SPARKLINE_SIZE = 60
+    # Unicode block characters for sparkline (8 levels)
+    BARS = " ▁▂▃▄▅▆▇█"
 
     score: reactive[int] = reactive(0)
     connected: reactive[bool] = reactive(False)
@@ -158,7 +164,9 @@ class HeaderBar(Static):
         self._timestamp = ""
         self._process_count = 0
         self._sample_count = 0
-        self._sparkline_data: list[float] = []
+        self._sparkline_data: list[int] = []
+        self._sparkline_size = self.DEFAULT_SPARKLINE_SIZE
+        self._start_time = time.time()
 
     def compose(self) -> ComposeResult:
         """Create header layout."""
@@ -166,7 +174,34 @@ class HeaderBar(Static):
             Label("", id="gauge-left"),
             Label("", id="gauge-right"),
         )
-        yield Sparkline([], id="sparkline")
+        yield Label("", id="sparkline")
+
+    def on_resize(self) -> None:
+        """Resize sparkline buffer to fill available width."""
+        try:
+            label = self.query_one("#sparkline", Label)
+            new_width = label.size.width
+            if new_width > 0 and new_width != self._sparkline_size:
+                self._sparkline_size = new_width
+                # Trim data if buffer shrunk
+                if len(self._sparkline_data) > new_width:
+                    self._sparkline_data = self._sparkline_data[-new_width:]
+        except NoMatches:
+            pass
+
+    def _render_sparkline(self) -> str:
+        """Render sparkline as Unicode block characters."""
+        if not self._sparkline_data:
+            return ""
+
+        # Scale values 0-100 to bar indices 0-8
+        chars = []
+        for val in self._sparkline_data:
+            bar_idx = int(val / 100 * 8)
+            bar_idx = max(0, min(8, bar_idx))
+            chars.append(self.BARS[bar_idx])
+
+        return "".join(chars)
 
     def watch_score(self, score: int) -> None:
         """Update gauge when score changes."""
@@ -209,7 +244,10 @@ class HeaderBar(Static):
         filled = self.score // 5
         bar = "█" * filled + "░" * (20 - filled)
         tier = get_tier_name(self.score)
-        gauge_left.update(f"STRESS {bar} {self.score:3d}/100   {tier}   {self._timestamp}")
+        uptime = format_duration(time.time() - self._start_time)
+        gauge_left.update(
+            f"STRESS {bar} {self.score:3d}/100   {tier}   {self._timestamp} ({uptime})"
+        )
         gauge_right.update(f"{self._process_count} procs   #{self._sample_count}")
 
     def update_from_sample(
@@ -218,7 +256,6 @@ class HeaderBar(Static):
         process_count: int,
         sample_count: int,
         timestamp: str,
-        history: list[float] | None = None,
     ) -> None:
         """Update header from a sample."""
         self._timestamp = timestamp
@@ -226,21 +263,21 @@ class HeaderBar(Static):
         self._sample_count = sample_count
         self.connected = True
 
-        if history is not None:
-            self._sparkline_data = list(history)
-        else:
-            self._sparkline_data.append(float(score))
-            if len(self._sparkline_data) > 30:
-                self._sparkline_data = self._sparkline_data[-30:]
+        # Append to sparkline buffer and trim to current width
+        self._sparkline_data.append(score)
+        if len(self._sparkline_data) > self._sparkline_size:
+            self._sparkline_data = self._sparkline_data[-self._sparkline_size :]
 
+        # Update sparkline label with our own rendering
         try:
-            sparkline = self.query_one("#sparkline", Sparkline)
-            sparkline.data = self._sparkline_data
+            sparkline_label = self.query_one("#sparkline", Label)
+            sparkline_label.update(self._render_sparkline())
         except NoMatches:
             pass
 
-        # Setting score triggers _update_gauge which updates all labels
+        # Update score and always refresh gauge
         self.score = score
+        self._update_gauge()
 
     def set_disconnected(self) -> None:
         """Show disconnected state."""
@@ -275,7 +312,7 @@ class ProcessTable(Static):
         layout: grid;
         grid-size: 9;
         /* Column widths: trend, process(flex), score, cpu, mem, pgin, csw, state, why(flex) */
-        grid-columns: 3 3fr 7 6 6 6 8 10 2fr;
+        grid-columns: 3 1fr 7 6 6 6 8 10 2fr;
     }
 
     ProcessTable .header {
@@ -901,17 +938,8 @@ class PauseMonitorApp(App):
         """Handle messages from daemon socket."""
         msg_type = data.get("type", "sample")
 
+        # Ignore initial_state — TUI builds sparkline from streaming samples
         if msg_type == "initial_state":
-            # Initial connection: populate sparkline with history
-            history = data.get("history", [])
-            if history:
-                try:
-                    header = self.query_one("#header", HeaderBar)
-                    header._sparkline_data = [float(s) for s in history]
-                    sparkline = header.query_one("#sparkline", Sparkline)
-                    sparkline.data = header._sparkline_data
-                except NoMatches:
-                    pass
             return
 
         # Regular sample message
