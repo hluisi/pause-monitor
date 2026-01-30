@@ -14,10 +14,12 @@ class RetentionConfig:
 
 
 @dataclass
-class SentinelConfig:
-    """Ring buffer configuration."""
+class SystemConfig:
+    """System monitoring configuration."""
 
-    ring_buffer_seconds: int = 60  # Seconds of samples to keep in ring buffer
+    ring_buffer_size: int = 60  # Number of samples to keep in ring buffer
+    collector: str = "libproc"  # "libproc" (native API) or "top" (subprocess)
+    sample_interval: float = 0.2  # Seconds between samples (0.2 = 5Hz)
 
 
 @dataclass
@@ -178,7 +180,7 @@ class Config:
     """Main configuration container."""
 
     retention: RetentionConfig = field(default_factory=RetentionConfig)
-    sentinel: SentinelConfig = field(default_factory=SentinelConfig)
+    system: SystemConfig = field(default_factory=SystemConfig)
     bands: BandsConfig = field(default_factory=BandsConfig)
     scoring: ScoringConfig = field(default_factory=ScoringConfig)
     rogue_selection: RogueSelectionConfig = field(default_factory=RogueSelectionConfig)
@@ -226,7 +228,7 @@ class Config:
         doc = tomlkit.document()
         sections = [
             "retention",
-            "sentinel",
+            "system",
             "bands",
             "scoring",
             "rogue_selection",
@@ -256,23 +258,23 @@ class Config:
             raise ValueError(f"Failed to parse config file {path}: {e}") from e
 
         retention_data = data.get("retention", {})
-        sentinel_data = data.get("sentinel", {})
+        system_data = data.get("system", {})
         bands_data = data.get("bands", {})
         scoring_data = data.get("scoring", {})
         rogue_data = data.get("rogue_selection", {})
 
         # Use dataclass defaults for any missing values
         ret_defaults = defaults.retention
-        sen_defaults = defaults.sentinel
+        sys_defaults = defaults.system
 
         return cls(
             retention=RetentionConfig(
                 events_days=retention_data.get("events_days", ret_defaults.events_days),
             ),
-            sentinel=SentinelConfig(
-                ring_buffer_seconds=sentinel_data.get(
-                    "ring_buffer_seconds", sen_defaults.ring_buffer_seconds
-                ),
+            system=SystemConfig(
+                ring_buffer_size=system_data.get("ring_buffer_size", sys_defaults.ring_buffer_size),
+                collector=system_data.get("collector", sys_defaults.collector),
+                sample_interval=system_data.get("sample_interval", sys_defaults.sample_interval),
             ),
             bands=_load_bands_config(bands_data),
             scoring=_load_scoring_config(scoring_data),

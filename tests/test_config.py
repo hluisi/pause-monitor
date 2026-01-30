@@ -7,9 +7,9 @@ from pause_monitor.config import (
     NormalizationConfig,
     RetentionConfig,
     ScoringWeights,
-    SentinelConfig,
     StateMultipliers,
     StateSelection,
+    SystemConfig,
 )
 
 
@@ -89,11 +89,11 @@ def test_config_load_missing_file_returns_defaults(tmp_path):
     assert config.bands.medium == defaults.bands.medium
 
 
-def test_sentinel_config_defaults():
-    """SentinelConfig has correct defaults."""
-    config = SentinelConfig()
-    # Just verify it's set to something reasonable (positive seconds)
-    assert config.ring_buffer_seconds > 0
+def test_system_config_defaults():
+    """SystemConfig has correct defaults."""
+    config = SystemConfig()
+    # Just verify it's set to something reasonable (positive size)
+    assert config.ring_buffer_size > 0
 
 
 def test_bands_config_has_ordered_thresholds():
@@ -105,12 +105,12 @@ def test_bands_config_has_ordered_thresholds():
     assert bands.high < bands.critical
 
 
-def test_config_loads_sentinel_section(tmp_path):
-    """Config loads [sentinel] section from TOML."""
+def test_config_loads_system_section(tmp_path):
+    """Config loads [system] section from TOML."""
     config_file = tmp_path / "config.toml"
     config_file.write_text("""
-[sentinel]
-ring_buffer_seconds = 120
+[system]
+ring_buffer_size = 120
 
 [bands]
 medium = 15
@@ -120,31 +120,31 @@ critical = 70
 """)
 
     config = Config.load(config_file)
-    assert config.sentinel.ring_buffer_seconds == 120
+    assert config.system.ring_buffer_size == 120
     assert config.bands.medium == 15
     assert config.bands.elevated == 30
 
 
-def test_config_save_includes_sentinel_section(tmp_path):
-    """Config.save() writes sentinel and bands sections."""
+def test_config_save_includes_system_section(tmp_path):
+    """Config.save() writes system and bands sections."""
     config_path = tmp_path / "config.toml"
     config = Config()
-    config.sentinel.ring_buffer_seconds = 45
+    config.system.ring_buffer_size = 45
     config.bands.medium = 25
     config.save(config_path)
 
     content = config_path.read_text()
-    assert "ring_buffer_seconds = 45" in content
+    assert "ring_buffer_size = 45" in content
     assert "medium = 25" in content
 
 
-def test_full_config_includes_sentinel_and_bands():
-    """Full Config object has sentinel and bands fields."""
+def test_full_config_includes_system_and_bands():
+    """Full Config object has system and bands fields."""
     config = Config()
-    assert hasattr(config, "sentinel")
+    assert hasattr(config, "system")
     assert hasattr(config, "bands")
     # Verify fields exist and match their respective config defaults
-    assert config.sentinel.ring_buffer_seconds == SentinelConfig().ring_buffer_seconds
+    assert config.system.ring_buffer_size == SystemConfig().ring_buffer_size
     assert config.bands.medium == BandsConfig().medium
 
 

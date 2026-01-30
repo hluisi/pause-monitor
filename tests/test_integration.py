@@ -240,11 +240,12 @@ async def test_full_collection_to_socket_cycle(monkeypatch, short_tmp_path, samp
         # Connect a client
         reader, writer = await asyncio.open_unix_connection(str(socket_path))
 
-        # Read initial state (empty buffer)
-        initial_data = await asyncio.wait_for(reader.readline(), timeout=2.0)
-        initial_msg = json.loads(initial_data.decode())
-        assert initial_msg["type"] == "initial_state"
-        assert initial_msg["samples"] == []
+        # Wait for client to be registered
+        deadline = asyncio.get_event_loop().time() + 1.0
+        while not server.has_clients:
+            if asyncio.get_event_loop().time() > deadline:
+                raise TimeoutError("Client not registered")
+            await asyncio.sleep(0.01)
 
         # Collect samples
         samples = await collector.collect()

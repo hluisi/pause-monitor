@@ -2,7 +2,6 @@
 """Tests for TUI socket connection logic."""
 
 import asyncio
-import json
 import tempfile
 from contextlib import ExitStack
 from pathlib import Path
@@ -45,16 +44,8 @@ async def test_tui_connects_via_socket_when_daemon_running(short_tmp_path: Path)
         _patch_socket_path(stack, short_tmp_path)
         socket_path = short_tmp_path / "daemon.sock"
 
-        # Create a mock server that sends initial state (new format)
+        # Create a mock server that accepts connections
         async def handle_client(reader, writer):
-            msg = {
-                "type": "initial_state",
-                "samples": [],
-                "max_score": 15,
-                "sample_count": 0,
-            }
-            writer.write((json.dumps(msg) + "\n").encode())
-            await writer.drain()
             # Wait for client to disconnect (EOF)
             await reader.read()
             writer.close()
@@ -187,78 +178,3 @@ def test_tui_handle_socket_data_updates_widgets():
 
     # Verify activity log was checked for transitions
     mock_activity.check_transitions.assert_called_once()
-
-
-def test_tui_handle_initial_state():
-    """TUI should handle initial_state message from daemon (new format)."""
-    from pause_monitor.tui.app import PauseMonitorApp
-
-    config = Config()
-    app = PauseMonitorApp(config)
-
-    # Create mock widgets
-    mock_header = MagicMock()
-    mock_process_table = MagicMock()
-    mock_activity = MagicMock()
-    mock_tracked = MagicMock()
-
-    def mock_query_one(selector, widget_type=None):
-        if selector == "#header":
-            return mock_header
-        elif selector == "#main-area":
-            return mock_process_table
-        elif selector == "#activity":
-            return mock_activity
-        elif selector == "#tracked":
-            return mock_tracked
-        raise ValueError(f"Unknown selector: {selector}")
-
-    app.query_one = mock_query_one
-
-    # Initial state message (new format)
-    data = {
-        "type": "initial_state",
-        "samples": [
-            {
-                "timestamp": "2026-01-24T12:00:00",
-                "elapsed_ms": 45,
-                "process_count": 400,
-                "max_score": 25,
-                "rogues": [
-                    {
-                        "pid": 1,
-                        "command": "init",
-                        "cpu": 0.1,
-                        "state": "idle",
-                        "mem": 1000,
-                        "cmprs": 0,
-                        "pageins": 0,
-                        "csw": 1,
-                        "sysbsd": 0,
-                        "threads": 1,
-                        "score": 25,
-                        "categories": [],
-                    },
-                ],
-            },
-        ],
-        "max_score": 25,
-        "sample_count": 1,
-    }
-
-    app._handle_socket_data(data)
-
-    # Verify header was updated with max_score
-    mock_header.update_from_sample.assert_called_once()
-    call_args = mock_header.update_from_sample.call_args
-    assert call_args[0][0] == 25  # max_score
-    assert call_args[0][1] == 400  # process_count
-    assert call_args[0][2] == 1  # sample_count
-    # history should be passed as 5th argument
-    history_arg = call_args[0][4] if len(call_args[0]) > 4 else call_args[1].get("history")
-    assert history_arg == [25]  # History from samples
-
-    # Verify process table was updated with rogues from last sample
-    mock_process_table.update_rogues.assert_called_once()
-    rogues_arg = mock_process_table.update_rogues.call_args[0][0]
-    assert rogues_arg == data["samples"][-1]["rogues"]

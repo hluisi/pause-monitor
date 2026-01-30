@@ -12,7 +12,7 @@ import structlog
 from termcolor import colored
 
 from pause_monitor.boottime import get_boot_time
-from pause_monitor.collector import TopCollector
+from pause_monitor.collector import LibprocCollector, TopCollector
 from pause_monitor.config import Config
 from pause_monitor.forensics import ForensicsCapture
 from pause_monitor.ringbuffer import RingBuffer
@@ -47,11 +47,14 @@ class Daemon:
         self.config = config
         self.state = DaemonState()
 
-        # TopCollector for per-process sampling at 1Hz
-        self.collector = TopCollector(config)
+        # Select collector based on config (libproc = native API, top = subprocess)
+        if config.system.collector == "libproc":
+            self.collector = LibprocCollector(config)
+        else:
+            self.collector = TopCollector(config)
 
-        # Initialize ring buffer: ring_buffer_seconds samples (1Hz loop)
-        max_samples = config.sentinel.ring_buffer_seconds
+        # Initialize ring buffer
+        max_samples = config.system.ring_buffer_size
         self.ring_buffer = RingBuffer(max_samples=max_samples)
 
         # Boot time for process tracking (stable across daemon restarts)
@@ -157,7 +160,7 @@ class Daemon:
         bands = self.config.bands
         log.info(
             "daemon_config",
-            ring_buffer_seconds=self.config.sentinel.ring_buffer_seconds,
+            ring_buffer_size=self.config.system.ring_buffer_size,
             tracking_threshold=bands.tracking_threshold,
             tracking_band=bands.tracking_band,
             band_thresholds=f"med={bands.medium}/elev={bands.elevated}/high={bands.high}/crit={bands.critical}",
@@ -320,14 +323,16 @@ class Daemon:
                     )
 
     async def _main_loop(self) -> None:
-        """Main 1Hz loop collecting process samples.
+        """Main loop collecting process samples at configured interval.
 
         Each iteration:
-        1. Collect samples via TopCollector
+        1. Collect samples via LibprocCollector (or TopCollector)
         2. Update per-process tracking with rogue processes (triggers forensics on band entry)
         3. Push to ring buffer
         4. Broadcast to socket for TUI
+        5. Sleep for remaining interval to maintain sample rate
 
+        Sample rate is controlled by config.system.sample_interval (default 0.2s = 5Hz).
         The loop runs until shutdown event is set.
         """
         # Heartbeat tracking (log every 60 samples = ~1 minute)
@@ -339,9 +344,13 @@ class Daemon:
         # Track rogue selection churn (PIDs entering/leaving selection)
         previous_rogues: dict[int, str] = {}  # pid -> command
 
+        sample_interval = self.config.system.sample_interval
+
         while not self._shutdown_event.is_set():
             try:
-                # Collect samples (this takes ~1 second due to top -l 2)
+                iteration_start = asyncio.get_event_loop().time()
+
+                # Collect samples
                 samples = await self.collector.collect()
 
                 if self._shutdown_event.is_set():
@@ -434,6 +443,16 @@ class Daemon:
                     heartbeat_count = 0
                     heartbeat_max_score = 0
                     heartbeat_score_sum = 0
+
+                # Sleep for remaining interval (maintains consistent sample rate)
+                elapsed = asyncio.get_event_loop().time() - iteration_start
+                sleep_time = sample_interval - elapsed
+                if sleep_time > 0:
+                    try:
+                        await asyncio.wait_for(self._shutdown_event.wait(), timeout=sleep_time)
+                        break  # Shutdown requested during sleep
+                    except asyncio.TimeoutError:
+                        pass  # Normal timeout, continue to next sample
 
             except asyncio.CancelledError:
                 log.info("main_loop_cancelled")

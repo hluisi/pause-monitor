@@ -86,44 +86,6 @@ async def test_socket_server_starts_and_stops(short_tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_socket_server_streams_initial_state_to_client(short_tmp_path):
-    """SocketServer should send initial ring buffer state on connect."""
-    socket_path = short_tmp_path / "test.sock"
-    buffer = RingBuffer(max_samples=10)
-
-    # Add samples using ProcessSamples
-    samples = make_test_samples(
-        max_score=75,
-        rogues=[make_test_process_score(pid=123, command="heavy", score=75)],
-    )
-    buffer.push(samples)
-
-    server = SocketServer(socket_path=socket_path, ring_buffer=buffer)
-    await server.start()
-
-    try:
-        # Connect as client
-        reader, writer = await asyncio.open_unix_connection(str(socket_path))
-
-        # Read first message (initial state)
-        data = await asyncio.wait_for(reader.readline(), timeout=2.0)
-        message = json.loads(data.decode())
-
-        assert message["type"] == "initial_state"
-        assert "samples" in message
-        assert len(message["samples"]) == 1
-        assert message["samples"][0]["max_score"] == 75
-        assert len(message["samples"][0]["rogues"]) == 1
-        assert message["samples"][0]["rogues"][0]["pid"] == 123
-        assert message["samples"][0]["rogues"][0]["command"] == "heavy"
-
-        writer.close()
-        await writer.wait_closed()
-    finally:
-        await server.stop()
-
-
-@pytest.mark.asyncio
 async def test_socket_server_broadcast_to_clients(short_tmp_path):
     """SocketServer.broadcast() should push ProcessSamples data to all connected clients."""
     socket_path = short_tmp_path / "test.sock"
@@ -136,8 +98,8 @@ async def test_socket_server_broadcast_to_clients(short_tmp_path):
         # Connect as client
         reader, writer = await asyncio.open_unix_connection(str(socket_path))
 
-        # Read initial state (empty buffer)
-        await asyncio.wait_for(reader.readline(), timeout=2.0)
+        # Wait for client to be registered
+        await wait_until(lambda: server.has_clients)
 
         # Broadcast a sample with ProcessSamples
         samples = make_test_samples(
@@ -183,8 +145,9 @@ async def test_socket_server_has_clients_property(short_tmp_path):
 
         # Connect client
         reader, writer = await asyncio.open_unix_connection(str(socket_path))
-        # Client is registered before initial state is sent, so reading it confirms registration
-        await asyncio.wait_for(reader.readline(), timeout=2.0)
+
+        # Wait for client to be registered
+        await wait_until(lambda: server.has_clients)
 
         assert server.has_clients
 
@@ -249,9 +212,8 @@ async def test_socket_server_multiple_clients(short_tmp_path):
         reader1, writer1 = await asyncio.open_unix_connection(str(socket_path))
         reader2, writer2 = await asyncio.open_unix_connection(str(socket_path))
 
-        # Drain initial state messages
-        await asyncio.wait_for(reader1.readline(), timeout=2.0)
-        await asyncio.wait_for(reader2.readline(), timeout=2.0)
+        # Wait for both clients to be registered
+        await wait_until(lambda: len(server._clients) == 2)
 
         # Broadcast with ProcessSamples
         samples = make_test_samples(max_score=65)

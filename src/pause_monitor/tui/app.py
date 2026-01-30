@@ -203,7 +203,7 @@ class HeaderBar(Static):
 
         if not self.connected:
             gauge_left.update("STRESS ░░░░░░░░░░░░░░░░░░░░ ---/100   DISCONNECTED")
-            gauge_right.update("Run: sudo pause-monitor daemon")
+            gauge_right.update("Run: pause-monitor daemon")
             return
 
         filled = self.score // 5
@@ -826,7 +826,7 @@ class PauseMonitorApp(App):
         except FileNotFoundError:
             self._set_disconnected("socket not found")
             self.notify(
-                "Daemon not running. Start with: sudo pause-monitor daemon",
+                "Daemon not running. Start with: pause-monitor daemon",
                 severity="warning",
             )
         except PermissionError as e:
@@ -867,39 +867,22 @@ class PauseMonitorApp(App):
             pass
 
     def _handle_socket_data(self, data: dict[str, Any]) -> None:
-        """Handle real-time data from daemon socket."""
-        msg_type = data.get("type", "sample")
+        """Handle real-time sample from daemon socket."""
         now = time.time()
 
-        if msg_type == "initial_state":
-            max_score = data.get("max_score", 0)
-            sample_count = data.get("sample_count", 0)
-            samples = data.get("samples", [])
-            history = [float(s.get("max_score", 0)) for s in samples]
-            rogues = samples[-1].get("rogues", []) if samples else []
-            process_count = samples[-1].get("process_count", 0) if samples else 0
-            timestamp_str = datetime.now().strftime("%H:%M:%S")
+        max_score = data.get("max_score", 0)
+        sample_count = data.get("sample_count", 0)
+        rogues = data.get("rogues", [])
+        process_count = data.get("process_count", 0)
+        raw_timestamp = data.get("timestamp", "")
+        timestamp_str = extract_time(raw_timestamp)
 
-            try:
-                self.query_one("#header", HeaderBar).update_from_sample(
-                    max_score, process_count, sample_count, timestamp_str, history
-                )
-            except NoMatches:
-                pass
-        else:
-            max_score = data.get("max_score", 0)
-            sample_count = data.get("sample_count", 0)
-            rogues = data.get("rogues", [])
-            process_count = data.get("process_count", 0)
-            raw_timestamp = data.get("timestamp", "")
-            timestamp_str = extract_time(raw_timestamp)
-
-            try:
-                self.query_one("#header", HeaderBar).update_from_sample(
-                    max_score, process_count, sample_count, timestamp_str
-                )
-            except NoMatches:
-                pass
+        try:
+            self.query_one("#header", HeaderBar).update_from_sample(
+                max_score, process_count, sample_count, timestamp_str
+            )
+        except NoMatches:
+            pass
 
         # Update process table
         try:

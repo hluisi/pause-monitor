@@ -1,5 +1,5 @@
 # src/pause_monitor/socket_server.py
-"""Unix socket server for streaming ring buffer data to TUI.
+"""Unix socket server for real-time streaming to TUI.
 
 PUSH-BASED DESIGN (per Design Simplifications):
 - Main loop calls broadcast() after each sample
@@ -29,10 +29,7 @@ class SocketServer:
     - Main loop calls broadcast() after each sample
     - No internal polling loop - data flows directly from daemon
     - Protocol: newline-delimited JSON messages
-
-    Message Types:
-    - initial_state: Sent on client connect with recent buffer samples
-    - sample: Sent via broadcast() with current ProcessSamples
+    - Message type: 'sample' with current ProcessSamples
     """
 
     def __init__(
@@ -68,7 +65,7 @@ class SocketServer:
             path=str(self.socket_path),
         )
 
-        # Make socket accessible to non-root users (daemon runs as root, TUI as user)
+        # Make socket world-accessible so TUI can connect
         os.chmod(self.socket_path, stat.S_IRWXU | stat.S_IRWXG | stat.S_IRWXO)
 
         self._running = True
@@ -140,13 +137,6 @@ class SocketServer:
         log.info("socket_client_connected count=%d", len(self._clients))
 
         try:
-            # Send initial state from ring buffer
-            try:
-                await self._send_initial_state(writer)
-            except Exception:
-                log.debug("socket_initial_state_failed")
-                return  # Client disconnected, cleanup happens in finally
-
             # Keep connection alive until client disconnects
             # Client just needs to stay connected; data comes via broadcast()
             while self._running:
@@ -166,28 +156,3 @@ class SocketServer:
             except Exception:
                 pass
             log.info("socket_client_disconnected count=%d", len(self._clients))
-
-    async def _send_initial_state(self, writer: asyncio.StreamWriter) -> None:
-        """Send current ring buffer state to a newly connected client."""
-        ring_samples = self.ring_buffer.samples
-        latest = ring_samples[-1] if ring_samples else None
-
-        message = {
-            "type": "initial_state",
-            "samples": [
-                {
-                    "timestamp": s.samples.timestamp.isoformat(),
-                    "elapsed_ms": s.samples.elapsed_ms,
-                    "process_count": s.samples.process_count,
-                    "max_score": s.samples.max_score,
-                    "rogues": [p.to_dict() for p in s.samples.rogues],
-                }
-                for s in ring_samples[-30:]  # Last 30 samples
-            ],
-            "max_score": latest.samples.max_score if latest else 0,
-            "sample_count": len(ring_samples),
-        }
-
-        data = json.dumps(message).encode() + b"\n"
-        writer.write(data)
-        await writer.drain()

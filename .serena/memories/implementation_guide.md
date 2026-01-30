@@ -1,59 +1,63 @@
 # Implementation Guide
 
-> **Phase 8 COMPLETE (2026-01-29).** Per-process band tracking with ProcessTracker; SCHEMA_VERSION=9.
+### LibprocCollector (Default)
 
-**Last updated:** 2026-01-29
+**Data source:** Direct syscalls to `/usr/lib/libproc.dylib` via ctypes
 
-This document describes the actual implementation. For design spec, see `design_spec`. For gaps, see `unimplemented_features`.
+**Module:** `libproc.py` — ctypes bindings for libproc.dylib
 
-## Architecture
+**APIs used:**
+- `proc_pid_rusage(RUSAGE_INFO_V4)` — CPU time, memory, disk I/O, energy, wakeups
+- `proc_pidinfo(PROC_PIDTASKINFO)` — Context switches, syscalls, threads
+- `proc_pidinfo(PROC_PIDTBSDINFO)` — Process state, command name
+- `proc_listallpids()` — List all PIDs
+- `mach_timebase_info()` — Apple Silicon time unit conversion
 
-```
-                              +-----------------+
-                              |   CLI (cli.py)  |
-                              +--------+--------+
-                                       |
-          +----------------------------+-----------------------------+
-          |                            |                             |
-          v                            v                             v
-+------------------+        +-------------------+         +------------------+
-| daemon command   |        |  status/events/   |         |  tui command     |
-|                  |        |  history/prune    |         |                  |
-+--------+---------+        +--------+----------+         +--------+---------+
-         |                           |                             |
-         v                           |                             v
-+------------------+                 |                   +------------------+
-|     Daemon       |<--------------->+------------------>|  PauseMonitorApp |
-|  (daemon.py)     |                 |                   |   (tui/app.py)   |
-+--------+---------+                 |                   +--------+---------+
-         |                           |                             |
-         |  top command              |  SQLite                     |  Unix socket
-         |  (1Hz)                    |  (events only)              |  (real-time)
-         v                           v                             v
-+------------------+        +------------------+          +------------------+
-|   TopCollector   |        |     Storage      |          |   SocketClient   |
-|  (collector.py)  |        |   (storage.py)   |          | (socket_client)  |
-+------------------+        +------------------+          +------------------+
-         |                           ^                             ^
-         | ProcessSamples            |                             |
-         v                           |                             |
-+------------------+                 |                   +------------------+
-|  ProcessTracker  |-----------------+------------------>|   SocketServer   |
-|   (tracker.py)   |                                     | (socket_server)  |
-+------------------+                                     +------------------+
-         |
-         v
-+------------------+        +------------------+
-|   RingBuffer     |        |   Forensics      |
-| (ringbuffer.py)  |------->|  (forensics.py)  |
-+------------------+        +------------------+
+**Benefits over TopCollector:**
+- ~10-50ms per collection vs ~2s for top
+- No subprocess spawn overhead
+- No 50% data waste (maintains state for CPU% deltas)
+- Access to more metrics (disk I/O, energy, wakeups, instructions, cycles)
+
+**CPU% calculation:**
+- Stores previous CPU time per PID in `_prev_samples` dict
+- First sample: all processes show 0% CPU (no baseline)
+- Subsequent samples: CPU% = (delta_cpu_time / delta_wall_time) × 100
+
+**Apple Silicon note:**
+- CPU times from rusage are in mach_absolute_time units
+- Use `mach_timebase_info()` to convert: `(abstime × numer) // denom`
+- Intel: (1, 1) — already nanoseconds
+- Apple Silicon: (125, 3) — ~41.67ns per tick
+
+### TopCollector (Legacy)
+
+Kept for backwards compatibility. Use `collector = "top"` in config to enable.
+
+**Problems:**
+1. Subprocess spawn overhead every 2 seconds
+2. First sample always invalid (CPU% needs delta) — wastes 50% of work
+3. Text parsing is fragile
+4. Missing: disk I/O, energy, instructions, cycles, wakeups, GPU
+
+### Configuration
+
+```toml
+[sentinel]
+collector = "libproc"  # or "top" for legacy
 ```
 
----
+See `libproc_and_iokit_research` memory for complete API documentation
 
-## Module: collector.py
+**Data source:** Direct syscalls to `/usr/lib/libproc.dylib` via ctypes
 
-**Purpose:** Per-process data collection via `top` at 1Hz.
+**APIs used:**
+- `proc_pid_rusage(RUSAGE_INFO_V4)` — CPU time, memory, disk I/O, energy, wakeups
+- `proc_pidinfo(PROC_PIDTASKINFO)` — Context switches, syscalls, threads
+- `sysctl(KERN_PROC)` — Process state, listing
+- IOKit (optional) — Per-process GPU time
+
+**See `libproc_and_iokit_research` memory for complete API documentation.**
 
 ### Dataclasses
 
@@ -63,6 +67,7 @@ This document describes the actual implementation. For design spec, see `design_
 - `score` (0-100 weighted)
 - `categories` (frozenset of selection reasons)
 - `captured_at` (float timestamp)
+- Future: `disk_read`, `disk_write`, `energy`, `instructions`, `cycles`, `gpu_time`
 - Methods: `to_dict()`, `from_dict()`
 
 **ProcessSamples** — Collection from one sample:
@@ -70,17 +75,6 @@ This document describes the actual implementation. For design spec, see `design_
 - `max_score` (highest rogue score)
 - `rogues` (list of ProcessScore)
 - Methods: `to_json()`, `from_json()`
-
-### TopCollector
-
-Command: `top -l 2 -s 1 -stats pid,command,cpu,state,mem,cmprs,threads,csw,sysbsd,pageins`
-
-Methods:
-- `collect()` → ProcessSamples
-- `_parse_top_output(raw)` → list of process dicts (uses **second** sample for accurate deltas)
-- `_select_rogues(processes)` → filtered list based on config
-- `_score_process(proc)` → weighted score 0-100
-- `_normalize_state(state)` → 0-1 multiplier
 
 ### Scoring Formula
 
@@ -113,7 +107,7 @@ Tracks runtime state:
 ### Daemon
 
 **Key attributes:**
-- `collector` — TopCollector
+- `collector` — LibprocCollector (default) or TopCollector (legacy)
 - `ring_buffer` — RingBuffer
 - `tracker` — ProcessTracker (manages per-process event lifecycle)
 - `boot_time` — System boot time (via `get_boot_time()`)
@@ -216,25 +210,6 @@ Uses `sysctl -n kern.boottime` and parses `sec = NNNN` from output.
 - `id`, `captured_at`, `data` (JSON ProcessSamples)
 - Pruned after 7 days
 
-### Key Functions
-
-**Process event CRUD:**
-- `create_process_event(...)` → event_id
-- `get_open_events(conn, boot_time)` → list of dicts
-- `get_process_events(conn, boot_time, time_cutoff, limit)` → list of dicts
-- `get_process_event_detail(conn, event_id)` → dict or None
-- `close_process_event(conn, event_id, exit_time)`
-- `update_process_event_peak(conn, event_id, peak_score, peak_band, peak_snapshot)`
-- `insert_process_snapshot(conn, event_id, snapshot_type, snapshot)`
-
-**System samples:**
-- `insert_system_sample(conn, data)`
-- `get_last_system_sample_time(conn)` → float or None
-- `prune_system_samples(conn, days)` → deleted count
-
-**Pruning:**
-- `prune_old_data(conn, events_days, system_samples_days)` → (events_deleted, samples_deleted)
-
 ---
 
 ## Module: config.py
@@ -258,7 +233,6 @@ Uses `sysctl -n kern.boottime` and parses `sec = NNNN` from output.
 - `forensics_band` = "high" (threshold for forensics capture)
 - `checkpoint_interval` = 30 (seconds between checkpoint snapshots)
 - `forensics_cooldown` = 60 (seconds between score-based forensics)
-- Methods: `get_band(score)`, `get_threshold(band)`, `tracking_threshold`, `forensics_threshold`
 
 ### Config Paths
 - config: `~/.config/pause-monitor/config.toml`
@@ -273,7 +247,7 @@ Uses `sysctl -n kern.boottime` and parses `sec = NNNN` from output.
 **Purpose:** Fixed-size circular buffer for recent samples.
 
 ### Classes
-- `RingSample` — ProcessSamples wrapper (no tier field anymore)
+- `RingSample` — ProcessSamples wrapper
 - `BufferContents` — Immutable snapshot with samples list
 - `RingBuffer` — deque(maxlen=30)
 
@@ -292,27 +266,11 @@ Newline-delimited JSON over Unix socket.
 - `initial_state` — Ring buffer state on connect (samples list, max_score, sample_count)
 - `sample` — ProcessSamples data per sample
 
-**SocketServer methods:**
-- `start()`, `stop()`
-- `broadcast(samples)` — Push to all clients
-- `has_clients` property — For main loop optimization
-
 ---
 
 ## Module: forensics.py
 
 **Purpose:** Diagnostic capture on pause or high score.
-
-### ForensicsCapture
-- `write_metadata()`, `write_process_snapshot()`
-- `write_ring_buffer()` — Serializes ProcessSamples
-- `write_text_artifact()`, `write_binary_artifact()`
-
-### Functions
-- `create_event_dir()` — Create timestamped event directory
-- `capture_spindump()`, `capture_tailspin()`, `capture_system_logs()`
-- `identify_culprits(contents)` — Top rogues from buffer
-- `run_full_capture(capture, ...)` — Run all heavy captures
 
 ### Triggers
 - **Pause detection:** When timing ratio exceeds threshold
@@ -330,42 +288,6 @@ Newline-delimited JSON over Unix socket.
 - CLI is for investigation; TUI is for "what's happening now"
 - Single-screen dashboard — no page switching
 
-### Widgets
-
-**HeaderBar** — Score gauge + 30-second sparkline + stats:
-- Reactive properties: `score`, `connected`
-- Shows: STRESS bar, score/100, tier name, timestamp, process count, sample count
-
-**ProcessTable** — Rogue processes with full metrics:
-- CSS Grid layout with 9 columns (trend, process, score, cpu, mem, pgin, csw, state, why)
-- 5 score bands with colors: critical (red), high (orange), elevated (yellow), medium (default), low (green)
-- Decay persistence: processes stay visible 10s after dropping (dimmed)
-- Trend symbols: ▲ escalating, ● steady, ▽ declining, ○ decayed
-
-**TrackedEventsPanel** — Tracked processes (active and historical):
-- Tracks by command name (not PID) to deduplicate
-- Shows: Time, Process, Peak score, Duration, Why (categories), Status
-- Active entries shown first, then history (max 15)
-
-**ActivityLog** — System tier transitions:
-- Logs: CRITICAL/ELEVATED/NORMAL transitions with timestamps
-- Max 15 entries
-
-**PauseMonitorApp** — Main app:
-- Connects to daemon via SocketClient
-- Handles initial_state and sample messages
-- Updates all widgets from socket data
-
-### Data Flow
-```
-Daemon (1Hz) → Socket → TUI
-                 │
-                 ├─→ HeaderBar.update_from_sample(...)
-                 ├─→ ProcessTable.update_rogues(rogues, timestamp)
-                 ├─→ TrackedEventsPanel.update_tracking(rogues, timestamp)
-                 └─→ ActivityLog.check_transitions(score)
-```
-
 **No database queries in TUI.** Everything comes from socket.
 
 ---
@@ -373,16 +295,12 @@ Daemon (1Hz) → Socket → TUI
 ## Deleted Components
 
 These no longer exist:
-- `sentinel.py` — TierManager replaced by ProcessTracker (band-based, not tier-based)
+- `sentinel.py` — TierManager replaced by ProcessTracker
 - `stress.py` — Replaced by per-process scoring in collector.py
-- `StressBreakdown` — Use ProcessScore.score
-- `PowermetricsStream` — Use TopCollector
+- `PowermetricsStream` — Was replaced by TopCollector, now being replaced by LibprocCollector
 - `TierManager`, `Tier`, `TierAction` enums — Deleted
 - `calculate_stress()` — Deleted
 - `IOBaselineManager` — Deleted
-- `EventsScreen`, `EventDetailScreen`, `HistoryScreen` — TUI simplified to single screen
-- `StressGauge`, `SampleInfoPanel`, `ProcessesPanel`, `EventsTable` — Replaced by new widgets
-- `Event` dataclass in storage — Replaced by dict-based functions
 
 ---
 
@@ -390,7 +308,8 @@ These no longer exist:
 
 | File | Coverage |
 |------|----------|
-| test_collector.py | TopCollector parsing, scoring |
+| test_libproc.py | libproc.dylib bindings |
+| test_collector.py | Collector parsing, scoring, LibprocCollector |
 | test_daemon.py | Daemon state, main loop |
 | test_tracker.py | ProcessTracker band tracking |
 | test_storage.py | Database operations |

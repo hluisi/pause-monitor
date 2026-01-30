@@ -12,7 +12,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from pause_monitor.collector import ProcessSamples, ProcessScore, TopCollector
+from pause_monitor.collector import LibprocCollector, ProcessSamples, ProcessScore, TopCollector
 from pause_monitor.config import Config
 from pause_monitor.daemon import Daemon, DaemonState
 
@@ -532,9 +532,19 @@ async def test_daemon_socket_available_after_start(patched_config_short_paths, m
 # === Task 10: TopCollector Integration Tests ===
 
 
-def test_daemon_uses_top_collector(patched_config_paths):
-    """Daemon should use TopCollector instead of PowermetricsStream."""
+def test_daemon_uses_libproc_collector_by_default(patched_config_paths):
+    """Daemon should use LibprocCollector by default."""
     config = Config.load()
+    daemon = Daemon(config)
+
+    assert hasattr(daemon, "collector")
+    assert isinstance(daemon.collector, LibprocCollector)
+
+
+def test_daemon_uses_top_collector_when_configured(patched_config_paths):
+    """Daemon should use TopCollector when collector='top' is configured."""
+    config = Config.load()
+    config.system.collector = "top"
     daemon = Daemon(config)
 
     assert hasattr(daemon, "collector")

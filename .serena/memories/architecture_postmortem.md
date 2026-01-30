@@ -1,7 +1,10 @@
 # Architecture Post-Mortem
 
 **Written:** 2026-01-29
+**Updated:** 2026-01-29
 **Status:** Current state assessment — action required
+
+> **Update 2026-01-29:** Added collector design flaw. TopCollector spawns `top -l 2` every 2 seconds and throws away 50% of samples. Being replaced with LibprocCollector using native APIs.
 
 ## Executive Summary
 
@@ -85,6 +88,42 @@ Database has minimal data
 
 ---
 
+## The Collector: Worst Offender
+
+The data collection approach is the most egregious example of a bad design decision.
+
+### What TopCollector Does
+
+```
+Every 2 seconds:
+    Spawn subprocess: top -l 2 -s 1 ...
+    Wait ~1 second for top to collect TWO samples
+    Parse text output
+    THROW AWAY sample 1 (invalid CPU%)
+    Use sample 2
+```
+
+### Why This Is Wrong
+
+1. **Spawning subprocess every 2 seconds** — For a forensic monitoring tool, we're adding overhead to the system we're monitoring
+2. **Two samples, use one** — The `-l 2` flag exists because sample 1 has invalid CPU% (no delta). We throw away 50% of collected data.
+3. **Text parsing** — Fragile, slow, when structured APIs exist
+4. **Missing data** — libproc provides disk I/O, energy, instructions, cycles, wakeups, GPU time. Top doesn't expose these.
+
+### The "Clever" Trap
+
+Someone saw that `top -l 2` gives accurate CPU deltas on sample 2 and thought this was clever. It's not. It's solving a startup problem (first sample invalid) by degrading every subsequent collection.
+
+**The right approach:** Run a persistent process, discard the first sample at startup, use all subsequent samples. Or better: use native APIs (libproc) directly with no subprocess at all.
+
+### What Should Have Been Asked
+
+"How do htop, btop, Activity Monitor get their data?" 
+
+Answer: They call `proc_pid_rusage()` and `proc_pidinfo()` directly. No subprocess. No text parsing. More data available.
+
+---
+
 ## Features Added Without Discussion
 
 | Feature | What It Does | Who Asked For It |
@@ -141,6 +180,9 @@ The meta-problem: agents treated implementation details as their domain rather t
 
 ## What Needs to Change
 
+### Replace (Critical)
+- **TopCollector with LibprocCollector** — Use native macOS APIs (see `libproc_and_iokit_research` memory)
+
 ### Remove
 - Pause detection (bands replaced this)
 - Forensics cooldown (or discuss if actually needed)
@@ -162,8 +204,10 @@ The meta-problem: agents treated implementation details as their domain rather t
 
 ## Lessons
 
-1. **Mechanisms are not data.** The ring buffer is a tool to query, not data to save.
+1. **Don't shell out when APIs exist.** Activity Monitor doesn't run `top`. It calls libproc directly. If system tools exist, look at how they work.
+2. **Mechanisms are not data.** The ring buffer is a tool to query, not data to save.
 2. **Ask, don't guess.** When there's ambiguity about where data should go or what features are needed, ask.
 3. **The database exists for a reason.** If we have a database for forensic data, forensic data should be in it.
 4. **Time-based collection doesn't belong in an event-driven system.** Hourly samples contradict the band-threshold model.
 5. **Features need discussion.** Cooldowns, timers, and persistence decisions are design choices, not implementation details.
+6. **"Clever" is a warning sign.** If a solution seems clever, question it. The `top -l 2` trick looked clever but degraded every single collection cycle to solve a one-time startup problem.

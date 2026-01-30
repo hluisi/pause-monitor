@@ -1,6 +1,6 @@
 # Design Specification
 
-> ✅ **Phase 8 COMPLETE (2026-01-29).** Per-process band tracking with ProcessTracker; SCHEMA_VERSION=9.
+> ⚠️ **COLLECTOR REDESIGN PENDING (2026-01-29).** TopCollector to be replaced with LibprocCollector.
 
 **Last updated:** 2026-01-29
 **Primary language:** Python
@@ -16,11 +16,11 @@
 | docs/plans/phase-4-socket-server.md | 2026-01-23 | Archived |
 | docs/plans/phase-5-socket-client-tui.md | 2026-01-23 | Archived |
 | docs/plans/phase-6-cleanup.md | 2026-01-23 | Archived |
-| docs/plans/2026-01-23-per-process-stressor-scoring-design.md | 2026-01-24 | Implemented |
-| docs/plans/2026-01-23-per-process-stressor-scoring-plan.md | 2026-01-24 | Implemented |
+| docs/plans/2026-01-23-per-process-stressor-scoring-design.md | 2026-01-24 | **SUPERSEDED** |
+| docs/plans/2026-01-23-per-process-stressor-scoring-plan.md | 2026-01-24 | **SUPERSEDED** |
 | docs/plans/2026-01-23-tui-redesign-design.md | 2026-01-24 | Active |
-| docs/plans/2026-01-25-per-process-band-tracking-design.md | 2026-01-27 | **Implemented** |
-| docs/plans/2026-01-27-per-process-band-tracking-plan.md | 2026-01-27 | **Implemented** |
+| docs/plans/2026-01-25-per-process-band-tracking-design.md | 2026-01-27 | Implemented |
+| docs/plans/2026-01-27-per-process-band-tracking-plan.md | 2026-01-27 | Implemented |
 
 ## Overview
 
@@ -31,7 +31,7 @@ A **real-time** system health monitoring tool for macOS that tracks down intermi
 2. Historical trending - Track process behavior over days/weeks to spot patterns via ProcessTracker events
 3. Real-time alerting - Know when the system is under stress before it freezes
 
-## Architecture (Current - Phase 8)
+## Architecture (Target)
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -39,7 +39,7 @@ A **real-time** system health monitoring tool for macOS that tracks down intermi
 ├─────────────────────────────────────────────────────────────────┤
 │  ┌──────────────┐    ┌──────────────┐    ┌──────────────┐       │
 │  │    Daemon    │───▶│   Storage    │◀───│     CLI      │       │
-│  │   (1Hz top)  │    │   (SQLite)   │    │   Queries    │       │
+│  │  (libproc)   │    │   (SQLite)   │    │   Queries    │       │
 │  └──────┬───────┘    └──────────────┘    └──────────────┘       │
 │         │                   ▲                                    │
 │         │                   │ process_events                     │
@@ -63,13 +63,45 @@ A **real-time** system health monitoring tool for macOS that tracks down intermi
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-## Components (Current)
+## Components
 
-### TopCollector (collector.py)
-- **Purpose:** Per-process data collection via `top` command at 1Hz
-- **Command:** `top -l 2 -s 1 -stats pid,command,cpu,state,mem,cmprs,threads,csw,sysbsd,pageins`
-- **Output:** `ProcessSamples` with list of `ProcessScore` for rogue processes
-- **Scoring:** 8-factor weighted scoring with multi-category bonus
+### LibprocCollector (collector.py) — TO BE IMPLEMENTED
+
+**Purpose:** Per-process data collection via native macOS APIs (libproc.dylib)
+
+**Why replacing TopCollector:**
+- TopCollector spawns `top -l 2` subprocess every 2 seconds
+- Throws away 50% of samples (first sample has invalid CPU%)
+- Text parsing is fragile and slow
+- Missing metrics: disk I/O, energy, instructions, cycles, GPU
+
+**New approach:**
+- Direct syscalls via ctypes to `/usr/lib/libproc.dylib`
+- `proc_pid_rusage()` for CPU, memory, disk I/O, energy, wakeups
+- `proc_pidinfo()` for context switches, syscalls, threads
+- `sysctl` for process state
+- IOKit for GPU metrics (optional)
+- No subprocess spawning, no text parsing
+
+**Data available (see `libproc_and_iokit_research` memory):**
+- All current metrics (CPU, mem, state, pageins, csw, syscalls, threads)
+- NEW: Disk I/O (bytes read/written)
+- NEW: Energy (billed/serviced)
+- NEW: CPU instructions and cycles
+- NEW: Wakeups (package + interrupt)
+- NEW: QoS breakdown
+- NEW: Peak memory
+- NEW: Per-process GPU time (via IOKit)
+
+### ~~TopCollector (collector.py)~~ — DEPRECATED
+
+> ⚠️ **DO NOT USE.** Being replaced with LibprocCollector.
+
+The old approach used `top -l 2 -s 1` which:
+- Spawns a subprocess every 2 seconds
+- Wastes the first sample (invalid CPU%)
+- Parses text output
+- Misses many available metrics
 
 ### ProcessTracker (tracker.py)
 - **Purpose:** Per-process band tracking with event lifecycle management
@@ -79,7 +111,7 @@ A **real-time** system health monitoring tool for macOS that tracks down intermi
 
 ### Daemon (daemon.py)
 - **Purpose:** Background daemon orchestrating sampling, tracking, and forensics
-- **Loop:** Single 1Hz loop driven by TopCollector
+- **Loop:** Continuous loop driven by collector
 - **Integration:** Feeds ProcessSamples to ProcessTracker for persistence
 - **Forensics:** Triggers spindump/tailspin on high scores or timing anomalies
 
@@ -106,8 +138,6 @@ A **real-time** system health monitoring tool for macOS that tracks down intermi
 
 ## Per-Process Band Tracking (IMPLEMENTED)
 
-> **Status:** Implemented (2026-01-27). See build log for details.
-
 ### Y-Statement Summary
 
 **In the context of** tracking which processes cause system stress and when,
@@ -133,7 +163,7 @@ A **real-time** system health monitoring tool for macOS that tracks down intermi
 
 ---
 
-## Data Models (Current - Phase 8)
+## Data Models
 
 ### ProcessScore (collector.py)
 ```python
@@ -151,7 +181,8 @@ class ProcessScore:
     threads: int
     score: int
     categories: frozenset[str]
-    captured_at: float  # NEW: Self-contained timestamp
+    captured_at: float
+    # Future: disk_read, disk_write, energy, instructions, cycles, gpu_time
 ```
 
 ### ProcessSamples (collector.py)
@@ -165,7 +196,9 @@ class ProcessSamples:
     rogues: list[ProcessScore]
 ```
 
-### process_events table (storage.py, v9)
+### Database Tables (storage.py, v9)
+
+**process_events:**
 | Field | Type | Purpose |
 |-------|------|---------|
 | id | INTEGER PRIMARY KEY | Auto-increment ID |
@@ -179,7 +212,7 @@ class ProcessSamples:
 | peak_score | INTEGER | Highest score during event |
 | peak_snapshot | TEXT | JSON ProcessScore at peak |
 
-### process_snapshots table (storage.py, v9)
+**process_snapshots:**
 | Field | Type | Purpose |
 |-------|------|---------|
 | id | INTEGER PRIMARY KEY | Auto-increment ID |
@@ -187,28 +220,9 @@ class ProcessSamples:
 | snapshot_type | TEXT | 'entry', 'checkpoint', 'exit' |
 | snapshot | TEXT | JSON ProcessScore |
 
-### system_samples table (storage.py, v9)
-| Field | Type | Purpose |
-|-------|------|---------|
-| id | INTEGER PRIMARY KEY | Auto-increment ID |
-| captured_at | REAL | When sample was taken |
-| data | TEXT | JSON ProcessSamples |
-
 ## Configuration
 
 Location: `~/.config/pause-monitor/config.toml`
-
-### Current Config Sections
-
-| Section | Key Options |
-|---------|-------------|
-| `[sampling]` | normal_interval, elevated_interval (legacy, unused) |
-| `[retention]` | samples_days=30, events_days=90 |
-| `[alerts]` | pause_detected, critical_stress, elevated_entered, sound |
-| `[suspects]` | patterns (list — defined but not used) |
-| `[bands]` | low=20, medium=40, elevated=60, high=80, critical=100, tracking_band, forensics_band |
-| `[scoring]` | weights, state_multipliers, normalization |
-| `[rogue_selection]` | Per-category selection config |
 
 ### BandsConfig (config.py)
 ```python
@@ -219,10 +233,10 @@ class BandsConfig:
     elevated: int = 60   # 40-59 = elevated
     high: int = 80       # 60-79 = high
     critical: int = 100  # 80-100 = critical
-    tracking_band: str = "elevated"  # Threshold for event creation
-    forensics_band: str = "high"     # Threshold for forensics capture
-    checkpoint_interval: int = 30    # Seconds between checkpoints
-    forensics_cooldown: int = 60     # Seconds between forensics
+    tracking_band: str = "elevated"
+    forensics_band: str = "high"
+    checkpoint_interval: int = 30
+    forensics_cooldown: int = 60
 ```
 
 ## CLI Commands
@@ -245,12 +259,11 @@ class BandsConfig:
 | Decision | Rationale |
 |----------|-----------|
 | Per-process scoring over system-wide stress | Identifies specific culprits, not just "system stressed" |
-| TopCollector at 1Hz | `top -l 2` provides accurate CPU% deltas |
+| **libproc over top** | Direct API = no subprocess, no parsing, more data |
 | 8-factor weighted scoring with multi-category bonus | Flexible, configurable identification of stress types |
 | ProcessTracker per-process events | Historical record of which processes caused stress |
 | Boot time for PID disambiguation | PIDs can be reused across reboots |
 | Binary NORMAL/BAD states | Actions are binary; five bands are just descriptive labels |
-| Snapshot types (entry/checkpoint/exit) | Capture full event lifecycle for forensics |
 
 ## Data Locations
 
