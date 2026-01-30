@@ -1,89 +1,249 @@
-"""Forensics capture for pause events."""
+"""Forensics capture for process events.
+
+Captures forensic data (spindump, tailspin, logs) and stores parsed results
+in the database. Raw captures go to /tmp, get parsed, results stored in DB,
+temp files discarded.
+"""
 
 import asyncio
 import json
-from datetime import datetime
+import re
+import shutil
+import sqlite3
+import tempfile
+from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
-
-if TYPE_CHECKING:
-    from pause_monitor.config import ForensicsConfig
-    from pause_monitor.ringbuffer import BufferContents
+from typing import TYPE_CHECKING
 
 import structlog
+
+from pause_monitor.storage import (
+    create_forensic_capture,
+    insert_buffer_context,
+    insert_log_entry,
+    insert_spindump_process,
+    insert_spindump_thread,
+    update_forensic_capture_status,
+)
+
+if TYPE_CHECKING:
+    from pause_monitor.ringbuffer import BufferContents
 
 log = structlog.get_logger()
 
 
-def create_event_dir(events_dir: Path, event_time: datetime) -> Path:
-    """Create directory for a pause event.
+# --- Parsing Data Structures ---
+
+
+@dataclass
+class SpindumpThread:
+    """Parsed thread from spindump output."""
+
+    thread_id: str
+    thread_name: str | None = None
+    sample_count: int | None = None
+    priority: int | None = None
+    cpu_time_sec: float | None = None
+    state: str | None = None
+    blocked_on: str | None = None
+
+
+@dataclass
+class SpindumpProcess:
+    """Parsed process from spindump output."""
+
+    pid: int
+    name: str
+    path: str | None = None
+    parent_pid: int | None = None
+    parent_name: str | None = None
+    footprint_mb: float | None = None
+    cpu_time_sec: float | None = None
+    thread_count: int | None = None
+    threads: list[SpindumpThread] | None = None
+
+
+@dataclass
+class LogEntry:
+    """Parsed log entry from ndjson output."""
+
+    timestamp: str
+    event_message: str
+    mach_timestamp: int | None = None
+    subsystem: str | None = None
+    category: str | None = None
+    process_name: str | None = None
+    process_id: int | None = None
+    message_type: str | None = None
+
+
+# --- Parsing Functions ---
+
+
+def parse_spindump(text: str) -> list[SpindumpProcess]:
+    """Parse spindump text output into structured data.
+
+    Spindump format:
+    - Header section with Date/Time, Duration, etc.
+    - Process blocks starting with "Process: name [pid]"
+    - Thread blocks indented under processes
 
     Args:
-        events_dir: Parent directory for all events
-        event_time: Timestamp of the event
+        text: Raw spindump stdout text
 
     Returns:
-        Path to the created event directory
+        List of SpindumpProcess with nested threads
     """
-    events_dir.mkdir(parents=True, exist_ok=True)
+    processes: list[SpindumpProcess] = []
+    current_process: SpindumpProcess | None = None
+    current_threads: list[SpindumpThread] = []
 
-    timestamp_str = event_time.strftime("%Y-%m-%d_%H-%M-%S")
-    event_dir = events_dir / timestamp_str
+    # Regex patterns
+    process_pattern = re.compile(r"^Process:\s+(.+?)\s+\[(\d+)\]")
+    path_pattern = re.compile(r"^Path:\s+(.+)")
+    parent_pattern = re.compile(r"^Parent:\s+(.+?)\s+\[(\d+)\]")
+    footprint_pattern = re.compile(r"^Footprint:\s+([\d.]+)\s*MB")
+    cpu_time_pattern = re.compile(r"^CPU Time:\s+([\d.]+)s")
+    num_threads_pattern = re.compile(r"^Num threads:\s+(\d+)")
 
-    # Handle duplicates by appending counter
-    counter = 0
-    while event_dir.exists():
-        counter += 1
-        event_dir = events_dir / f"{timestamp_str}_{counter}"
+    # Thread pattern: "  Thread 0x516df    DispatchQueue "name"(1)    1001 samples..."
+    thread_pattern = re.compile(
+        r"^\s+Thread\s+(0x[0-9a-f]+)"
+        r"(?:\s+DispatchQueue\s+\"([^\"]+)\")?.*?"
+        r"(\d+)\s+samples?"
+        r".*?priority\s+(\d+)"
+        r"(?:.*?cpu time\s+([\d.]+)s)?",
+        re.IGNORECASE,
+    )
 
-    event_dir.mkdir()
-    log.info("event_dir_created", path=str(event_dir))
-    return event_dir
+    # Blocked state patterns from stack frames
+    blocked_patterns = {
+        "kevent64": "blocked_kevent",
+        "kevent": "blocked_kevent",
+        "__psynch_cvwait": "blocked_psynch",
+        "__psynch_mutexwait": "blocked_psynch",
+        "__ulock_wait": "blocked_ulock",
+        "__ulock_wait2": "blocked_ulock",
+        "mach_msg": "blocked_mach_msg",
+        "__semwait_signal": "blocked_semaphore",
+        "__select": "blocked_select",
+        "__workq_kernreturn": "blocked_workq",
+        "(running)": "running",
+    }
+
+    lines = text.split("\n")
+    i = 0
+
+    while i < len(lines):
+        line = lines[i]
+
+        # Check for new process
+        proc_match = process_pattern.match(line)
+        if proc_match:
+            # Save previous process
+            if current_process is not None:
+                current_process.threads = current_threads
+                processes.append(current_process)
+
+            current_process = SpindumpProcess(
+                pid=int(proc_match.group(2)),
+                name=proc_match.group(1),
+            )
+            current_threads = []
+            i += 1
+            continue
+
+        if current_process is not None:
+            # Parse process metadata
+            if path_match := path_pattern.match(line):
+                current_process.path = path_match.group(1)
+            elif parent_match := parent_pattern.match(line):
+                current_process.parent_name = parent_match.group(1)
+                current_process.parent_pid = int(parent_match.group(2))
+            elif footprint_match := footprint_pattern.match(line):
+                current_process.footprint_mb = float(footprint_match.group(1))
+            elif cpu_match := cpu_time_pattern.match(line):
+                current_process.cpu_time_sec = float(cpu_match.group(1))
+            elif threads_match := num_threads_pattern.match(line):
+                current_process.thread_count = int(threads_match.group(1))
+
+            # Parse thread header
+            elif thread_match := thread_pattern.match(line):
+                thread = SpindumpThread(
+                    thread_id=thread_match.group(1),
+                    thread_name=thread_match.group(2),
+                    sample_count=int(thread_match.group(3)),
+                    priority=int(thread_match.group(4)),
+                )
+                if thread_match.group(5):
+                    thread.cpu_time_sec = float(thread_match.group(5))
+
+                # Look ahead for blocked state in stack frames
+                j = i + 1
+                while j < len(lines) and lines[j].startswith("    "):
+                    stack_line = lines[j]
+                    for pattern, state in blocked_patterns.items():
+                        if pattern in stack_line:
+                            thread.state = state
+                            thread.blocked_on = pattern
+                            break
+                    if thread.state:
+                        break
+                    j += 1
+
+                current_threads.append(thread)
+
+        i += 1
+
+    # Don't forget the last process
+    if current_process is not None:
+        current_process.threads = current_threads
+        processes.append(current_process)
+
+    return processes
 
 
-class ForensicsCapture:
-    """Captures forensic data for a pause event."""
+def parse_logs_ndjson(data: bytes) -> list[LogEntry]:
+    """Parse ndjson log output into structured entries.
 
-    def __init__(self, event_dir: Path):
-        self.event_dir = event_dir
+    The `log show --style ndjson` command outputs one JSON object per line.
 
-    def write_metadata(self, metadata: dict[str, Any]) -> None:
-        """Write event metadata to JSON file."""
-        path = self.event_dir / "metadata.json"
-        path.write_text(json.dumps(metadata, indent=2))
+    Args:
+        data: Raw bytes from log show stdout
 
-    def write_process_snapshot(self, processes: list[dict[str, Any]]) -> None:
-        """Write process snapshot to JSON file."""
-        path = self.event_dir / "processes.json"
-        path.write_text(json.dumps(processes, indent=2))
+    Returns:
+        List of LogEntry objects
+    """
+    entries: list[LogEntry] = []
 
-    def write_text_artifact(self, name: str, content: str) -> None:
-        """Write a text artifact file."""
-        path = self.event_dir / name
-        path.write_text(content)
+    for line in data.decode("utf-8", errors="replace").split("\n"):
+        line = line.strip()
+        if not line:
+            continue
 
-    def write_binary_artifact(self, name: str, content: bytes) -> None:
-        """Write a binary artifact file."""
-        path = self.event_dir / name
-        path.write_bytes(content)
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
 
-    def write_ring_buffer(self, contents: "BufferContents") -> None:
-        """Write ring buffer contents to event directory."""
-        data = {
-            "samples": [
-                {
-                    "timestamp": s.samples.timestamp.isoformat(),
-                    "max_score": s.samples.max_score,
-                    "process_count": s.samples.process_count,
-                    "rogues": [p.to_dict() for p in s.samples.rogues],
-                }
-                for s in contents.samples
-            ]
-        }
+        # Extract process name from path
+        process_name = None
+        if process_path := obj.get("processImagePath"):
+            process_name = Path(process_path).name
 
-        path = self.event_dir / "ring_buffer.json"
-        path.write_text(json.dumps(data, indent=2))
-        log.debug("ring_buffer_written", path=str(path), samples=len(contents.samples))
+        entry = LogEntry(
+            timestamp=obj.get("timestamp", ""),
+            event_message=obj.get("eventMessage", ""),
+            mach_timestamp=obj.get("machTimestamp"),
+            subsystem=obj.get("subsystem"),
+            category=obj.get("category"),
+            process_name=process_name,
+            process_id=obj.get("processID"),
+            message_type=obj.get("messageType"),
+        )
+        entries.append(entry)
+
+    return entries
 
 
 def identify_culprits(contents: "BufferContents") -> list[dict]:
@@ -124,19 +284,102 @@ def identify_culprits(contents: "BufferContents") -> list[dict]:
     return culprits
 
 
-async def capture_spindump(event_dir: Path, timeout: float = 30.0) -> bool:
-    """Capture thread stacks via spindump.
+# --- ForensicsCapture Class ---
 
-    Args:
-        event_dir: Directory to write spindump output
-        timeout: Maximum seconds to wait for spindump
 
-    Returns:
-        True if capture succeeded
+class ForensicsCapture:
+    """Captures forensic data and stores in database.
+
+    Raw captures (spindump, tailspin, logs) are written to a temp directory,
+    parsed for insights, and the parsed data is stored in the database.
+    Temp files are cleaned up after processing.
     """
-    output_path = event_dir / "spindump.txt"
 
-    try:
+    def __init__(self, conn: sqlite3.Connection, event_id: int):
+        """Initialize forensics capture.
+
+        Args:
+            conn: Database connection
+            event_id: The process event ID this capture is associated with
+        """
+        self.conn = conn
+        self.event_id = event_id
+        self._temp_dir: Path | None = None
+
+    async def capture_and_store(
+        self,
+        contents: "BufferContents",
+        trigger: str,
+    ) -> int:
+        """Run full forensics capture: raw → parse → DB → cleanup.
+
+        Args:
+            contents: Frozen ring buffer contents
+            trigger: What triggered this capture (e.g., 'band_entry_high')
+
+        Returns:
+            The capture_id of the created forensic_captures record
+        """
+        # Create temp directory
+        self._temp_dir = Path(tempfile.mkdtemp(prefix="pause-monitor-"))
+        log.debug("forensics_temp_dir", path=str(self._temp_dir))
+
+        try:
+            # Create capture record
+            capture_id = create_forensic_capture(self.conn, self.event_id, trigger)
+
+            # Run all captures in parallel to temp files (no timeouts - let them complete)
+            spindump_result, tailspin_result, logs_result = await asyncio.gather(
+                self._capture_spindump(),
+                self._capture_tailspin(),
+                self._capture_logs(),
+                return_exceptions=True,
+            )
+
+            # Parse and store each capture type
+            spindump_status = self._process_spindump(capture_id, spindump_result)
+            tailspin_status = self._process_tailspin(capture_id, tailspin_result)
+            logs_status = self._process_logs(capture_id, logs_result)
+
+            # Store buffer context
+            self._store_buffer_context(capture_id, contents)
+
+            # Update capture status
+            update_forensic_capture_status(
+                self.conn,
+                capture_id,
+                spindump_status=spindump_status,
+                tailspin_status=tailspin_status,
+                logs_status=logs_status,
+            )
+
+            log.info(
+                "forensics_capture_complete",
+                capture_id=capture_id,
+                event_id=self.event_id,
+                trigger=trigger,
+                spindump=spindump_status,
+                tailspin=tailspin_status,
+                logs=logs_status,
+            )
+
+            return capture_id
+
+        finally:
+            # Always clean up temp directory
+            if self._temp_dir and self._temp_dir.exists():
+                shutil.rmtree(self._temp_dir)
+                log.debug("forensics_temp_cleanup", path=str(self._temp_dir))
+
+    async def _capture_spindump(self) -> bytes:
+        """Capture spindump to stdout, return raw bytes.
+
+        Returns:
+            Raw spindump output bytes
+
+        Raises:
+            Exception on failure (not found, permission error)
+        """
         process = await asyncio.create_subprocess_exec(
             "/usr/sbin/spindump",
             "-notarget",
@@ -145,38 +388,22 @@ async def capture_spindump(event_dir: Path, timeout: float = 30.0) -> bool:
             stderr=asyncio.subprocess.DEVNULL,
         )
 
-        stdout, _ = await asyncio.wait_for(
-            process.communicate(),
-            timeout=timeout,
-        )
+        stdout, _ = await process.communicate()
 
-        output_path.write_bytes(stdout)
-        log.info("spindump_captured", path=str(output_path), size=len(stdout))
-        return True
+        return stdout
 
-    except asyncio.TimeoutError:
-        process.kill()
-        await process.wait()
-        log.warning("spindump_timeout", timeout=timeout)
-        return False
-    except (FileNotFoundError, PermissionError) as e:
-        log.warning("spindump_failed", error=str(e))
-        return False
+    async def _capture_tailspin(self) -> Path:
+        """Capture tailspin to temp file, return path.
 
+        Returns:
+            Path to the tailspin file
 
-async def capture_tailspin(event_dir: Path, timeout: float = 10.0) -> bool:
-    """Capture kernel trace via tailspin.
+        Raises:
+            Exception on failure
+        """
+        assert self._temp_dir is not None
+        output_path = self._temp_dir / "capture.tailspin"
 
-    Args:
-        event_dir: Directory to write tailspin output
-        timeout: Maximum seconds to wait
-
-    Returns:
-        True if capture succeeded
-    """
-    output_path = event_dir / "tailspin.tailspin"
-
-    try:
         process = await asyncio.create_subprocess_exec(
             "/usr/bin/tailspin",
             "save",
@@ -186,46 +413,29 @@ async def capture_tailspin(event_dir: Path, timeout: float = 10.0) -> bool:
             stderr=asyncio.subprocess.DEVNULL,
         )
 
-        await asyncio.wait_for(process.wait(), timeout=timeout)
-
-        if output_path.exists():
-            log.info("tailspin_captured", path=str(output_path))
-            return True
-        return False
-
-    except asyncio.TimeoutError:
-        process.kill()
         await process.wait()
-        log.warning("tailspin_timeout", timeout=timeout)
-        return False
-    except (FileNotFoundError, PermissionError) as e:
-        log.warning("tailspin_failed", error=str(e))
-        return False
 
+        if not output_path.exists():
+            raise FileNotFoundError(f"Tailspin did not create output: {output_path}")
 
-async def capture_system_logs(
-    event_dir: Path,
-    window_seconds: int = 60,
-    timeout: float = 10.0,
-) -> bool:
-    """Capture filtered system logs around the event.
+        return output_path
 
-    Args:
-        event_dir: Directory to write log output
-        window_seconds: Seconds of logs to capture before event
-        timeout: Maximum seconds to wait
+    async def _capture_logs(self) -> bytes:
+        """Capture logs as NDJSON, return raw bytes.
 
-    Returns:
-        True if capture succeeded
-    """
-    output_path = event_dir / "system.log"
+        Returns:
+            Raw ndjson log output bytes
 
-    try:
+        Raises:
+            Exception on failure
+        """
         process = await asyncio.create_subprocess_exec(
             "/usr/bin/log",
             "show",
+            "--style",
+            "ndjson",
             "--last",
-            f"{window_seconds}s",
+            "60s",
             "--predicate",
             'subsystem == "com.apple.powerd" OR '
             'subsystem == "com.apple.kernel" OR '
@@ -237,47 +447,202 @@ async def capture_system_logs(
             stderr=asyncio.subprocess.DEVNULL,
         )
 
-        stdout, _ = await asyncio.wait_for(
-            process.communicate(),
-            timeout=timeout,
+        stdout, _ = await process.communicate()
+
+        return stdout
+
+    def _process_spindump(
+        self,
+        capture_id: int,
+        result: bytes | BaseException,
+    ) -> str:
+        """Parse spindump output and store in DB.
+
+        Args:
+            capture_id: The forensic capture ID
+            result: Raw spindump bytes or exception
+
+        Returns:
+            Status string: 'success' or 'failed'
+        """
+        if isinstance(result, BaseException):
+            log.warning("spindump_failed", error=str(result))
+            return "failed"
+
+        try:
+            text = result.decode("utf-8", errors="replace")
+            processes = parse_spindump(text)
+
+            for proc in processes:
+                proc_id = insert_spindump_process(
+                    self.conn,
+                    capture_id=capture_id,
+                    pid=proc.pid,
+                    name=proc.name,
+                    path=proc.path,
+                    parent_pid=proc.parent_pid,
+                    parent_name=proc.parent_name,
+                    footprint_mb=proc.footprint_mb,
+                    cpu_time_sec=proc.cpu_time_sec,
+                    thread_count=proc.thread_count,
+                )
+
+                if proc.threads:
+                    for thread in proc.threads:
+                        insert_spindump_thread(
+                            self.conn,
+                            process_id=proc_id,
+                            thread_id=thread.thread_id,
+                            thread_name=thread.thread_name,
+                            sample_count=thread.sample_count,
+                            priority=thread.priority,
+                            cpu_time_sec=thread.cpu_time_sec,
+                            state=thread.state,
+                            blocked_on=thread.blocked_on,
+                        )
+
+            log.info("spindump_parsed", process_count=len(processes))
+            return "success"
+
+        except Exception as e:
+            log.warning("spindump_parse_failed", error=str(e))
+            return "failed"
+
+    def _process_tailspin(
+        self,
+        capture_id: int,
+        result: Path | BaseException,
+    ) -> str:
+        """Decode tailspin via spindump -i and store in DB.
+
+        Tailspin files are binary. We decode them using:
+            spindump -i <file> -stdout
+
+        This produces the same text format as regular spindump.
+
+        Args:
+            capture_id: The forensic capture ID
+            result: Path to tailspin file or exception
+
+        Returns:
+            Status string: 'success' or 'failed'
+        """
+        if isinstance(result, BaseException):
+            log.warning("tailspin_failed", error=str(result))
+            return "failed"
+
+        try:
+            # Decode tailspin using spindump synchronously (no timeout - let it complete)
+            import subprocess
+
+            completed = subprocess.run(
+                ["/usr/sbin/spindump", "-i", str(result), "-stdout"],
+                capture_output=True,
+            )
+
+            if completed.returncode != 0:
+                log.warning("tailspin_decode_failed", returncode=completed.returncode)
+                return "failed"
+
+            text = completed.stdout.decode("utf-8", errors="replace")
+            processes = parse_spindump(text)
+
+            # Store with same logic as spindump (tailspin data goes into same tables)
+            for proc in processes:
+                proc_id = insert_spindump_process(
+                    self.conn,
+                    capture_id=capture_id,
+                    pid=proc.pid,
+                    name=proc.name,
+                    path=proc.path,
+                    parent_pid=proc.parent_pid,
+                    parent_name=proc.parent_name,
+                    footprint_mb=proc.footprint_mb,
+                    cpu_time_sec=proc.cpu_time_sec,
+                    thread_count=proc.thread_count,
+                )
+
+                if proc.threads:
+                    for thread in proc.threads:
+                        insert_spindump_thread(
+                            self.conn,
+                            process_id=proc_id,
+                            thread_id=thread.thread_id,
+                            thread_name=thread.thread_name,
+                            sample_count=thread.sample_count,
+                            priority=thread.priority,
+                            cpu_time_sec=thread.cpu_time_sec,
+                            state=thread.state,
+                            blocked_on=thread.blocked_on,
+                        )
+
+            log.info("tailspin_parsed", process_count=len(processes))
+            return "success"
+
+        except Exception as e:
+            log.warning("tailspin_decode_failed", error=str(e))
+            return "failed"
+
+    def _process_logs(
+        self,
+        capture_id: int,
+        result: bytes | BaseException,
+    ) -> str:
+        """Parse NDJSON log lines and store in DB.
+
+        Args:
+            capture_id: The forensic capture ID
+            result: Raw ndjson bytes or exception
+
+        Returns:
+            Status string: 'success' or 'failed'
+        """
+        if isinstance(result, BaseException):
+            log.warning("logs_failed", error=str(result))
+            return "failed"
+
+        try:
+            entries = parse_logs_ndjson(result)
+
+            for entry in entries:
+                insert_log_entry(
+                    self.conn,
+                    capture_id=capture_id,
+                    timestamp=entry.timestamp,
+                    event_message=entry.event_message,
+                    mach_timestamp=entry.mach_timestamp,
+                    subsystem=entry.subsystem,
+                    category=entry.category,
+                    process_name=entry.process_name,
+                    process_id=entry.process_id,
+                    message_type=entry.message_type,
+                )
+
+            log.info("logs_parsed", entry_count=len(entries))
+            return "success"
+
+        except Exception as e:
+            log.warning("logs_parse_failed", error=str(e))
+            return "failed"
+
+    def _store_buffer_context(
+        self,
+        capture_id: int,
+        contents: "BufferContents",
+    ) -> None:
+        """Store ring buffer context in database.
+
+        Args:
+            capture_id: The forensic capture ID
+            contents: Frozen ring buffer contents
+        """
+        culprits = identify_culprits(contents)
+        peak_score = max((c["score"] for c in culprits), default=0)
+
+        insert_buffer_context(
+            self.conn,
+            capture_id=capture_id,
+            sample_count=len(contents.samples),
+            peak_score=peak_score,
+            culprits=json.dumps(culprits),
         )
-
-        output_path.write_bytes(stdout)
-        log.info("logs_captured", path=str(output_path), size=len(stdout))
-        return True
-
-    except asyncio.TimeoutError:
-        process.kill()
-        await process.wait()
-        log.warning("logs_timeout", timeout=timeout)
-        return False
-    except (FileNotFoundError, PermissionError) as e:
-        log.warning("logs_failed", error=str(e))
-        return False
-
-
-async def run_full_capture(
-    capture: ForensicsCapture,
-    window_seconds: int = 60,
-    config: "ForensicsConfig | None" = None,
-) -> None:
-    """Run all forensic capture steps.
-
-    Args:
-        capture: ForensicsCapture instance with event_dir set
-        window_seconds: Seconds of history to capture
-        config: Forensics config with timeout values (uses defaults if None)
-    """
-    # Use config timeouts or defaults
-    spindump_timeout = config.spindump_timeout if config else 30
-    tailspin_timeout = config.tailspin_timeout if config else 10
-    logs_timeout = config.logs_timeout if config else 10
-
-    # Run captures concurrently
-    await asyncio.gather(
-        capture_spindump(capture.event_dir, timeout=spindump_timeout),
-        capture_tailspin(capture.event_dir, timeout=tailspin_timeout),
-        capture_system_logs(capture.event_dir, window_seconds=window_seconds, timeout=logs_timeout),
-    )
-
-    log.info("full_capture_complete", event_dir=str(capture.event_dir))

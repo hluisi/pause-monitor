@@ -43,10 +43,16 @@ def test_init_database_creates_tables(tmp_path: Path):
     conn.close()
 
     table_names = [t[0] for t in tables]
-    # Schema v8: per-process event tables
+    # Core tables
     assert "process_events" in table_names
     assert "process_snapshots" in table_names
     assert "daemon_state" in table_names
+    # Forensic tables (schema v10)
+    assert "forensic_captures" in table_names
+    assert "spindump_processes" in table_names
+    assert "spindump_threads" in table_names
+    assert "log_entries" in table_names
+    assert "buffer_context" in table_names
 
 
 def test_init_database_sets_schema_version(tmp_path: Path):
@@ -58,6 +64,62 @@ def test_init_database_sets_schema_version(tmp_path: Path):
     version = get_schema_version(conn)
     conn.close()
     assert version == SCHEMA_VERSION
+
+
+def test_init_database_recreates_on_version_mismatch(tmp_path: Path):
+    """init_database deletes and recreates DB when schema version differs."""
+    db_path = tmp_path / "test.db"
+
+    # Create DB with old schema version
+    conn = sqlite3.connect(db_path)
+    conn.execute("CREATE TABLE daemon_state (key TEXT PRIMARY KEY, value TEXT, updated_at REAL)")
+    conn.execute(
+        "INSERT INTO daemon_state (key, value, updated_at) VALUES ('schema_version', '1', 0)"
+    )
+    conn.execute("CREATE TABLE old_table (id INTEGER)")
+    conn.execute("INSERT INTO old_table VALUES (42)")
+    conn.commit()
+    conn.close()
+
+    # init_database should detect mismatch and recreate
+    init_database(db_path)
+
+    # Verify new schema
+    conn = sqlite3.connect(db_path)
+    version = get_schema_version(conn)
+    assert version == SCHEMA_VERSION
+
+    # Old table should be gone
+    tables = conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+    table_names = [t[0] for t in tables]
+    assert "old_table" not in table_names
+    assert "process_events" in table_names
+    conn.close()
+
+
+def test_init_database_preserves_matching_schema(tmp_path: Path):
+    """init_database keeps existing data when schema version matches."""
+    db_path = tmp_path / "test.db"
+
+    # Create DB with current schema
+    init_database(db_path)
+
+    # Add some data
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "INSERT INTO daemon_state (key, value, updated_at) VALUES ('test_key', 'test_value', 0)"
+    )
+    conn.commit()
+    conn.close()
+
+    # Re-init should preserve data
+    init_database(db_path)
+
+    # Verify data preserved
+    conn = sqlite3.connect(db_path)
+    row = conn.execute("SELECT value FROM daemon_state WHERE key = 'test_key'").fetchone()
+    conn.close()
+    assert row[0] == "test_value"
 
 
 # --- Prune Tests ---
@@ -110,7 +172,6 @@ def test_prune_deletes_old_events(initialized_db: Path):
         entry_band="elevated",
         peak_score=50,
         peak_band="elevated",
-        peak_snapshot="{}",
     )
     close_process_event(conn, event_id, old_exit)
 
@@ -126,18 +187,16 @@ def test_prune_deletes_old_events(initialized_db: Path):
         entry_band="elevated",
         peak_score=50,
         peak_band="elevated",
-        peak_snapshot="{}",
     )
     close_process_event(conn, event_id2, recent_exit)
 
     # Prune (30 day retention)
-    events_deleted, samples_deleted = prune_old_data(conn, events_days=30)
+    events_deleted = prune_old_data(conn, events_days=30)
 
     remaining = conn.execute("SELECT COUNT(*) FROM process_events").fetchone()[0]
     conn.close()
 
     assert events_deleted == 1
-    assert samples_deleted == 0
     assert remaining == 1
 
 
@@ -158,17 +217,15 @@ def test_prune_preserves_open_events(initialized_db: Path):
         entry_band="elevated",
         peak_score=50,
         peak_band="elevated",
-        peak_snapshot="{}",
     )
 
     # Prune (1 day retention)
-    events_deleted, samples_deleted = prune_old_data(conn, events_days=1)
+    events_deleted = prune_old_data(conn, events_days=1)
 
     remaining = conn.execute("SELECT COUNT(*) FROM process_events").fetchone()[0]
     conn.close()
 
     assert events_deleted == 0
-    assert samples_deleted == 0
     assert remaining == 1
 
 
@@ -226,7 +283,7 @@ def test_get_daemon_state_no_table(tmp_path):
     assert value is None
 
 
-# --- Schema v8: Per-Process Event Tables ---
+# --- Schema v10: Process Event Tables ---
 
 
 def test_schema_has_process_events_table(tmp_path):
@@ -257,67 +314,14 @@ def test_schema_has_process_snapshots_table(tmp_path):
     conn.close()
 
 
-def test_schema_no_legacy_events_table(tmp_path):
-    """Schema does not have legacy events table."""
-    from pause_monitor.storage import get_connection, init_database
-
-    db_path = tmp_path / "test.db"
-    init_database(db_path)
-    conn = get_connection(db_path)
-    cursor = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='events'")
-    assert cursor.fetchone() is None
-    conn.close()
-
-
-def test_process_events_table_structure(tmp_path):
-    """process_events has expected columns."""
-    from pause_monitor.storage import get_connection, init_database
-
-    db_path = tmp_path / "test.db"
-    init_database(db_path)
-    conn = get_connection(db_path)
-    cursor = conn.execute("PRAGMA table_info(process_events)")
-    columns = {row[1] for row in cursor.fetchall()}
-    conn.close()
-
-    expected = {
-        "id",
-        "pid",
-        "command",
-        "boot_time",
-        "entry_time",
-        "exit_time",
-        "entry_band",
-        "peak_band",
-        "peak_score",
-        "peak_snapshot",
-    }
-    assert expected.issubset(columns)
-
-
-def test_process_snapshots_table_structure(tmp_path):
-    """process_snapshots has expected columns."""
-    from pause_monitor.storage import get_connection, init_database
-
-    db_path = tmp_path / "test.db"
-    init_database(db_path)
-    conn = get_connection(db_path)
-    cursor = conn.execute("PRAGMA table_info(process_snapshots)")
-    columns = {row[1] for row in cursor.fetchall()}
-    conn.close()
-
-    expected = {"id", "event_id", "snapshot_type", "snapshot"}
-    assert expected.issubset(columns)
-
-
-def test_schema_version_9(initialized_db: Path):
-    """Schema version should be 9."""
+def test_schema_version_11(initialized_db: Path):
+    """Schema version should be 11 (structured snapshot columns)."""
     from pause_monitor.storage import get_connection
 
     conn = get_connection(initialized_db)
     version = get_schema_version(conn)
     conn.close()
-    assert version == 9
+    assert version == 11
 
 
 # --- Process Event CRUD Tests ---
@@ -340,11 +344,16 @@ def test_create_process_event(tmp_path):
         entry_band="elevated",
         peak_score=45,
         peak_band="elevated",
-        peak_snapshot='{"pid": 123, "score": 45}',
     )
 
     assert event_id is not None
     assert isinstance(event_id, int)
+
+    # Verify peak_snapshot_id is NULL initially
+    row = conn.execute(
+        "SELECT peak_snapshot_id FROM process_events WHERE id = ?", (event_id,)
+    ).fetchone()
+    assert row[0] is None
     conn.close()
 
 
@@ -370,12 +379,12 @@ def test_get_open_events(tmp_path):
         entry_band="elevated",
         peak_score=45,
         peak_band="elevated",
-        peak_snapshot="{}",
     )
 
     events = get_open_events(conn, boot_time=1706000000)
     assert len(events) == 1
     assert events[0]["pid"] == 123
+    assert "peak_snapshot_id" in events[0]
     conn.close()
 
 
@@ -402,7 +411,6 @@ def test_close_process_event(tmp_path):
         entry_band="elevated",
         peak_score=45,
         peak_band="elevated",
-        peak_snapshot="{}",
     )
 
     close_process_event(conn, event_id, exit_time=1706000200.5)
@@ -413,50 +421,15 @@ def test_close_process_event(tmp_path):
 
 
 def test_update_process_event_peak(tmp_path):
-    """update_process_event_peak updates peak fields."""
-    from pause_monitor.storage import (
-        create_process_event,
-        get_connection,
-        init_database,
-        update_process_event_peak,
-    )
-
-    db_path = tmp_path / "test.db"
-    init_database(db_path)
-    conn = get_connection(db_path)
-
-    event_id = create_process_event(
-        conn,
-        pid=123,
-        command="test",
-        boot_time=1706000000,
-        entry_time=1706000100.5,
-        entry_band="elevated",
-        peak_score=45,
-        peak_band="elevated",
-        peak_snapshot='{"score": 45}',
-    )
-
-    update_process_event_peak(
-        conn, event_id, peak_score=80, peak_band="critical", peak_snapshot='{"score": 80}'
-    )
-
-    row = conn.execute(
-        "SELECT peak_score, peak_band FROM process_events WHERE id = ?", (event_id,)
-    ).fetchone()
-    assert row[0] == 80
-    assert row[1] == "critical"
-    conn.close()
-
-
-def test_insert_process_snapshot(tmp_path):
-    """insert_process_snapshot adds snapshot to event."""
+    """update_process_event_peak updates peak fields including peak_snapshot_id."""
     from pause_monitor.storage import (
         create_process_event,
         get_connection,
         init_database,
         insert_process_snapshot,
+        update_process_event_peak,
     )
+    from tests.conftest import make_process_score
 
     db_path = tmp_path / "test.db"
     init_database(db_path)
@@ -471,92 +444,357 @@ def test_insert_process_snapshot(tmp_path):
         entry_band="elevated",
         peak_score=45,
         peak_band="elevated",
-        peak_snapshot="{}",
     )
 
-    insert_process_snapshot(conn, event_id, snapshot_type="entry", snapshot='{"score": 45}')
+    # Insert a snapshot and use its ID
+    score = make_process_score(pid=123, command="test", score=80)
+    snapshot_id = insert_process_snapshot(conn, event_id, "checkpoint", score)
+
+    update_process_event_peak(
+        conn, event_id, peak_score=80, peak_band="critical", peak_snapshot_id=snapshot_id
+    )
 
     row = conn.execute(
-        "SELECT snapshot_type, snapshot FROM process_snapshots WHERE event_id = ?",
+        "SELECT peak_score, peak_band, peak_snapshot_id FROM process_events WHERE id = ?",
         (event_id,),
     ).fetchone()
-    assert row[0] == "entry"
-    assert row[1] == '{"score": 45}'
+    assert row[0] == 80
+    assert row[1] == "critical"
+    assert row[2] == snapshot_id
     conn.close()
 
 
-# --- System Samples Tests ---
-
-
-def test_insert_and_get_system_sample(tmp_path):
-    """insert_system_sample and get_last_system_sample_time work correctly."""
+def test_insert_process_snapshot(tmp_path):
+    """insert_process_snapshot adds structured snapshot and returns ID."""
     from pause_monitor.storage import (
+        create_process_event,
         get_connection,
-        get_last_system_sample_time,
+        get_process_snapshots,
         init_database,
-        insert_system_sample,
+        insert_process_snapshot,
+    )
+    from tests.conftest import make_process_score
+
+    db_path = tmp_path / "test.db"
+    init_database(db_path)
+    conn = get_connection(db_path)
+
+    event_id = create_process_event(
+        conn,
+        pid=123,
+        command="test",
+        boot_time=1706000000,
+        entry_time=1706000100.5,
+        entry_band="elevated",
+        peak_score=45,
+        peak_band="elevated",
+    )
+
+    score = make_process_score(pid=123, command="test", score=45, cpu=30.5, mem=200)
+    snapshot_id = insert_process_snapshot(conn, event_id, snapshot_type="entry", score=score)
+
+    assert snapshot_id is not None
+    assert isinstance(snapshot_id, int)
+
+    # Verify structured columns
+    snapshots = get_process_snapshots(conn, event_id)
+    assert len(snapshots) == 1
+    snap = snapshots[0]
+    assert snap["snapshot_type"] == "entry"
+    assert snap["score"] == 45
+    assert snap["cpu"] == 30.5
+    assert snap["mem"] == 200
+    assert "cpu" in snap["categories"]
+    conn.close()
+
+
+# --- Forensic Capture Tests ---
+
+
+def test_create_forensic_capture(tmp_path):
+    """create_forensic_capture inserts and returns capture ID."""
+    from pause_monitor.storage import (
+        create_forensic_capture,
+        create_process_event,
+        get_connection,
+        init_database,
     )
 
     db_path = tmp_path / "test.db"
     init_database(db_path)
     conn = get_connection(db_path)
 
-    # No samples yet
-    assert get_last_system_sample_time(conn) is None
+    # Create parent event first
+    event_id = create_process_event(
+        conn,
+        pid=123,
+        command="test",
+        boot_time=1706000000,
+        entry_time=time.time(),
+        entry_band="high",
+        peak_score=85,
+        peak_band="high",
+    )
 
-    # Insert a sample
-    insert_system_sample(conn, '{"max_score": 42}')
+    capture_id = create_forensic_capture(conn, event_id, trigger="band_entry_high")
 
-    # Now we should have a timestamp
-    last_time = get_last_system_sample_time(conn)
-    assert last_time is not None
-    assert last_time > 0
-
-    # Verify data stored
-    row = conn.execute("SELECT data FROM system_samples").fetchone()
-    assert row[0] == '{"max_score": 42}'
-
+    assert capture_id is not None
+    assert isinstance(capture_id, int)
     conn.close()
 
 
-def test_system_samples_pruning(tmp_path):
-    """prune_old_data deletes old system samples."""
-    import time
-
+def test_get_forensic_captures(tmp_path):
+    """get_forensic_captures returns captures for an event."""
     from pause_monitor.storage import (
+        create_forensic_capture,
+        create_process_event,
         get_connection,
+        get_forensic_captures,
         init_database,
-        prune_old_data,
     )
 
     db_path = tmp_path / "test.db"
     init_database(db_path)
     conn = get_connection(db_path)
 
-    # Insert old sample (10 days ago)
-    old_time = time.time() - 10 * 86400
-    conn.execute(
-        "INSERT INTO system_samples (captured_at, data) VALUES (?, ?)",
-        (old_time, '{"old": true}'),
+    event_id = create_process_event(
+        conn,
+        pid=123,
+        command="test",
+        boot_time=1706000000,
+        entry_time=time.time(),
+        entry_band="high",
+        peak_score=85,
+        peak_band="high",
     )
+
+    create_forensic_capture(conn, event_id, trigger="test1")
+    create_forensic_capture(conn, event_id, trigger="test2")
+
+    captures = get_forensic_captures(conn, event_id)
+    assert len(captures) == 2
+    assert captures[0]["trigger"] == "test1"
+    assert captures[1]["trigger"] == "test2"
+    conn.close()
+
+
+def test_insert_and_get_spindump_process(tmp_path):
+    """insert_spindump_process and get_spindump_processes work correctly."""
+    from pause_monitor.storage import (
+        create_forensic_capture,
+        create_process_event,
+        get_connection,
+        get_spindump_processes,
+        init_database,
+        insert_spindump_process,
+    )
+
+    db_path = tmp_path / "test.db"
+    init_database(db_path)
+    conn = get_connection(db_path)
+
+    event_id = create_process_event(
+        conn,
+        pid=123,
+        command="test",
+        boot_time=1706000000,
+        entry_time=time.time(),
+        entry_band="high",
+        peak_score=85,
+        peak_band="high",
+    )
+    capture_id = create_forensic_capture(conn, event_id, trigger="test")
+
+    proc_id = insert_spindump_process(
+        conn,
+        capture_id=capture_id,
+        pid=456,
+        name="chrome",
+        path="/Applications/Chrome.app",
+        footprint_mb=500.5,
+        thread_count=42,
+    )
+
+    assert proc_id is not None
+
+    procs = get_spindump_processes(conn, capture_id)
+    assert len(procs) == 1
+    assert procs[0]["pid"] == 456
+    assert procs[0]["name"] == "chrome"
+    assert procs[0]["footprint_mb"] == 500.5
+    conn.close()
+
+
+def test_insert_and_get_spindump_threads(tmp_path):
+    """insert_spindump_thread and get_spindump_threads work correctly."""
+    from pause_monitor.storage import (
+        create_forensic_capture,
+        create_process_event,
+        get_connection,
+        get_spindump_threads,
+        init_database,
+        insert_spindump_process,
+        insert_spindump_thread,
+    )
+
+    db_path = tmp_path / "test.db"
+    init_database(db_path)
+    conn = get_connection(db_path)
+
+    event_id = create_process_event(
+        conn,
+        pid=123,
+        command="test",
+        boot_time=1706000000,
+        entry_time=time.time(),
+        entry_band="high",
+        peak_score=85,
+        peak_band="high",
+    )
+    capture_id = create_forensic_capture(conn, event_id, trigger="test")
+    proc_id = insert_spindump_process(conn, capture_id, pid=456, name="chrome")
+
+    insert_spindump_thread(
+        conn,
+        process_id=proc_id,
+        thread_id="0x1234",
+        thread_name="main-thread",
+        sample_count=100,
+        state="blocked_kevent",
+    )
+
+    threads = get_spindump_threads(conn, proc_id)
+    assert len(threads) == 1
+    assert threads[0]["thread_id"] == "0x1234"
+    assert threads[0]["thread_name"] == "main-thread"
+    assert threads[0]["state"] == "blocked_kevent"
+    conn.close()
+
+
+def test_insert_and_get_log_entries(tmp_path):
+    """insert_log_entry and get_log_entries work correctly."""
+    from pause_monitor.storage import (
+        create_forensic_capture,
+        create_process_event,
+        get_connection,
+        get_log_entries,
+        init_database,
+        insert_log_entry,
+    )
+
+    db_path = tmp_path / "test.db"
+    init_database(db_path)
+    conn = get_connection(db_path)
+
+    event_id = create_process_event(
+        conn,
+        pid=123,
+        command="test",
+        boot_time=1706000000,
+        entry_time=time.time(),
+        entry_band="high",
+        peak_score=85,
+        peak_band="high",
+    )
+    capture_id = create_forensic_capture(conn, event_id, trigger="test")
+
+    insert_log_entry(
+        conn,
+        capture_id=capture_id,
+        timestamp="2024-01-15 10:30:45",
+        event_message="Test error occurred",
+        subsystem="com.apple.kernel",
+        message_type="Error",
+    )
+
+    entries = get_log_entries(conn, capture_id)
+    assert len(entries) == 1
+    assert entries[0]["timestamp"] == "2024-01-15 10:30:45"
+    assert entries[0]["event_message"] == "Test error occurred"
+    assert entries[0]["subsystem"] == "com.apple.kernel"
+    conn.close()
+
+
+def test_insert_and_get_buffer_context(tmp_path):
+    """insert_buffer_context and get_buffer_context work correctly."""
+    import json
+
+    from pause_monitor.storage import (
+        create_forensic_capture,
+        create_process_event,
+        get_buffer_context,
+        get_connection,
+        init_database,
+        insert_buffer_context,
+    )
+
+    db_path = tmp_path / "test.db"
+    init_database(db_path)
+    conn = get_connection(db_path)
+
+    event_id = create_process_event(
+        conn,
+        pid=123,
+        command="test",
+        boot_time=1706000000,
+        entry_time=time.time(),
+        entry_band="high",
+        peak_score=85,
+        peak_band="high",
+    )
+    capture_id = create_forensic_capture(conn, event_id, trigger="test")
+
+    culprits = [{"pid": 123, "command": "chrome", "score": 85}]
+    insert_buffer_context(
+        conn,
+        capture_id=capture_id,
+        sample_count=30,
+        peak_score=85,
+        culprits=json.dumps(culprits),
+    )
+
+    context = get_buffer_context(conn, capture_id)
+    assert context is not None
+    assert context["sample_count"] == 30
+    assert context["peak_score"] == 85
+    assert json.loads(context["culprits"]) == culprits
+    conn.close()
+
+
+def test_forensic_cascade_delete(tmp_path):
+    """Deleting a process event cascades to forensic data."""
+    from pause_monitor.storage import (
+        create_forensic_capture,
+        create_process_event,
+        get_buffer_context,
+        get_connection,
+        get_forensic_captures,
+        init_database,
+        insert_buffer_context,
+    )
+
+    db_path = tmp_path / "test.db"
+    init_database(db_path)
+    conn = get_connection(db_path)
+
+    event_id = create_process_event(
+        conn,
+        pid=123,
+        command="test",
+        boot_time=1706000000,
+        entry_time=time.time(),
+        entry_band="high",
+        peak_score=85,
+        peak_band="high",
+    )
+    capture_id = create_forensic_capture(conn, event_id, trigger="test")
+    insert_buffer_context(conn, capture_id, sample_count=30, peak_score=85, culprits="[]")
+
+    # Delete the event
+    conn.execute("DELETE FROM process_events WHERE id = ?", (event_id,))
     conn.commit()
 
-    # Insert recent sample (1 day ago)
-    recent_time = time.time() - 1 * 86400
-    conn.execute(
-        "INSERT INTO system_samples (captured_at, data) VALUES (?, ?)",
-        (recent_time, '{"recent": true}'),
-    )
-    conn.commit()
-
-    # Prune with 7 day retention
-    events_deleted, samples_deleted = prune_old_data(conn, system_samples_days=7)
-
-    assert samples_deleted == 1  # Old one deleted
-
-    # Verify only recent sample remains
-    rows = conn.execute("SELECT data FROM system_samples").fetchall()
-    assert len(rows) == 1
-    assert rows[0][0] == '{"recent": true}'
-
+    # Forensic data should be gone due to CASCADE
+    assert get_forensic_captures(conn, event_id) == []
+    assert get_buffer_context(conn, capture_id) is None
     conn.close()

@@ -1,16 +1,20 @@
 """SQLite storage layer for pause-monitor."""
 
+import json
 import sqlite3
 import time
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Generator
+from typing import TYPE_CHECKING, Generator
 
 import structlog
 
+if TYPE_CHECKING:
+    from pause_monitor.collector import ProcessScore
+
 log = structlog.get_logger()
 
-SCHEMA_VERSION = 9  # Added system_samples for trend analysis
+SCHEMA_VERSION = 11  # Structured snapshot columns (drop JSON blobs)
 
 
 SCHEMA = """
@@ -30,14 +34,25 @@ CREATE TABLE IF NOT EXISTS process_events (
     entry_band TEXT NOT NULL,
     peak_band TEXT NOT NULL,
     peak_score INTEGER NOT NULL,
-    peak_snapshot TEXT NOT NULL
+    peak_snapshot_id INTEGER,
+    FOREIGN KEY (peak_snapshot_id) REFERENCES process_snapshots(id)
 );
 
 CREATE TABLE IF NOT EXISTS process_snapshots (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     event_id INTEGER NOT NULL,
     snapshot_type TEXT NOT NULL,
-    snapshot TEXT NOT NULL,
+    captured_at REAL NOT NULL,
+    cpu REAL NOT NULL,
+    state TEXT NOT NULL,
+    mem INTEGER NOT NULL,
+    cmprs INTEGER NOT NULL,
+    pageins INTEGER NOT NULL,
+    csw INTEGER NOT NULL,
+    sysbsd INTEGER NOT NULL,
+    threads INTEGER NOT NULL,
+    score INTEGER NOT NULL,
+    categories TEXT NOT NULL,
     FOREIGN KEY (event_id) REFERENCES process_events(id) ON DELETE CASCADE
 );
 
@@ -47,22 +62,123 @@ CREATE INDEX IF NOT EXISTS idx_process_events_open
     ON process_events(exit_time) WHERE exit_time IS NULL;
 CREATE INDEX IF NOT EXISTS idx_process_snapshots_event
     ON process_snapshots(event_id);
+CREATE INDEX IF NOT EXISTS idx_process_snapshots_score
+    ON process_snapshots(score);
 
-CREATE TABLE IF NOT EXISTS system_samples (
+-- Forensic captures linked to process events
+CREATE TABLE IF NOT EXISTS forensic_captures (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_id INTEGER NOT NULL,
     captured_at REAL NOT NULL,
-    data TEXT NOT NULL
+    trigger TEXT NOT NULL,
+    spindump_status TEXT,
+    tailspin_status TEXT,
+    logs_status TEXT,
+    FOREIGN KEY (event_id) REFERENCES process_events(id) ON DELETE CASCADE
 );
 
-CREATE INDEX IF NOT EXISTS idx_system_samples_captured
-    ON system_samples(captured_at);
+-- Process info from spindump
+CREATE TABLE IF NOT EXISTS spindump_processes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    capture_id INTEGER NOT NULL,
+    pid INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    path TEXT,
+    parent_pid INTEGER,
+    parent_name TEXT,
+    footprint_mb REAL,
+    cpu_time_sec REAL,
+    thread_count INTEGER,
+    FOREIGN KEY (capture_id) REFERENCES forensic_captures(id) ON DELETE CASCADE
+);
+
+-- Thread states from spindump
+CREATE TABLE IF NOT EXISTS spindump_threads (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    process_id INTEGER NOT NULL,
+    thread_id TEXT NOT NULL,
+    thread_name TEXT,
+    sample_count INTEGER,
+    priority INTEGER,
+    cpu_time_sec REAL,
+    state TEXT,
+    blocked_on TEXT,
+    FOREIGN KEY (process_id) REFERENCES spindump_processes(id) ON DELETE CASCADE
+);
+
+-- Log entries (from log show --style ndjson)
+CREATE TABLE IF NOT EXISTS log_entries (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    capture_id INTEGER NOT NULL,
+    timestamp TEXT NOT NULL,
+    mach_timestamp INTEGER,
+    subsystem TEXT,
+    category TEXT,
+    process_name TEXT,
+    process_id INTEGER,
+    message_type TEXT,
+    event_message TEXT NOT NULL,
+    FOREIGN KEY (capture_id) REFERENCES forensic_captures(id) ON DELETE CASCADE
+);
+
+-- Ring buffer context at capture time
+CREATE TABLE IF NOT EXISTS buffer_context (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    capture_id INTEGER NOT NULL,
+    sample_count INTEGER NOT NULL,
+    peak_score INTEGER NOT NULL,
+    culprits TEXT NOT NULL,
+    FOREIGN KEY (capture_id) REFERENCES forensic_captures(id) ON DELETE CASCADE
+);
+
+-- Indexes for forensic tables
+CREATE INDEX IF NOT EXISTS idx_forensic_captures_event ON forensic_captures(event_id);
+CREATE INDEX IF NOT EXISTS idx_spindump_processes_capture ON spindump_processes(capture_id);
+CREATE INDEX IF NOT EXISTS idx_spindump_threads_process ON spindump_threads(process_id);
+CREATE INDEX IF NOT EXISTS idx_log_entries_capture ON log_entries(capture_id);
+CREATE INDEX IF NOT EXISTS idx_buffer_context_capture ON buffer_context(capture_id);
 """
 
 
 def init_database(db_path: Path) -> None:
-    """Initialize database with WAL mode and schema."""
+    """Initialize database with WAL mode and schema.
+
+    If the database exists with a different schema version, it is deleted
+    and recreated. No migrations - schema mismatch means fresh start.
+    """
     db_path.parent.mkdir(parents=True, exist_ok=True)
 
+    # Check existing database schema version
+    if db_path.exists():
+        conn = sqlite3.connect(db_path)
+        try:
+            existing_version = _get_schema_version_raw(conn)
+            if existing_version != SCHEMA_VERSION:
+                log.info(
+                    "schema_mismatch",
+                    existing=existing_version,
+                    expected=SCHEMA_VERSION,
+                    action="recreate",
+                )
+                conn.close()
+                db_path.unlink()
+                # Also remove WAL and SHM files if they exist
+                wal_path = db_path.with_suffix(".db-wal")
+                shm_path = db_path.with_suffix(".db-shm")
+                if wal_path.exists():
+                    wal_path.unlink()
+                if shm_path.exists():
+                    shm_path.unlink()
+            else:
+                # Schema matches, nothing to do
+                conn.close()
+                return
+        except sqlite3.OperationalError:
+            # Corrupted or incompatible DB - delete and recreate
+            conn.close()
+            db_path.unlink()
+
+    # Create fresh database
     conn = sqlite3.connect(db_path)
     try:
         # WAL mode for concurrent reads
@@ -85,9 +201,17 @@ def init_database(db_path: Path) -> None:
         conn.close()
 
 
+def _get_schema_version_raw(conn: sqlite3.Connection) -> int:
+    """Get schema version without error handling (for init_database use)."""
+    row = conn.execute("SELECT value FROM daemon_state WHERE key = 'schema_version'").fetchone()
+    return int(row[0]) if row else 0
+
+
 def get_connection(db_path: Path) -> sqlite3.Connection:
-    """Get a database connection."""
-    return sqlite3.connect(db_path)
+    """Get a database connection with foreign keys enabled."""
+    conn = sqlite3.connect(db_path)
+    conn.execute("PRAGMA foreign_keys=ON")
+    return conn
 
 
 class DatabaseNotAvailable(Exception):
@@ -162,28 +286,25 @@ def set_daemon_state(conn: sqlite3.Connection, key: str, value: str) -> None:
 def prune_old_data(
     conn: sqlite3.Connection,
     events_days: int = 90,
-    system_samples_days: int = 7,
-) -> tuple[int, int]:
-    """Delete old closed process events and system samples.
+) -> int:
+    """Delete old closed process events (cascades to forensic data).
 
     Args:
         conn: Database connection
         events_days: Delete closed process_events older than this
-        system_samples_days: Delete system_samples older than this (default 7)
 
     Returns:
-        Tuple of (events_deleted, samples_deleted)
+        Number of events deleted
 
     Raises:
         ValueError: If retention days < 1
     """
-    if events_days < 1 or system_samples_days < 1:
+    if events_days < 1:
         raise ValueError("Retention days must be >= 1")
 
     cutoff_events = time.time() - (events_days * 86400)
-    cutoff_samples = time.time() - (system_samples_days * 86400)
 
-    # Delete old closed process events (cascades to snapshots)
+    # Delete old closed process events (cascades to snapshots and forensic captures)
     cursor = conn.execute(
         """
         DELETE FROM process_events
@@ -193,18 +314,11 @@ def prune_old_data(
     )
     events_deleted = cursor.rowcount
 
-    # Delete old system samples
-    cursor = conn.execute(
-        "DELETE FROM system_samples WHERE captured_at < ?",
-        (cutoff_samples,),
-    )
-    samples_deleted = cursor.rowcount
-
     conn.commit()
 
-    log.info("prune_complete", events_deleted=events_deleted, samples_deleted=samples_deleted)
+    log.info("prune_complete", events_deleted=events_deleted)
 
-    return events_deleted, samples_deleted
+    return events_deleted
 
 
 # --- Process Event CRUD Functions ---
@@ -219,14 +333,17 @@ def create_process_event(
     entry_band: str,
     peak_score: int,
     peak_band: str,
-    peak_snapshot: str,
 ) -> int:
-    """Create a new process event. Returns event ID."""
+    """Create a new process event. Returns event ID.
+
+    Note: peak_snapshot_id starts as NULL and must be set after inserting
+    the entry snapshot via update_process_event_peak().
+    """
     cursor = conn.execute(
         """INSERT INTO process_events
-           (pid, command, boot_time, entry_time, entry_band, peak_score, peak_band, peak_snapshot)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-        (pid, command, boot_time, entry_time, entry_band, peak_score, peak_band, peak_snapshot),
+           (pid, command, boot_time, entry_time, entry_band, peak_score, peak_band)
+           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+        (pid, command, boot_time, entry_time, entry_band, peak_score, peak_band),
     )
     conn.commit()
     result = cursor.lastrowid
@@ -237,7 +354,7 @@ def create_process_event(
 def get_open_events(conn: sqlite3.Connection, boot_time: int) -> list[dict]:
     """Get all open events (no exit_time) for current boot."""
     cursor = conn.execute(
-        """SELECT id, pid, command, entry_time, entry_band, peak_score, peak_band
+        """SELECT id, pid, command, entry_time, entry_band, peak_score, peak_band, peak_snapshot_id
            FROM process_events
            WHERE boot_time = ? AND exit_time IS NULL""",
         (boot_time,),
@@ -251,6 +368,7 @@ def get_open_events(conn: sqlite3.Connection, boot_time: int) -> list[dict]:
             "entry_band": r[4],
             "peak_score": r[5],
             "peak_band": r[6],
+            "peak_snapshot_id": r[7],
         }
         for r in cursor.fetchall()
     ]
@@ -318,18 +436,39 @@ def get_process_event_detail(conn: sqlite3.Connection, event_id: int) -> dict | 
         event_id: The event ID to retrieve
 
     Returns:
-        Event dict with all fields (including boot_time, peak_snapshot),
-        or None if not found
+        Event dict with all fields including peak_snapshot (as dict from
+        joined process_snapshots row), or None if not found
     """
     row = conn.execute(
-        """SELECT id, pid, command, boot_time, entry_time, exit_time,
-                  entry_band, peak_band, peak_score, peak_snapshot
-           FROM process_events WHERE id = ?""",
+        """SELECT e.id, e.pid, e.command, e.boot_time, e.entry_time, e.exit_time,
+                  e.entry_band, e.peak_band, e.peak_score, e.peak_snapshot_id,
+                  s.cpu, s.state, s.mem, s.cmprs, s.pageins, s.csw, s.sysbsd,
+                  s.threads, s.score, s.categories, s.captured_at
+           FROM process_events e
+           LEFT JOIN process_snapshots s ON e.peak_snapshot_id = s.id
+           WHERE e.id = ?""",
         (event_id,),
     ).fetchone()
 
     if not row:
         return None
+
+    # Build peak_snapshot dict from joined columns (or None if no snapshot)
+    peak_snapshot = None
+    if row[9] is not None:  # peak_snapshot_id exists
+        peak_snapshot = {
+            "cpu": row[10],
+            "state": row[11],
+            "mem": row[12],
+            "cmprs": row[13],
+            "pageins": row[14],
+            "csw": row[15],
+            "sysbsd": row[16],
+            "threads": row[17],
+            "score": row[18],
+            "categories": json.loads(row[19]) if row[19] else [],
+            "captured_at": row[20],
+        }
 
     return {
         "id": row[0],
@@ -341,7 +480,8 @@ def get_process_event_detail(conn: sqlite3.Connection, event_id: int) -> dict | 
         "entry_band": row[6],
         "peak_band": row[7],
         "peak_score": row[8],
-        "peak_snapshot": row[9],
+        "peak_snapshot_id": row[9],
+        "peak_snapshot": peak_snapshot,
     }
 
 
@@ -359,12 +499,14 @@ def update_process_event_peak(
     event_id: int,
     peak_score: int,
     peak_band: str,
-    peak_snapshot: str,
+    peak_snapshot_id: int,
 ) -> None:
-    """Update peak score/band/snapshot for an event."""
+    """Update peak score/band/snapshot_id for an event."""
     conn.execute(
-        "UPDATE process_events SET peak_score = ?, peak_band = ?, peak_snapshot = ? WHERE id = ?",
-        (peak_score, peak_band, peak_snapshot, event_id),
+        """UPDATE process_events
+           SET peak_score = ?, peak_band = ?, peak_snapshot_id = ?
+           WHERE id = ?""",
+        (peak_score, peak_band, peak_snapshot_id, event_id),
     )
     conn.commit()
 
@@ -373,60 +515,369 @@ def insert_process_snapshot(
     conn: sqlite3.Connection,
     event_id: int,
     snapshot_type: str,
-    snapshot: str,
-) -> None:
-    """Insert a snapshot for an event."""
-    conn.execute(
-        "INSERT INTO process_snapshots (event_id, snapshot_type, snapshot) VALUES (?, ?, ?)",
-        (event_id, snapshot_type, snapshot),
-    )
-    conn.commit()
-
-
-def insert_system_sample(
-    conn: sqlite3.Connection,
-    data: str,
-) -> None:
-    """Insert a periodic system sample for trend analysis.
-
-    Args:
-        conn: Database connection
-        data: JSON-serialized ProcessSamples data
-    """
-    conn.execute(
-        "INSERT INTO system_samples (captured_at, data) VALUES (?, ?)",
-        (time.time(), data),
-    )
-    conn.commit()
-
-
-def prune_system_samples(
-    conn: sqlite3.Connection,
-    days: int = 7,
+    score: "ProcessScore",
 ) -> int:
-    """Delete system samples older than specified days.
-
-    Args:
-        conn: Database connection
-        days: Delete samples older than this (default 7)
-
-    Returns:
-        Number of samples deleted
-    """
-    cutoff = time.time() - (days * 86400)
+    """Insert a snapshot for an event. Returns snapshot ID."""
     cursor = conn.execute(
-        "DELETE FROM system_samples WHERE captured_at < ?",
-        (cutoff,),
+        """INSERT INTO process_snapshots
+           (event_id, snapshot_type, captured_at, cpu, state, mem, cmprs,
+            pageins, csw, sysbsd, threads, score, categories)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            event_id,
+            snapshot_type,
+            score.captured_at,
+            score.cpu,
+            score.state,
+            score.mem,
+            score.cmprs,
+            score.pageins,
+            score.csw,
+            score.sysbsd,
+            score.threads,
+            score.score,
+            json.dumps(list(score.categories)),
+        ),
     )
-    deleted = cursor.rowcount
     conn.commit()
-    return deleted
+    result = cursor.lastrowid
+    assert result is not None
+    return result
 
 
-def get_last_system_sample_time(conn: sqlite3.Connection) -> float | None:
-    """Get timestamp of most recent system sample, or None if no samples exist."""
+def get_snapshot(conn: sqlite3.Connection, snapshot_id: int) -> dict | None:
+    """Get a snapshot by ID with all fields."""
+    row = conn.execute(
+        """SELECT id, event_id, snapshot_type, captured_at, cpu, state, mem,
+                  cmprs, pageins, csw, sysbsd, threads, score, categories
+           FROM process_snapshots WHERE id = ?""",
+        (snapshot_id,),
+    ).fetchone()
+
+    if not row:
+        return None
+
+    return {
+        "id": row[0],
+        "event_id": row[1],
+        "snapshot_type": row[2],
+        "captured_at": row[3],
+        "cpu": row[4],
+        "state": row[5],
+        "mem": row[6],
+        "cmprs": row[7],
+        "pageins": row[8],
+        "csw": row[9],
+        "sysbsd": row[10],
+        "threads": row[11],
+        "score": row[12],
+        "categories": json.loads(row[13]) if row[13] else [],
+    }
+
+
+def get_process_snapshots(conn: sqlite3.Connection, event_id: int) -> list[dict]:
+    """Get all snapshots for an event, ordered by capture time."""
     cursor = conn.execute(
-        "SELECT captured_at FROM system_samples ORDER BY captured_at DESC LIMIT 1"
+        """SELECT id, event_id, snapshot_type, captured_at, cpu, state, mem,
+                  cmprs, pageins, csw, sysbsd, threads, score, categories
+           FROM process_snapshots WHERE event_id = ?
+           ORDER BY captured_at""",
+        (event_id,),
     )
-    row = cursor.fetchone()
-    return row[0] if row else None
+    return [
+        {
+            "id": r[0],
+            "event_id": r[1],
+            "snapshot_type": r[2],
+            "captured_at": r[3],
+            "cpu": r[4],
+            "state": r[5],
+            "mem": r[6],
+            "cmprs": r[7],
+            "pageins": r[8],
+            "csw": r[9],
+            "sysbsd": r[10],
+            "threads": r[11],
+            "score": r[12],
+            "categories": json.loads(r[13]) if r[13] else [],
+        }
+        for r in cursor.fetchall()
+    ]
+
+
+# --- Forensic Capture Functions ---
+
+
+def create_forensic_capture(
+    conn: sqlite3.Connection,
+    event_id: int,
+    trigger: str,
+) -> int:
+    """Create a forensic capture record, return capture_id."""
+    cursor = conn.execute(
+        """INSERT INTO forensic_captures (event_id, captured_at, trigger)
+           VALUES (?, ?, ?)""",
+        (event_id, time.time(), trigger),
+    )
+    conn.commit()
+    result = cursor.lastrowid
+    assert result is not None
+    return result
+
+
+def update_forensic_capture_status(
+    conn: sqlite3.Connection,
+    capture_id: int,
+    spindump_status: str | None = None,
+    tailspin_status: str | None = None,
+    logs_status: str | None = None,
+) -> None:
+    """Update capture status fields."""
+    conn.execute(
+        """UPDATE forensic_captures
+           SET spindump_status = ?, tailspin_status = ?, logs_status = ?
+           WHERE id = ?""",
+        (spindump_status, tailspin_status, logs_status, capture_id),
+    )
+    conn.commit()
+
+
+def insert_spindump_process(
+    conn: sqlite3.Connection,
+    capture_id: int,
+    pid: int,
+    name: str,
+    path: str | None = None,
+    parent_pid: int | None = None,
+    parent_name: str | None = None,
+    footprint_mb: float | None = None,
+    cpu_time_sec: float | None = None,
+    thread_count: int | None = None,
+) -> int:
+    """Insert spindump process record, return process_id."""
+    cursor = conn.execute(
+        """INSERT INTO spindump_processes
+           (capture_id, pid, name, path, parent_pid, parent_name,
+            footprint_mb, cpu_time_sec, thread_count)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            capture_id,
+            pid,
+            name,
+            path,
+            parent_pid,
+            parent_name,
+            footprint_mb,
+            cpu_time_sec,
+            thread_count,
+        ),
+    )
+    conn.commit()
+    result = cursor.lastrowid
+    assert result is not None
+    return result
+
+
+def insert_spindump_thread(
+    conn: sqlite3.Connection,
+    process_id: int,
+    thread_id: str,
+    thread_name: str | None = None,
+    sample_count: int | None = None,
+    priority: int | None = None,
+    cpu_time_sec: float | None = None,
+    state: str | None = None,
+    blocked_on: str | None = None,
+) -> None:
+    """Insert spindump thread record."""
+    conn.execute(
+        """INSERT INTO spindump_threads
+           (process_id, thread_id, thread_name, sample_count,
+            priority, cpu_time_sec, state, blocked_on)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            process_id,
+            thread_id,
+            thread_name,
+            sample_count,
+            priority,
+            cpu_time_sec,
+            state,
+            blocked_on,
+        ),
+    )
+    conn.commit()
+
+
+def insert_log_entry(
+    conn: sqlite3.Connection,
+    capture_id: int,
+    timestamp: str,
+    event_message: str,
+    mach_timestamp: int | None = None,
+    subsystem: str | None = None,
+    category: str | None = None,
+    process_name: str | None = None,
+    process_id: int | None = None,
+    message_type: str | None = None,
+) -> None:
+    """Insert log entry record."""
+    conn.execute(
+        """INSERT INTO log_entries
+           (capture_id, timestamp, event_message, mach_timestamp,
+            subsystem, category, process_name, process_id, message_type)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            capture_id,
+            timestamp,
+            event_message,
+            mach_timestamp,
+            subsystem,
+            category,
+            process_name,
+            process_id,
+            message_type,
+        ),
+    )
+    conn.commit()
+
+
+def insert_buffer_context(
+    conn: sqlite3.Connection,
+    capture_id: int,
+    sample_count: int,
+    peak_score: int,
+    culprits: str,
+) -> None:
+    """Insert buffer context record (culprits is JSON string)."""
+    conn.execute(
+        """INSERT INTO buffer_context
+           (capture_id, sample_count, peak_score, culprits)
+           VALUES (?, ?, ?, ?)""",
+        (capture_id, sample_count, peak_score, culprits),
+    )
+    conn.commit()
+
+
+def get_forensic_captures(conn: sqlite3.Connection, event_id: int) -> list[dict]:
+    """Get all forensic captures for an event."""
+    cursor = conn.execute(
+        """SELECT id, event_id, captured_at, trigger,
+                  spindump_status, tailspin_status, logs_status
+           FROM forensic_captures WHERE event_id = ?
+           ORDER BY captured_at""",
+        (event_id,),
+    )
+    return [
+        {
+            "id": r[0],
+            "event_id": r[1],
+            "captured_at": r[2],
+            "trigger": r[3],
+            "spindump_status": r[4],
+            "tailspin_status": r[5],
+            "logs_status": r[6],
+        }
+        for r in cursor.fetchall()
+    ]
+
+
+def get_spindump_processes(conn: sqlite3.Connection, capture_id: int) -> list[dict]:
+    """Get spindump processes for a capture."""
+    cursor = conn.execute(
+        """SELECT id, capture_id, pid, name, path, parent_pid, parent_name,
+                  footprint_mb, cpu_time_sec, thread_count
+           FROM spindump_processes WHERE capture_id = ?
+           ORDER BY footprint_mb DESC NULLS LAST""",
+        (capture_id,),
+    )
+    return [
+        {
+            "id": r[0],
+            "capture_id": r[1],
+            "pid": r[2],
+            "name": r[3],
+            "path": r[4],
+            "parent_pid": r[5],
+            "parent_name": r[6],
+            "footprint_mb": r[7],
+            "cpu_time_sec": r[8],
+            "thread_count": r[9],
+        }
+        for r in cursor.fetchall()
+    ]
+
+
+def get_spindump_threads(conn: sqlite3.Connection, process_id: int) -> list[dict]:
+    """Get threads for a spindump process."""
+    cursor = conn.execute(
+        """SELECT id, process_id, thread_id, thread_name, sample_count,
+                  priority, cpu_time_sec, state, blocked_on
+           FROM spindump_threads WHERE process_id = ?
+           ORDER BY sample_count DESC NULLS LAST""",
+        (process_id,),
+    )
+    return [
+        {
+            "id": r[0],
+            "process_id": r[1],
+            "thread_id": r[2],
+            "thread_name": r[3],
+            "sample_count": r[4],
+            "priority": r[5],
+            "cpu_time_sec": r[6],
+            "state": r[7],
+            "blocked_on": r[8],
+        }
+        for r in cursor.fetchall()
+    ]
+
+
+def get_log_entries(
+    conn: sqlite3.Connection,
+    capture_id: int,
+    limit: int = 100,
+) -> list[dict]:
+    """Get log entries for a capture."""
+    cursor = conn.execute(
+        """SELECT id, capture_id, timestamp, mach_timestamp, subsystem,
+                  category, process_name, process_id, message_type, event_message
+           FROM log_entries WHERE capture_id = ?
+           ORDER BY timestamp LIMIT ?""",
+        (capture_id, limit),
+    )
+    return [
+        {
+            "id": r[0],
+            "capture_id": r[1],
+            "timestamp": r[2],
+            "mach_timestamp": r[3],
+            "subsystem": r[4],
+            "category": r[5],
+            "process_name": r[6],
+            "process_id": r[7],
+            "message_type": r[8],
+            "event_message": r[9],
+        }
+        for r in cursor.fetchall()
+    ]
+
+
+def get_buffer_context(conn: sqlite3.Connection, capture_id: int) -> dict | None:
+    """Get buffer context for a capture."""
+    row = conn.execute(
+        """SELECT id, capture_id, sample_count, peak_score, culprits
+           FROM buffer_context WHERE capture_id = ?""",
+        (capture_id,),
+    ).fetchone()
+
+    if not row:
+        return None
+
+    return {
+        "id": row[0],
+        "capture_id": row[1],
+        "sample_count": row[2],
+        "peak_score": row[3],
+        "culprits": row[4],
+    }
