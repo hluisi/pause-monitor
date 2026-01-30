@@ -8,6 +8,7 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import datetime
 
+import psutil
 import structlog
 from termcolor import colored
 
@@ -273,19 +274,55 @@ class Daemon:
             log.debug("pid_file_removed")
 
     def _check_already_running(self) -> bool:
-        """Check if daemon is already running."""
+        """Check if daemon is already running.
+
+        Verifies not just that a process with the PID exists, but that it's
+        actually the pause-monitor daemon. This prevents false positives after
+        a reboot when a different process may have the same PID.
+        """
         if not self.config.pid_path.exists():
             return False
 
         try:
             pid = int(self.config.pid_path.read_text().strip())
-            # Check if process exists
-            os.kill(pid, 0)
-            return True
-        except (ValueError, ProcessLookupError, PermissionError):
-            # PID file exists but process doesn't - stale file
+        except ValueError:
+            log.warning("pid_file_invalid", reason="not a number")
             self._remove_pid_file()
             return False
+
+        # Check if process exists and is actually the daemon
+        try:
+            proc = psutil.Process(pid)
+            cmdline = proc.cmdline()
+
+            # Check if this is actually pause-monitor
+            cmdline_str = " ".join(cmdline).lower()
+            if "pause-monitor" in cmdline_str or "pause_monitor" in cmdline_str:
+                log.info(
+                    "daemon_already_running_verified",
+                    pid=pid,
+                    cmdline=" ".join(cmdline[:3]),
+                )
+                return True
+            else:
+                # Process exists but it's not the daemon - stale PID file
+                log.warning(
+                    "pid_file_stale",
+                    reason="different process",
+                    pid=pid,
+                    actual_process=proc.name(),
+                )
+                self._remove_pid_file()
+                return False
+
+        except psutil.NoSuchProcess:
+            log.warning("pid_file_stale", reason="process not found", pid=pid)
+            self._remove_pid_file()
+            return False
+        except psutil.AccessDenied:
+            # Can't inspect process - assume it's running to be safe
+            log.warning("pid_check_access_denied", pid=pid)
+            return True
 
     async def _auto_prune(self) -> None:
         """Run automatic data pruning daily."""

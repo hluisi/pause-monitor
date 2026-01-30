@@ -221,8 +221,11 @@ class Config:
 
     @property
     def pid_path(self) -> Path:
-        """PID file path."""
-        return self.data_dir / "daemon.pid"
+        """PID file path.
+
+        Stored in /tmp/ so it's cleared on reboot, avoiding stale PID issues.
+        """
+        return Path("/tmp/pause-monitor/daemon.pid")
 
     @property
     def socket_path(self) -> Path:

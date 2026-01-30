@@ -207,7 +207,6 @@ def events_show(ctx, event_id: int, forensics: bool, threads: bool, logs: bool) 
             for cap in captures:
                 cap_time = datetime.fromtimestamp(cap["captured_at"])
                 click.echo(f"\n  [{cap['trigger']}] at {cap_time.strftime('%H:%M:%S')}")
-                click.echo(f"    Spindump: {cap['spindump_status'] or 'pending'}")
                 click.echo(f"    Tailspin: {cap['tailspin_status'] or 'pending'}")
                 click.echo(f"    Logs: {cap['logs_status'] or 'pending'}")
 
