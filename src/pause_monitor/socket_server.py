@@ -137,6 +137,17 @@ class SocketServer:
         log.info("socket_client_connected count=%d", len(self._clients))
 
         try:
+            # Send initial state with ring buffer history for sparkline
+            history = [s.samples.max_score for s in self.ring_buffer.samples]
+            initial_state = {
+                "type": "initial_state",
+                "history": history,
+                "sample_count": len(history),
+            }
+            data = json.dumps(initial_state).encode() + b"\n"
+            writer.write(data)
+            await writer.drain()
+
             # Keep connection alive until client disconnects
             # Client just needs to stay connected; data comes via broadcast()
             while self._running:

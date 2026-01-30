@@ -154,6 +154,11 @@ async def test_socket_server_broadcast_to_clients(short_tmp_path):
         # Wait for client to be registered
         await wait_until(lambda: server.has_clients)
 
+        # Read and verify initial_state message
+        init_data = await asyncio.wait_for(reader.readline(), timeout=2.0)
+        init_msg = json.loads(init_data.decode())
+        assert init_msg["type"] == "initial_state"
+
         # Broadcast a sample with ProcessSamples
         samples = make_test_samples(
             max_score=80,
@@ -269,18 +274,26 @@ async def test_socket_server_multiple_clients(short_tmp_path):
         # Wait for both clients to be registered
         await wait_until(lambda: len(server._clients) == 2)
 
+        # Read initial_state messages from both clients
+        init1 = await asyncio.wait_for(reader1.readline(), timeout=2.0)
+        init2 = await asyncio.wait_for(reader2.readline(), timeout=2.0)
+        assert json.loads(init1.decode())["type"] == "initial_state"
+        assert json.loads(init2.decode())["type"] == "initial_state"
+
         # Broadcast with ProcessSamples
         samples = make_test_samples(max_score=65)
         await server.broadcast(samples)
 
-        # Both clients should receive
+        # Both clients should receive the sample
         data1 = await asyncio.wait_for(reader1.readline(), timeout=2.0)
         data2 = await asyncio.wait_for(reader2.readline(), timeout=2.0)
 
         msg1 = json.loads(data1.decode())
         msg2 = json.loads(data2.decode())
 
+        assert msg1["type"] == "sample"
         assert msg1["max_score"] == 65
+        assert msg2["type"] == "sample"
         assert msg2["max_score"] == 65
 
         writer1.close()

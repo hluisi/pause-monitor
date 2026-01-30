@@ -223,6 +223,11 @@ async def test_full_collection_to_socket_cycle(short_tmp_path):
                 raise TimeoutError("Client not registered")
             await asyncio.sleep(0.01)
 
+        # Read initial_state message first
+        init_data = await asyncio.wait_for(reader.readline(), timeout=2.0)
+        init_msg = json.loads(init_data.decode())
+        assert init_msg["type"] == "initial_state"
+
         # Push to ring buffer
         buffer.push(samples)
 

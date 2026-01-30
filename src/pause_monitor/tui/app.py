@@ -898,7 +898,23 @@ class PauseMonitorApp(App):
             pass
 
     def _handle_socket_data(self, data: dict[str, Any]) -> None:
-        """Handle real-time sample from daemon socket."""
+        """Handle messages from daemon socket."""
+        msg_type = data.get("type", "sample")
+
+        if msg_type == "initial_state":
+            # Initial connection: populate sparkline with history
+            history = data.get("history", [])
+            if history:
+                try:
+                    header = self.query_one("#header", HeaderBar)
+                    header._sparkline_data = [float(s) for s in history]
+                    sparkline = header.query_one("#sparkline", Sparkline)
+                    sparkline.data = header._sparkline_data
+                except NoMatches:
+                    pass
+            return
+
+        # Regular sample message
         now = time.time()
 
         max_score = data.get("max_score", 0)
