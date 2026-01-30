@@ -19,6 +19,7 @@ class SystemConfig:
 
     ring_buffer_size: int = 60  # Number of samples to keep in ring buffer
     sample_interval: float = 1 / 3  # Seconds between samples (~0.333s = 3Hz)
+    forensics_debounce: float = 2.0  # Min seconds between forensics captures
 
 
 @dataclass
@@ -297,6 +298,9 @@ class Config:
             system=SystemConfig(
                 ring_buffer_size=system_data.get("ring_buffer_size", sys_defaults.ring_buffer_size),
                 sample_interval=system_data.get("sample_interval", sys_defaults.sample_interval),
+                forensics_debounce=system_data.get(
+                    "forensics_debounce", sys_defaults.forensics_debounce
+                ),
             ),
             bands=_load_bands_config(bands_data),
             scoring=_load_scoring_config(scoring_data),

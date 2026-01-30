@@ -8,6 +8,7 @@ import os
 import resource
 import signal
 import sqlite3
+import time
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -110,6 +111,7 @@ class Daemon:
         self._shutdown_event = asyncio.Event()
         self._auto_prune_task: asyncio.Task | None = None
         self._socket_server: SocketServer | None = None
+        self._last_forensics_time: float = 0.0  # For debouncing
 
     async def _forensics_callback(self, event_id: int, trigger: str) -> None:
         """Forensics callback for tracker band transitions.
@@ -121,6 +123,20 @@ class Daemon:
             event_id: The process event ID
             trigger: What triggered this capture (e.g., 'band_entry_high')
         """
+        # Debounce: tailspin needs at least 0.5s to refill its buffer after a save
+        now = time.monotonic()
+        elapsed = now - self._last_forensics_time
+        if elapsed < self.config.system.forensics_debounce:
+            log.info(
+                "forensics_debounced",
+                event_id=event_id,
+                trigger=trigger,
+                elapsed=round(elapsed, 2),
+                debounce=self.config.system.forensics_debounce,
+            )
+            return
+        self._last_forensics_time = now
+
         if self._conn is None:
             log.warning("forensics_skipped_no_db", event_id=event_id, trigger=trigger)
             return
@@ -223,6 +239,9 @@ class Daemon:
         # Start caffeinate to prevent App Nap
         await self._start_caffeinate()
 
+        # Ensure tailspin is enabled for forensics capture
+        await self._ensure_tailspin_enabled()
+
         # Start socket server for TUI communication
         self._socket_server = SocketServer(
             socket_path=self.config.socket_path,
@@ -260,6 +279,9 @@ class Daemon:
 
         # Stop caffeinate
         await self._stop_caffeinate()
+
+        # Disable tailspin tracing
+        await self._disable_tailspin()
 
         # Close database and tracker
         if self._conn:
@@ -301,6 +323,67 @@ class Daemon:
                 self._caffeinate_proc.kill()
             self._caffeinate_proc = None
             log.debug("caffeinate_stopped")
+
+    async def _ensure_tailspin_enabled(self) -> None:
+        """Ensure tailspin tracing is enabled for forensics capture.
+
+        Tailspin continuously records kernel events to a rolling buffer.
+        When we detect a system pause, we save this buffer to see what
+        happened during the freeze. Without tailspin enabled, forensics
+        captures fail with "trace too short" errors.
+        """
+        try:
+            # Check current status
+            proc = await asyncio.create_subprocess_exec(
+                "/usr/bin/tailspin",
+                "info",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+                stdin=asyncio.subprocess.DEVNULL,
+            )
+            stdout, _ = await proc.communicate()
+            output = stdout.decode("utf-8", errors="replace")
+
+            if "has been disabled" in output:
+                # Enable tailspin
+                enable_proc = await asyncio.create_subprocess_exec(
+                    "/usr/bin/tailspin",
+                    "enable",
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL,
+                    stdin=asyncio.subprocess.DEVNULL,
+                )
+                await enable_proc.wait()
+                log.info("tailspin_enabled", reason="was_disabled")
+            else:
+                log.debug("tailspin_already_enabled")
+
+        except FileNotFoundError:
+            log.warning("tailspin_not_found", msg="forensics captures will fail")
+        except OSError as e:
+            log.warning("tailspin_check_failed", error=str(e))
+
+    async def _disable_tailspin(self) -> None:
+        """Disable tailspin tracing on shutdown.
+
+        We disable tailspin when shutting down to avoid leaving it running
+        when the daemon isn't actively monitoring. Users who want tailspin
+        enabled persistently can run `tailspin enable` manually.
+        """
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "/usr/bin/tailspin",
+                "disable",
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+                stdin=asyncio.subprocess.DEVNULL,
+            )
+            await proc.wait()
+            log.info("tailspin_disabled")
+        except FileNotFoundError:
+            pass  # Already logged during startup
+        except OSError as e:
+            log.warning("tailspin_disable_failed", error=str(e))
 
     def _write_pid_file(self) -> None:
         """Write PID file."""
