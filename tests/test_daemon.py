@@ -278,13 +278,19 @@ def test_check_already_running_invalid_pid(tmp_path: Path):
 
 
 def test_check_already_running_current_process(tmp_path: Path):
-    """Returns True when PID file contains current process ID."""
+    """Returns True when PID file contains current process ID and cmdline matches."""
     config = Config()
     pid_file = tmp_path / "daemon.pid"
     # Write current process PID - this process definitely exists
     pid_file.write_text(str(os.getpid()))
 
-    with patch.object(Config, "pid_path", new_callable=lambda: property(lambda self: pid_file)):
+    with (
+        patch.object(Config, "pid_path", new_callable=lambda: property(lambda self: pid_file)),
+        patch("psutil.Process") as mock_process_class,
+    ):
+        mock_proc = mock_process_class.return_value
+        mock_proc.cmdline.return_value = ["python", "-m", "rogue_hunter.cli", "daemon"]
+
         daemon = Daemon(config)
         result = daemon._check_already_running()
 
@@ -303,8 +309,13 @@ async def test_daemon_start_rejects_duplicate(patched_config_paths):
 
     daemon = Daemon(config)
 
-    with pytest.raises(RuntimeError, match="already running"):
-        await daemon.start()
+    # Mock cmdline to look like rogue-hunter daemon
+    with patch("psutil.Process") as mock_process_class:
+        mock_proc = mock_process_class.return_value
+        mock_proc.cmdline.return_value = ["python", "-m", "rogue_hunter.cli", "daemon"]
+
+        with pytest.raises(RuntimeError, match="already running"):
+            await daemon.start()
 
 
 @pytest.mark.asyncio
