@@ -328,8 +328,11 @@ def get_process_name(pid: int) -> str:
     Returns:
         Process name, or empty string if not found.
     """
-    buffer = ctypes.create_string_buffer(MAXCOMLEN)
-    result = libproc.proc_name(pid, buffer, MAXCOMLEN)
+    # Use larger buffer - proc_name can return names longer than MAXCOMLEN (16)
+    # 256 bytes is plenty for any realistic process name
+    bufsize = 256
+    buffer = ctypes.create_string_buffer(bufsize)
+    result = libproc.proc_name(pid, buffer, bufsize)
     if result > 0:
         return buffer.value.decode("utf-8", errors="replace")
     return ""

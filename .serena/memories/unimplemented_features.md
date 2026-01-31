@@ -1,10 +1,19 @@
 # Unimplemented Features
 
-**Last audited:** 2026-01-30
+**Last audited:** 2026-01-31
 
 ## Summary
 
-Core functionality is complete. LibprocCollector, ProcessTracker, and all major design spec components are implemented. The codebase has no stubs. Remaining items are minor spec discrepancies and nice-to-have features.
+**Rogue Hunter** core functionality is complete. LibprocCollector scores all processes on 4 dimensions (blocking/contention/pressure/efficiency), ProcessTracker manages event lifecycle, and forensics capture works. No stubs exist in the codebase.
+
+**Recent fixes (2026-01-31):**
+- Rate calculation bug fixed (all rates were 0)
+- Rogue selection now always returns top N by score (TUI never empty)
+
+**Pending evaluation:** See `refactoring_discussion_2026-01-31` for:
+- Global stress score algorithm (peak from ALL vs top N)
+- MetricValue (current/low/high) usefulness
+- Normalization threshold tuning
 
 ---
 
@@ -14,7 +23,7 @@ Core functionality is complete. LibprocCollector, ProcessTracker, and all major 
 |----------|---------|----------|
 | (none) | - | - |
 
-No stubs found.
+No stubs found. All `pass` statements are in Click groups or custom exceptions (idiomatic Python).
 
 ---
 
@@ -22,7 +31,11 @@ No stubs found.
 
 | Config Key | Where | What Should Happen |
 |------------|-------|-------------------|
-| (none) | - | All config fields are actively used |
+| `system.sample_interval` | `config.py:21` | Used in daemon, but `config show` doesn't display it |
+| `system.forensics_debounce` | `config.py:22` | Used in daemon, but `config show` doesn't display it |
+| `bands.checkpoint_interval` | `config.py:37` | Used in tracker, but `config show` doesn't display it |
+
+**Impact:** Users running `pause-monitor config show` see an incomplete config. Low severity since users can read the TOML file directly.
 
 ---
 
@@ -30,8 +43,23 @@ No stubs found.
 
 | Design Spec Item | Actual Implementation | Notes |
 |------------------|----------------------|-------|
-| `BandsConfig.low = 20` | Not in config | Design spec shows this, but implementation uses implicit "low" band (score < medium). Harmless - band logic works correctly via `get_band()` method. |
-| `BandsConfig.forensics_cooldown = 60` | Not in config | Design spec mentions this, but forensics cooldown is not configurable. Hardcoded behavior exists in daemon. |
+| Band thresholds in design spec | Different defaults | Design spec shows `medium=40, elevated=60, high=80, critical=100`. Code uses `medium=20, elevated=40, high=50, critical=70`. Intentional — lower thresholds catch more events. |
+| `calibrate` command | Does not exist | Mentioned in old spec as low priority. Manual config editing works fine. |
+
+---
+
+## TUI Hardcoded Values
+
+| Location | Issue |
+|----------|-------|
+| `tui/app.py:25` | `TRACKING_THRESHOLD = 40` is hardcoded at module level |
+| `tui/app.py:30-32` | `get_tier_name()` uses hardcoded thresholds (80 for CRITICAL) |
+| `tui/app.py:222-224` | `watch_score()` uses hardcoded thresholds for CSS classes |
+| `tui/app.py:622` | `update_tracking()` uses `TRACKING_THRESHOLD` constant |
+
+**Impact:** If user changes `bands.elevated` in config, the daemon will track at the new threshold but the TUI display logic still uses 40. This could cause confusion where the TUI shows a process as "NORMAL" but the daemon is tracking it.
+
+**Fix:** The TUI has `self.config` available — the hardcoded constant should use `self.config.bands.tracking_threshold` (requires passing config to helper functions or making them methods).
 
 ---
 
@@ -39,43 +67,36 @@ No stubs found.
 
 | Feature | Status |
 |---------|--------|
-| `calibrate` command | Does not exist (mentioned in old spec, low priority) |
+| `calibrate` command | Not implemented (low priority, manual config editing suffices) |
 
 ---
 
-## Install Process Gaps
-
-| Step | Status |
-|------|--------|
-| Sudoers rule for `tailspin save` | Not implemented |
-| `tailspin enable` | Not called during install |
-| Remove live spindump capture | Code still attempts `spindump -notarget` |
-
-**Required sudoers rule** (`/etc/sudoers.d/pause-monitor`):
-```bash
-<user> ALL = (root) NOPASSWD: /usr/bin/tailspin save -o /Users/<user>/.local/share/pause-monitor/events/*
-```
-
-**Context:** Only `tailspin save` needs sudo. The rule is intentionally narrow — tailspin can only write to the events directory. Live spindump should be removed from forensics.py (tailspin decode provides the same data from during-the-pause, not after).
-
----
-
-## Other Missing Features
+## Other Gaps
 
 | Feature | Status |
 |---------|--------|
-| SIGHUP config reload | Only SIGTERM/SIGINT handled in daemon |
-| Event directory cleanup on prune | Prune deletes DB records but not forensics artifacts in events_dir |
+| SIGHUP config reload | Only SIGTERM/SIGINT handled in daemon. Hot reloading requires daemon restart. |
+| Event directory cleanup on prune | Prune deletes DB records but forensics artifacts go to `/tmp/pause-monitor/` and are deleted after processing. No orphan cleanup issue exists. |
 
 ---
 
 ## Priority
 
 ### Medium (Nice to Have)
-1. **Event directory cleanup** - Prune should also delete orphan forensics files in `~/.local/share/pause-monitor/events/`
-2. **Forensics cooldown config** - Make cooldown configurable via BandsConfig
-3. **Install sudoers setup** - Add sudoers rule for `tailspin save` during install
+1. **TUI threshold sync** - Use config values instead of hardcoded `TRACKING_THRESHOLD` in `tui/app.py`
+2. **`config show` completeness** - Display `sample_interval`, `forensics_debounce`, and `checkpoint_interval`
 
 ### Low (Tech Debt)
-4. **SIGHUP config reload** - Hot reloading config without daemon restart
-5. **Calibrate command** - Auto-tune thresholds based on system profile (low value, manual config editing works)
+3. **SIGHUP config reload** - Hot reloading config without daemon restart
+4. **`calibrate` command** - Auto-tune thresholds based on system profile (manual config editing works)
+
+---
+
+## Resolved Since Last Audit
+
+These items from the 2026-01-30 audit are now complete:
+
+- **Sudoers setup** - `_setup_sudoers()` implemented in install command
+- **`tailspin enable`** - Called during install
+- **`forensics_debounce` config** - Now in `SystemConfig`, used by daemon
+- **Live spindump removal** - Forensics only uses tailspin (decoded via `spindump -i`)

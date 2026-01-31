@@ -93,8 +93,10 @@ class ProcessScore:
     # ─────────────────────────────────────────────────────────────
     mem: MetricValue
     mem_peak: int  # Lifetime peak (doesn't need range)
-    pageins: MetricValue
-    faults: MetricValue
+    pageins: MetricValue  # Cumulative (for reference)
+    pageins_rate: MetricValue  # Page-ins per second
+    faults: MetricValue  # Cumulative (for reference)
+    faults_rate: MetricValue  # Faults per second
 
     # ─────────────────────────────────────────────────────────────
     # Disk I/O
@@ -105,10 +107,13 @@ class ProcessScore:
     # ─────────────────────────────────────────────────────────────
     # Activity
     # ─────────────────────────────────────────────────────────────
-    csw: MetricValue
-    syscalls: MetricValue
+    csw: MetricValue  # Cumulative (for reference)
+    csw_rate: MetricValue  # Context switches per second
+    syscalls: MetricValue  # Cumulative (for reference)
+    syscalls_rate: MetricValue  # Syscalls per second
     threads: MetricValue
-    mach_msgs: MetricValue
+    mach_msgs: MetricValue  # Cumulative (for reference)
+    mach_msgs_rate: MetricValue  # Messages per second
 
     # ─────────────────────────────────────────────────────────────
     # Efficiency
@@ -122,7 +127,16 @@ class ProcessScore:
     # ─────────────────────────────────────────────────────────────
     energy: MetricValue
     energy_rate: MetricValue
-    wakeups: MetricValue
+    wakeups: MetricValue  # Cumulative (for reference)
+    wakeups_rate: MetricValue  # Wakeups per second
+
+    # ─────────────────────────────────────────────────────────────
+    # Contention (scheduler pressure indicators)
+    # ─────────────────────────────────────────────────────────────
+    runnable_time: MetricValue  # Cumulative runnable time (ns)
+    runnable_time_rate: MetricValue  # ms runnable per second
+    qos_interactive: MetricValue  # Cumulative QoS interactive time (ns)
+    qos_interactive_rate: MetricValue  # ms interactive per second
 
     # ─────────────────────────────────────────────────────────────
     # State (categorical with hierarchy)
@@ -131,11 +145,16 @@ class ProcessScore:
     priority: MetricValue
 
     # ─────────────────────────────────────────────────────────────
-    # Scoring (our assessment)
+    # Scoring (4-category system)
     # ─────────────────────────────────────────────────────────────
-    score: MetricValue
-    band: MetricValueStr
-    categories: list[str]
+    score: MetricValue  # Final weighted score 0-100
+    band: MetricValueStr  # low/medium/elevated/high/critical
+    blocking_score: MetricValue  # 0-100, causes pauses
+    contention_score: MetricValue  # 0-100, fighting for resources
+    pressure_score: MetricValue  # 0-100, stressing system
+    efficiency_score: MetricValue  # 0-100, wasting resources
+    dominant_category: str  # "blocking"|"contention"|"pressure"|"efficiency"
+    dominant_metrics: list[str]  # ["pageins:847/s", "disk:42M/s"]
 
     def to_dict(self) -> dict:
         """Serialize to a dictionary."""
@@ -149,15 +168,20 @@ class ProcessScore:
             "mem": self.mem.to_dict(),
             "mem_peak": self.mem_peak,
             "pageins": self.pageins.to_dict(),
+            "pageins_rate": self.pageins_rate.to_dict(),
             "faults": self.faults.to_dict(),
+            "faults_rate": self.faults_rate.to_dict(),
             # Disk I/O
             "disk_io": self.disk_io.to_dict(),
             "disk_io_rate": self.disk_io_rate.to_dict(),
             # Activity
             "csw": self.csw.to_dict(),
+            "csw_rate": self.csw_rate.to_dict(),
             "syscalls": self.syscalls.to_dict(),
+            "syscalls_rate": self.syscalls_rate.to_dict(),
             "threads": self.threads.to_dict(),
             "mach_msgs": self.mach_msgs.to_dict(),
+            "mach_msgs_rate": self.mach_msgs_rate.to_dict(),
             # Efficiency
             "instructions": self.instructions.to_dict(),
             "cycles": self.cycles.to_dict(),
@@ -166,13 +190,24 @@ class ProcessScore:
             "energy": self.energy.to_dict(),
             "energy_rate": self.energy_rate.to_dict(),
             "wakeups": self.wakeups.to_dict(),
+            "wakeups_rate": self.wakeups_rate.to_dict(),
+            # Contention
+            "runnable_time": self.runnable_time.to_dict(),
+            "runnable_time_rate": self.runnable_time_rate.to_dict(),
+            "qos_interactive": self.qos_interactive.to_dict(),
+            "qos_interactive_rate": self.qos_interactive_rate.to_dict(),
             # State
             "state": self.state.to_dict(),
             "priority": self.priority.to_dict(),
             # Scoring
             "score": self.score.to_dict(),
             "band": self.band.to_dict(),
-            "categories": self.categories,
+            "blocking_score": self.blocking_score.to_dict(),
+            "contention_score": self.contention_score.to_dict(),
+            "pressure_score": self.pressure_score.to_dict(),
+            "efficiency_score": self.efficiency_score.to_dict(),
+            "dominant_category": self.dominant_category,
+            "dominant_metrics": self.dominant_metrics,
         }
 
     @classmethod
@@ -188,15 +223,20 @@ class ProcessScore:
             mem=MetricValue.from_dict(data["mem"]),
             mem_peak=data["mem_peak"],
             pageins=MetricValue.from_dict(data["pageins"]),
+            pageins_rate=MetricValue.from_dict(data["pageins_rate"]),
             faults=MetricValue.from_dict(data["faults"]),
+            faults_rate=MetricValue.from_dict(data["faults_rate"]),
             # Disk I/O
             disk_io=MetricValue.from_dict(data["disk_io"]),
             disk_io_rate=MetricValue.from_dict(data["disk_io_rate"]),
             # Activity
             csw=MetricValue.from_dict(data["csw"]),
+            csw_rate=MetricValue.from_dict(data["csw_rate"]),
             syscalls=MetricValue.from_dict(data["syscalls"]),
+            syscalls_rate=MetricValue.from_dict(data["syscalls_rate"]),
             threads=MetricValue.from_dict(data["threads"]),
             mach_msgs=MetricValue.from_dict(data["mach_msgs"]),
+            mach_msgs_rate=MetricValue.from_dict(data["mach_msgs_rate"]),
             # Efficiency
             instructions=MetricValue.from_dict(data["instructions"]),
             cycles=MetricValue.from_dict(data["cycles"]),
@@ -205,13 +245,24 @@ class ProcessScore:
             energy=MetricValue.from_dict(data["energy"]),
             energy_rate=MetricValue.from_dict(data["energy_rate"]),
             wakeups=MetricValue.from_dict(data["wakeups"]),
+            wakeups_rate=MetricValue.from_dict(data["wakeups_rate"]),
+            # Contention
+            runnable_time=MetricValue.from_dict(data["runnable_time"]),
+            runnable_time_rate=MetricValue.from_dict(data["runnable_time_rate"]),
+            qos_interactive=MetricValue.from_dict(data["qos_interactive"]),
+            qos_interactive_rate=MetricValue.from_dict(data["qos_interactive_rate"]),
             # State
             state=MetricValueStr.from_dict(data["state"]),
             priority=MetricValue.from_dict(data["priority"]),
             # Scoring
             score=MetricValue.from_dict(data["score"]),
             band=MetricValueStr.from_dict(data["band"]),
-            categories=data["categories"],
+            blocking_score=MetricValue.from_dict(data["blocking_score"]),
+            contention_score=MetricValue.from_dict(data["contention_score"]),
+            pressure_score=MetricValue.from_dict(data["pressure_score"]),
+            efficiency_score=MetricValue.from_dict(data["efficiency_score"]),
+            dominant_category=data["dominant_category"],
+            dominant_metrics=data["dominant_metrics"],
         )
 
     @classmethod
@@ -236,15 +287,20 @@ class ProcessScore:
             mem=MetricValue.from_dict(data["mem"]),
             mem_peak=data["mem_peak"],
             pageins=MetricValue.from_dict(data["pageins"]),
+            pageins_rate=MetricValue.from_dict(data["pageins_rate"]),
             faults=MetricValue.from_dict(data["faults"]),
+            faults_rate=MetricValue.from_dict(data["faults_rate"]),
             # Disk I/O
             disk_io=MetricValue.from_dict(data["disk_io"]),
             disk_io_rate=MetricValue.from_dict(data["disk_io_rate"]),
             # Activity
             csw=MetricValue.from_dict(data["csw"]),
+            csw_rate=MetricValue.from_dict(data["csw_rate"]),
             syscalls=MetricValue.from_dict(data["syscalls"]),
+            syscalls_rate=MetricValue.from_dict(data["syscalls_rate"]),
             threads=MetricValue.from_dict(data["threads"]),
             mach_msgs=MetricValue.from_dict(data["mach_msgs"]),
+            mach_msgs_rate=MetricValue.from_dict(data["mach_msgs_rate"]),
             # Efficiency
             instructions=MetricValue.from_dict(data["instructions"]),
             cycles=MetricValue.from_dict(data["cycles"]),
@@ -253,13 +309,24 @@ class ProcessScore:
             energy=MetricValue.from_dict(data["energy"]),
             energy_rate=MetricValue.from_dict(data["energy_rate"]),
             wakeups=MetricValue.from_dict(data["wakeups"]),
+            wakeups_rate=MetricValue.from_dict(data["wakeups_rate"]),
+            # Contention
+            runnable_time=MetricValue.from_dict(data["runnable_time"]),
+            runnable_time_rate=MetricValue.from_dict(data["runnable_time_rate"]),
+            qos_interactive=MetricValue.from_dict(data["qos_interactive"]),
+            qos_interactive_rate=MetricValue.from_dict(data["qos_interactive_rate"]),
             # State
             state=MetricValueStr.from_dict(data["state"]),
             priority=MetricValue.from_dict(data["priority"]),
             # Scoring
             score=MetricValue.from_dict(data["score"]),
             band=MetricValueStr.from_dict(data["band"]),
-            categories=data["categories"],
+            blocking_score=MetricValue.from_dict(data["blocking_score"]),
+            contention_score=MetricValue.from_dict(data["contention_score"]),
+            pressure_score=MetricValue.from_dict(data["pressure_score"]),
+            efficiency_score=MetricValue.from_dict(data["efficiency_score"]),
+            dominant_category=data["dominant_category"],
+            dominant_metrics=data["dominant_metrics"],
         )
 
 
@@ -305,12 +372,24 @@ def get_core_count() -> int:
 
 @dataclass
 class _PrevSample:
-    """Previous sample state for delta calculations (CPU%, disk rate, energy rate)."""
+    """Previous sample state for delta calculations.
+
+    All cumulative metrics that need rate calculations are stored here.
+    """
 
     cpu_time_ns: int  # Total CPU time (user + system) in nanoseconds
     disk_io: int  # Total disk I/O bytes (read + write)
     energy: int  # Total energy billed
     timestamp: float  # time.monotonic() when sampled
+    # Cumulative values that need rate calculation
+    pageins: int  # Total page-ins
+    csw: int  # Total context switches
+    syscalls: int  # Total syscalls (mach + unix)
+    mach_msgs: int  # Total mach messages (sent + received)
+    wakeups: int  # Total wakeups (pkg_idle + interrupt)
+    faults: int  # Total page faults
+    runnable_time: int  # Total runnable time (mach time units)
+    qos_interactive: int  # Total QoS interactive time (mach time units)
 
 
 class LibprocCollector:
@@ -392,14 +471,30 @@ class LibprocCollector:
             instructions = rusage.ri_instructions
             cycles = rusage.ri_cycles
 
+            # Extract cumulative values that were previously scored incorrectly
+            pageins = rusage.ri_pageins
+            csw = task_info.pti_csw
+            syscalls = task_info.pti_syscalls_mach + task_info.pti_syscalls_unix
+            mach_msgs = task_info.pti_messages_sent + task_info.pti_messages_received
+            wakeups = rusage.ri_pkg_idle_wkups + rusage.ri_interrupt_wkups
+            faults = task_info.pti_faults
+            runnable_time = rusage.ri_runnable_time
+            qos_interactive = rusage.ri_cpu_time_qos_user_interactive
+
             # Calculate deltas/rates from previous sample
             cpu_percent = 0.0
             disk_io_rate = 0.0
             energy_rate = 0.0
-            if self._last_collect_time > 0:
-                wall_delta_sec = start - self._last_collect_time
-            else:
-                wall_delta_sec = 0.0
+            pageins_rate = 0.0
+            csw_rate = 0.0
+            syscalls_rate = 0.0
+            mach_msgs_rate = 0.0
+            wakeups_rate = 0.0
+            faults_rate = 0.0
+            runnable_time_rate = 0.0  # ms of runnable per second
+            qos_interactive_rate = 0.0  # ms of interactive QoS per second
+
+            wall_delta_sec = wall_delta_ns / 1e9
 
             if wall_delta_ns > 0 and pid in self._prev_samples:
                 prev = self._prev_samples[pid]
@@ -416,6 +511,44 @@ class LibprocCollector:
                 if energy_delta > 0 and wall_delta_sec > 0:
                     energy_rate = energy_delta / wall_delta_sec
 
+                # New rate calculations
+                if wall_delta_sec > 0:
+                    pageins_delta = pageins - prev.pageins
+                    if pageins_delta > 0:
+                        pageins_rate = pageins_delta / wall_delta_sec
+
+                    csw_delta = csw - prev.csw
+                    if csw_delta > 0:
+                        csw_rate = csw_delta / wall_delta_sec
+
+                    syscalls_delta = syscalls - prev.syscalls
+                    if syscalls_delta > 0:
+                        syscalls_rate = syscalls_delta / wall_delta_sec
+
+                    mach_msgs_delta = mach_msgs - prev.mach_msgs
+                    if mach_msgs_delta > 0:
+                        mach_msgs_rate = mach_msgs_delta / wall_delta_sec
+
+                    wakeups_delta = wakeups - prev.wakeups
+                    if wakeups_delta > 0:
+                        wakeups_rate = wakeups_delta / wall_delta_sec
+
+                    faults_delta = faults - prev.faults
+                    if faults_delta > 0:
+                        faults_rate = faults_delta / wall_delta_sec
+
+                    # runnable_time is in mach units, convert to ms/sec
+                    runnable_delta = runnable_time - prev.runnable_time
+                    if runnable_delta > 0:
+                        runnable_ns = abs_to_ns(runnable_delta, self._timebase)
+                        runnable_time_rate = (runnable_ns / 1e6) / wall_delta_sec
+
+                    # qos_interactive is in mach units, convert to ms/sec
+                    qos_delta = qos_interactive - prev.qos_interactive
+                    if qos_delta > 0:
+                        qos_ns = abs_to_ns(qos_delta, self._timebase)
+                        qos_interactive_rate = (qos_ns / 1e6) / wall_delta_sec
+
             # IPC (instructions per cycle) - no delta needed
             ipc = instructions / cycles if cycles > 0 else 0.0
 
@@ -425,6 +558,14 @@ class LibprocCollector:
                 disk_io=disk_io,
                 energy=energy,
                 timestamp=start,
+                pageins=pageins,
+                csw=csw,
+                syscalls=syscalls,
+                mach_msgs=mach_msgs,
+                wakeups=wakeups,
+                faults=faults,
+                runnable_time=runnable_time,
+                qos_interactive=qos_interactive,
             )
 
             # Get process name (try proc_name first, fall back to pbi_comm)
@@ -446,16 +587,21 @@ class LibprocCollector:
                 # Memory
                 "mem": rusage.ri_phys_footprint,
                 "mem_peak": rusage.ri_lifetime_max_phys_footprint,
-                "pageins": rusage.ri_pageins,
-                "faults": task_info.pti_faults,
+                "pageins": pageins,
+                "pageins_rate": pageins_rate,
+                "faults": faults,
+                "faults_rate": faults_rate,
                 # Disk I/O
                 "disk_io": disk_io,
                 "disk_io_rate": disk_io_rate,
                 # Activity
-                "csw": task_info.pti_csw,
-                "syscalls": task_info.pti_syscalls_mach + task_info.pti_syscalls_unix,
+                "csw": csw,
+                "csw_rate": csw_rate,
+                "syscalls": syscalls,
+                "syscalls_rate": syscalls_rate,
                 "threads": task_info.pti_threadnum,
-                "mach_msgs": task_info.pti_messages_sent + task_info.pti_messages_received,
+                "mach_msgs": mach_msgs,
+                "mach_msgs_rate": mach_msgs_rate,
                 # Efficiency
                 "instructions": instructions,
                 "cycles": cycles,
@@ -463,7 +609,13 @@ class LibprocCollector:
                 # Power
                 "energy": energy,
                 "energy_rate": energy_rate,
-                "wakeups": rusage.ri_pkg_idle_wkups + rusage.ri_interrupt_wkups,
+                "wakeups": wakeups,
+                "wakeups_rate": wakeups_rate,
+                # Contention
+                "runnable_time": runnable_time,
+                "runnable_time_rate": runnable_time_rate,
+                "qos_interactive": qos_interactive,
+                "qos_interactive_rate": qos_interactive_rate,
                 # State
                 "state": state,
                 "priority": task_info.pti_priority,
@@ -475,8 +627,9 @@ class LibprocCollector:
         for pid in stale_pids:
             del self._prev_samples[pid]
 
-        rogues = self._select_rogues(all_processes)
-        scored = [self._score_process(p) for p in rogues]
+        # Score ALL processes first (cheap - just math), then select
+        all_scored = [self._score_process(p) for p in all_processes]
+        scored = self._select_rogues(all_scored)
 
         elapsed_ms = int((time.monotonic() - start) * 1000)
         # Hybrid: max(peak, rms) - bad actors visible, cumulative stress can push higher
@@ -503,75 +656,32 @@ class LibprocCollector:
 
     # ─────────────────────────────────────────────────────────────────────────
 
-    def _select_rogues(self, processes: list[dict]) -> list[dict]:
-        """Apply rogue selection rules from config.
+    def _select_rogues(self, scored: list[ProcessScore]) -> list[ProcessScore]:
+        """Select top processes for display.
 
-        Returns a list of process dicts with an added '_categories' set
-        indicating why each process was selected.
+        Selection priority:
+        1. Stuck processes (always first - these are critical)
+        2. Remaining slots filled by highest-scoring processes
+
+        Always returns up to max_count processes, ensuring TUI always has data.
+        ProcessTracker independently decides which to persist based on tracking_threshold.
         """
-        selected: dict[int, dict] = {}  # pid -> process with _categories
+        cfg = self.config.rogue_selection
+        stuck: list[ProcessScore] = []
+        rest: list[ProcessScore] = []
 
-        # 1. Always include stuck (hardcoded, not configurable)
-        for proc in processes:
-            if proc["state"] == "stuck":
-                pid = proc["pid"]
-                if pid not in selected:
-                    selected[pid] = {**proc, "_categories": set()}
-                selected[pid]["_categories"].add("stuck")
+        for p in scored:
+            if p.state.current == "stuck":
+                stuck.append(p)
+            else:
+                rest.append(p)
 
-        # 2. Include configured states (zombie, etc.) - excluding stuck which is already handled
-        state_cfg = self.config.rogue_selection.state
-        if state_cfg.enabled:
-            matching = [
-                p for p in processes if p["state"] in state_cfg.states and p["state"] != "stuck"
-            ]
-            if state_cfg.count > 0:
-                matching = matching[: state_cfg.count]
-            for proc in matching:
-                pid = proc["pid"]
-                if pid not in selected:
-                    selected[pid] = {**proc, "_categories": set()}
-                selected[pid]["_categories"].add("state")
+        # Sort each group by score descending
+        stuck.sort(key=lambda p: p.score.current, reverse=True)
+        rest.sort(key=lambda p: p.score.current, reverse=True)
 
-        # 3. Top N per enabled category above threshold
-        categories = [
-            ("cpu", "cpu", self.config.rogue_selection.cpu),
-            ("mem", "mem", self.config.rogue_selection.mem),
-            ("threads", "threads", self.config.rogue_selection.threads),
-            ("csw", "csw", self.config.rogue_selection.csw),
-            ("syscalls", "syscalls", self.config.rogue_selection.syscalls),
-            ("pageins", "pageins", self.config.rogue_selection.pageins),
-        ]
-
-        for cat_name, metric, cfg in categories:
-            if not cfg.enabled:
-                continue
-
-            # Filter by threshold and sort
-            eligible = [p for p in processes if p[metric] > cfg.threshold]
-            eligible.sort(key=lambda p: p[metric], reverse=True)
-
-            # Take top N
-            for proc in eligible[: cfg.count]:
-                pid = proc["pid"]
-                if pid not in selected:
-                    selected[pid] = {**proc, "_categories": set()}
-                selected[pid]["_categories"].add(cat_name)
-
-        return list(selected.values())
-
-    def _normalize_state(self, state: str) -> float:
-        """Normalize state to 0-1 scale for base score calculation."""
-        if state == "stuck":
-            return 1.0
-        elif state == "zombie":
-            return 0.8
-        elif state == "halted":
-            return 0.6
-        elif state == "stopped":
-            return 0.4
-        else:
-            return 0.0
+        # Combine: stuck first, then top scorers
+        return (stuck + rest)[: cfg.max_count]
 
     def _get_band(self, score: int) -> str:
         """Derive band name from score using config thresholds."""
@@ -585,54 +695,146 @@ class LibprocCollector:
         """Create a MetricValueStr with same current/low/high (daemon enriches later)."""
         return MetricValueStr(current=value, low=value, high=value)
 
-    def _score_process(self, proc: dict) -> ProcessScore:
-        """Compute stressor score using config weights, then apply state multiplier."""
-        weights = self.config.scoring.weights
-        multipliers = self.config.scoring.state_multipliers
+    def _get_dominant_metrics(self, proc: dict, category: str) -> list[str]:
+        """Get human-readable descriptions of top metrics for the dominant category."""
         norm = self.config.scoring.normalization
+        metrics = []
 
-        # Normalize each metric to 0-1 scale using configurable maximums
-        normalized = {
-            "cpu": min(1.0, proc["cpu"] / norm.cpu),
-            "state": self._normalize_state(proc["state"]),
-            "pageins": min(1.0, proc["pageins"] / norm.pageins),
-            "mem": min(1.0, proc["mem"] / (norm.mem_gb * 1024**3)),
-            "csw": min(1.0, proc["csw"] / norm.csw),
-            "syscalls": min(1.0, proc["syscalls"] / norm.syscalls),
-            "threads": min(1.0, proc["threads"] / norm.threads),
-            "disk_io_rate": min(1.0, proc["disk_io_rate"] / norm.disk_io_rate),
-            "energy_rate": min(1.0, proc["energy_rate"] / norm.energy_rate),
-            "wakeups": min(1.0, proc["wakeups"] / norm.wakeups),
-            # IPC: inverse scoring — low IPC is bad (stalled pipeline)
-            "ipc": (
-                max(0.0, 1.0 - (proc["ipc"] / norm.ipc_min)) if proc["ipc"] < norm.ipc_min else 0.0
-            ),
-        }
+        if category == "blocking":
+            # Check pageins_rate, disk_io_rate, faults_rate
+            if proc["pageins_rate"] > 0:
+                metrics.append(f"pageins:{int(proc['pageins_rate'])}/s")
+            if proc["disk_io_rate"] > 0:
+                rate = proc["disk_io_rate"]
+                if rate >= 1024 * 1024:
+                    metrics.append(f"disk:{rate / (1024 * 1024):.1f}M/s")
+                elif rate >= 1024:
+                    metrics.append(f"disk:{rate / 1024:.0f}K/s")
+                else:
+                    metrics.append(f"disk:{rate:.0f}B/s")
+            if proc["faults_rate"] > 0:
+                metrics.append(f"faults:{int(proc['faults_rate'])}/s")
 
-        # Weighted sum (base score - what this process WOULD contribute if active)
+        elif category == "contention":
+            # Check runnable_time_rate, csw_rate, cpu
+            if proc["runnable_time_rate"] > 0:
+                metrics.append(f"runnable:{proc['runnable_time_rate']:.0f}ms/s")
+            if proc["csw_rate"] > 0:
+                val = proc["csw_rate"]
+                if val >= 1000:
+                    metrics.append(f"csw:{val / 1000:.1f}k/s")
+                else:
+                    metrics.append(f"csw:{val:.0f}/s")
+            if proc["cpu"] > 0:
+                metrics.append(f"cpu:{proc['cpu']:.0f}%")
+
+        elif category == "pressure":
+            # Check mem, wakeups_rate, syscalls_rate
+            if proc["mem"] > 0:
+                mem = proc["mem"]
+                if mem >= 1024**3:
+                    metrics.append(f"mem:{mem / (1024**3):.1f}G")
+                else:
+                    metrics.append(f"mem:{mem / (1024**2):.0f}M")
+            if proc["wakeups_rate"] > 0:
+                metrics.append(f"wakeups:{int(proc['wakeups_rate'])}/s")
+            if proc["syscalls_rate"] > 0:
+                val = proc["syscalls_rate"]
+                if val >= 1000:
+                    metrics.append(f"syscalls:{val / 1000:.1f}k/s")
+                else:
+                    metrics.append(f"syscalls:{val:.0f}/s")
+
+        elif category == "efficiency":
+            # Check ipc, threads
+            if proc["ipc"] > 0 and proc["ipc"] < norm.ipc_min:
+                metrics.append(f"ipc:{proc['ipc']:.2f}")
+            if proc["threads"] > 10:
+                metrics.append(f"threads:{proc['threads']}")
+
+        return metrics[:3]  # Limit to top 3
+
+    def _score_process(self, proc: dict) -> ProcessScore:
+        """Compute 4-category stress scores, then weighted final score.
+
+        Categories:
+        - Blocking (40%): Things that CAUSE pauses (I/O, paging)
+        - Contention (30%): Fighting for resources (scheduler pressure)
+        - Pressure (20%): Stressing system resources (memory, syscalls)
+        - Efficiency (10%): Wasting resources (stalled pipeline, too many threads)
+        """
+        norm = self.config.scoring.normalization
+        multipliers = self.config.scoring.state_multipliers
+
+        # ═══════════════════════════════════════════════════════════════════
+        # BLOCKING SCORE (40% of final) - Things that CAUSE pauses
+        # ═══════════════════════════════════════════════════════════════════
+        if proc["state"] == "stuck":
+            blocking_score = 100.0  # Automatic max for stuck processes
+        else:
+            blocking_score = (
+                min(1.0, proc["pageins_rate"] / norm.pageins_rate) * 35
+                + min(1.0, proc["disk_io_rate"] / norm.disk_io_rate) * 35
+                + min(1.0, proc["faults_rate"] / norm.faults_rate) * 30
+            )
+
+        # ═══════════════════════════════════════════════════════════════════
+        # CONTENTION SCORE (30% of final) - Fighting for resources
+        # ═══════════════════════════════════════════════════════════════════
+        contention_score = (
+            min(1.0, proc["runnable_time_rate"] / norm.runnable_time_rate) * 30
+            + min(1.0, proc["csw_rate"] / norm.csw_rate) * 30
+            + min(1.0, proc["cpu"] / norm.cpu) * 25
+            + min(1.0, proc["qos_interactive_rate"] / norm.qos_interactive_rate) * 15
+        )
+
+        # ═══════════════════════════════════════════════════════════════════
+        # PRESSURE SCORE (20% of final) - Stressing system resources
+        # ═══════════════════════════════════════════════════════════════════
+        pressure_score = (
+            min(1.0, proc["mem"] / (norm.mem_gb * 1024**3)) * 35
+            + min(1.0, proc["wakeups_rate"] / norm.wakeups_rate) * 25
+            + min(1.0, proc["syscalls_rate"] / norm.syscalls_rate) * 20
+            + min(1.0, proc["mach_msgs_rate"] / norm.mach_msgs_rate) * 20
+        )
+
+        # ═══════════════════════════════════════════════════════════════════
+        # EFFICIENCY SCORE (10% of final) - Wasting resources
+        # ═══════════════════════════════════════════════════════════════════
+        # Low IPC with high cycles = stalled pipeline (wasting CPU)
+        ipc_penalty = (
+            max(0.0, 1.0 - proc["ipc"] / norm.ipc_min) if proc["ipc"] < norm.ipc_min else 0.0
+        )
+        has_cycles = 1.0 if proc["cycles"] > 0 else 0.0
+        efficiency_score = (ipc_penalty * has_cycles) * 60 + min(
+            1.0, proc["threads"] / norm.threads
+        ) * 40
+
+        # ═══════════════════════════════════════════════════════════════════
+        # FINAL SCORE - Weighted combination
+        # ═══════════════════════════════════════════════════════════════════
         base_score = (
-            normalized["cpu"] * weights.cpu
-            + normalized["state"] * weights.state
-            + normalized["pageins"] * weights.pageins
-            + normalized["mem"] * weights.mem
-            + normalized["csw"] * weights.csw
-            + normalized["syscalls"] * weights.syscalls
-            + normalized["threads"] * weights.threads
-            + normalized["disk_io_rate"] * weights.disk_io_rate
-            + normalized["energy_rate"] * weights.energy_rate
-            + normalized["wakeups"] * weights.wakeups
-            + normalized["ipc"] * weights.ipc
+            blocking_score * 0.40
+            + contention_score * 0.30
+            + pressure_score * 0.20
+            + efficiency_score * 0.10
         )
 
         # Apply state multiplier (discount for currently-inactive processes)
         state_mult = multipliers.get(proc["state"])
+        final_score = min(100, int(base_score * state_mult))
 
-        # Multi-category bonus: processes triggering 3+ categories are more suspicious
-        category_count = len(proc["_categories"])
-        category_bonus = 1.0 + (0.1 * max(0, category_count - 2))
+        # Determine dominant category
+        scores = {
+            "blocking": blocking_score,
+            "contention": contention_score,
+            "pressure": pressure_score,
+            "efficiency": efficiency_score,
+        }
+        dominant_category = max(scores, key=lambda k: scores[k])
+        dominant_metrics = self._get_dominant_metrics(proc, dominant_category)
 
-        score = min(100, int(base_score * state_mult * category_bonus))
-        band = self._get_band(score)
+        band = self._get_band(final_score)
         captured_at = time.time()
 
         return ProcessScore(
@@ -645,15 +847,20 @@ class LibprocCollector:
             mem=self._make_metric(proc["mem"]),
             mem_peak=proc["mem_peak"],
             pageins=self._make_metric(proc["pageins"]),
+            pageins_rate=self._make_metric(proc["pageins_rate"]),
             faults=self._make_metric(proc["faults"]),
+            faults_rate=self._make_metric(proc["faults_rate"]),
             # Disk I/O
             disk_io=self._make_metric(proc["disk_io"]),
             disk_io_rate=self._make_metric(proc["disk_io_rate"]),
             # Activity
             csw=self._make_metric(proc["csw"]),
+            csw_rate=self._make_metric(proc["csw_rate"]),
             syscalls=self._make_metric(proc["syscalls"]),
+            syscalls_rate=self._make_metric(proc["syscalls_rate"]),
             threads=self._make_metric(proc["threads"]),
             mach_msgs=self._make_metric(proc["mach_msgs"]),
+            mach_msgs_rate=self._make_metric(proc["mach_msgs_rate"]),
             # Efficiency
             instructions=self._make_metric(proc["instructions"]),
             cycles=self._make_metric(proc["cycles"]),
@@ -662,11 +869,22 @@ class LibprocCollector:
             energy=self._make_metric(proc["energy"]),
             energy_rate=self._make_metric(proc["energy_rate"]),
             wakeups=self._make_metric(proc["wakeups"]),
+            wakeups_rate=self._make_metric(proc["wakeups_rate"]),
+            # Contention
+            runnable_time=self._make_metric(proc["runnable_time"]),
+            runnable_time_rate=self._make_metric(proc["runnable_time_rate"]),
+            qos_interactive=self._make_metric(proc["qos_interactive"]),
+            qos_interactive_rate=self._make_metric(proc["qos_interactive_rate"]),
             # State
             state=self._make_metric_str(proc["state"]),
             priority=self._make_metric(proc["priority"]),
             # Scoring
-            score=self._make_metric(score),
+            score=self._make_metric(final_score),
             band=self._make_metric_str(band),
-            categories=list(proc["_categories"]),
+            blocking_score=self._make_metric(blocking_score),
+            contention_score=self._make_metric(contention_score),
+            pressure_score=self._make_metric(pressure_score),
+            efficiency_score=self._make_metric(efficiency_score),
+            dominant_category=dominant_category,
+            dominant_metrics=dominant_metrics,
         )

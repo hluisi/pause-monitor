@@ -1,8 +1,10 @@
 # Architecture Post-Mortem
 
 **Written:** 2026-01-29
-**Updated:** 2026-01-30
-**Status:** Historical reference — collector issue resolved
+**Updated:** 2026-01-31
+**Status:** Historical reference — issues resolved
+
+> **Context:** This postmortem was written during the transition from "Pause Monitor" to **Rogue Hunter**. The collector issues described here are fully resolved. LibprocCollector now scores all processes on 4 dimensions (blocking/contention/pressure/efficiency), and the TUI always shows top rogues.
 
 > **Resolved 2026-01-30:** TopCollector replaced with LibprocCollector (commits `ecb4748`, `b32310e`). The collector section below is preserved as historical context.
 

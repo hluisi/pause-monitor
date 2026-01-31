@@ -75,28 +75,6 @@ class BandsConfig:
 
 
 @dataclass
-class ScoringWeights:
-    """Weights for per-process stressor scoring (sum to 100).
-
-    New fields added: disk_io_rate, energy_rate, wakeups, ipc.
-    Removed: cmprs (not reliably available from libproc).
-    Renamed: sysbsd → syscalls.
-    """
-
-    cpu: int = 20
-    state: int = 15
-    pageins: int = 12
-    mem: int = 12
-    csw: int = 10
-    syscalls: int = 8
-    threads: int = 3
-    disk_io_rate: int = 8
-    energy_rate: int = 5
-    wakeups: int = 4
-    ipc: int = 3  # Inverse: low IPC is concerning
-
-
-@dataclass
 class StateMultipliers:
     """Post-score multipliers based on process state. Applied after base score calculation."""
 
@@ -119,58 +97,56 @@ class NormalizationConfig:
 
     Each value represents what counts as "maxed out" for that metric.
     A process at this value scores 1.0 for that metric component.
+
+    Rate thresholds are per-second values, NOT cumulative totals.
     """
 
-    cpu: float = 100.0  # Percentage (natural max)
+    # Basic metrics
+    cpu: float = 100.0  # CPU percentage (natural max)
     mem_gb: float = 8.0  # Memory in gigabytes
-    pageins: int = 1000  # Page-ins per sample
-    csw: int = 100000  # Context switches per sample
-    syscalls: int = 100000  # Syscalls per sample (renamed from sysbsd)
-    threads: int = 1000  # Thread count
+
+    # Rate thresholds (per second) - used for 4-category scoring
+    pageins_rate: float = 100.0  # 100 page-ins/sec = serious thrashing
+    faults_rate: float = 10_000.0  # 10k faults/sec
+    csw_rate: float = 10_000.0  # 10k context switches/sec
+    syscalls_rate: float = 100_000.0  # 100k syscalls/sec
+    mach_msgs_rate: float = 10_000.0  # 10k mach messages/sec
+    wakeups_rate: float = 1_000.0  # 1k wakeups/sec
     disk_io_rate: float = 100_000_000  # 100 MB/s
-    energy_rate: float = 1_000_000  # Energy units/sec
-    wakeups: int = 10_000  # Wakeups per sample
+
+    # Contention thresholds
+    runnable_time_rate: float = 100.0  # 100ms runnable per second (10% contention)
+    qos_interactive_rate: float = 100.0  # 100ms interactive QoS per second
+
+    # Efficiency thresholds
+    threads: int = 100  # 100 threads is already excessive
     ipc_min: float = 0.5  # IPC below this is concerning (inverse scoring)
 
 
 @dataclass
 class ScoringConfig:
-    """Scoring configuration."""
+    """Scoring configuration.
 
-    weights: ScoringWeights = field(default_factory=ScoringWeights)
+    Uses 4-category scoring (blocking, contention, pressure, efficiency).
+    Weights are hardcoded: 40%, 30%, 20%, 10%.
+    """
+
     state_multipliers: StateMultipliers = field(default_factory=StateMultipliers)
     normalization: NormalizationConfig = field(default_factory=NormalizationConfig)
 
 
 @dataclass
-class CategorySelection:
-    """Selection config for a single category."""
-
-    enabled: bool = True
-    count: int = 3
-    threshold: float = 0.0
-
-
-@dataclass
-class StateSelection:
-    """Selection config for state-based inclusion."""
-
-    enabled: bool = True
-    count: int = 0  # 0 = unlimited
-    states: list[str] = field(default_factory=lambda: ["zombie"])
-
-
-@dataclass
 class RogueSelectionConfig:
-    """Configuration for rogue process selection."""
+    """Configuration for rogue process selection.
 
-    cpu: CategorySelection = field(default_factory=CategorySelection)
-    mem: CategorySelection = field(default_factory=CategorySelection)
-    threads: CategorySelection = field(default_factory=CategorySelection)
-    csw: CategorySelection = field(default_factory=CategorySelection)
-    syscalls: CategorySelection = field(default_factory=CategorySelection)
-    pageins: CategorySelection = field(default_factory=CategorySelection)
-    state: StateSelection = field(default_factory=StateSelection)
+    Simple threshold-based selection:
+    - Processes with score >= score_threshold are included
+    - Stuck processes are always included
+    - Results limited to max_count
+    """
+
+    score_threshold: int = 20  # Minimum score to be considered a rogue
+    max_count: int = 20  # Maximum rogues to track
 
 
 def _dataclass_to_table(obj: object) -> tomlkit.items.Table:
@@ -335,29 +311,14 @@ def _load_bands_config(data: dict) -> BandsConfig:
 
 def _load_scoring_config(data: dict) -> ScoringConfig:
     """Load scoring config from TOML data."""
-    weights_data = data.get("weights", {})
     state_mult_data = data.get("state_multipliers", {})
     norm_data = data.get("normalization", {})
 
     # Use dataclass instances as single source of truth for defaults
-    w = ScoringWeights()
     m = StateMultipliers()
     n = NormalizationConfig()
 
     return ScoringConfig(
-        weights=ScoringWeights(
-            cpu=weights_data.get("cpu", w.cpu),
-            state=weights_data.get("state", w.state),
-            pageins=weights_data.get("pageins", w.pageins),
-            mem=weights_data.get("mem", w.mem),
-            csw=weights_data.get("csw", w.csw),
-            syscalls=weights_data.get("syscalls", w.syscalls),
-            threads=weights_data.get("threads", w.threads),
-            disk_io_rate=weights_data.get("disk_io_rate", w.disk_io_rate),
-            energy_rate=weights_data.get("energy_rate", w.energy_rate),
-            wakeups=weights_data.get("wakeups", w.wakeups),
-            ipc=weights_data.get("ipc", w.ipc),
-        ),
         state_multipliers=StateMultipliers(
             idle=state_mult_data.get("idle", m.idle),
             sleeping=state_mult_data.get("sleeping", m.sleeping),
@@ -370,46 +331,25 @@ def _load_scoring_config(data: dict) -> ScoringConfig:
         normalization=NormalizationConfig(
             cpu=norm_data.get("cpu", n.cpu),
             mem_gb=norm_data.get("mem_gb", n.mem_gb),
-            pageins=norm_data.get("pageins", n.pageins),
-            csw=norm_data.get("csw", n.csw),
-            syscalls=norm_data.get("syscalls", n.syscalls),
-            threads=norm_data.get("threads", n.threads),
+            pageins_rate=norm_data.get("pageins_rate", n.pageins_rate),
+            faults_rate=norm_data.get("faults_rate", n.faults_rate),
+            csw_rate=norm_data.get("csw_rate", n.csw_rate),
+            syscalls_rate=norm_data.get("syscalls_rate", n.syscalls_rate),
+            mach_msgs_rate=norm_data.get("mach_msgs_rate", n.mach_msgs_rate),
+            wakeups_rate=norm_data.get("wakeups_rate", n.wakeups_rate),
             disk_io_rate=norm_data.get("disk_io_rate", n.disk_io_rate),
-            energy_rate=norm_data.get("energy_rate", n.energy_rate),
-            wakeups=norm_data.get("wakeups", n.wakeups),
+            runnable_time_rate=norm_data.get("runnable_time_rate", n.runnable_time_rate),
+            qos_interactive_rate=norm_data.get("qos_interactive_rate", n.qos_interactive_rate),
+            threads=norm_data.get("threads", n.threads),
             ipc_min=norm_data.get("ipc_min", n.ipc_min),
         ),
     )
 
 
-def _load_category_selection(data: dict) -> CategorySelection:
-    """Load category selection from TOML data."""
-    d = CategorySelection()
-    return CategorySelection(
-        enabled=data.get("enabled", d.enabled),
-        count=data.get("count", d.count),
-        threshold=data.get("threshold", d.threshold),
-    )
-
-
-def _load_state_selection(data: dict) -> StateSelection:
-    """Load state selection from TOML data."""
-    d = StateSelection()
-    return StateSelection(
-        enabled=data.get("enabled", d.enabled),
-        count=data.get("count", d.count),
-        states=data.get("states", d.states),
-    )
-
-
 def _load_rogue_selection_config(data: dict) -> RogueSelectionConfig:
     """Load rogue selection config from TOML data."""
+    d = RogueSelectionConfig()
     return RogueSelectionConfig(
-        cpu=_load_category_selection(data.get("cpu", {})),
-        mem=_load_category_selection(data.get("mem", {})),
-        threads=_load_category_selection(data.get("threads", {})),
-        csw=_load_category_selection(data.get("csw", {})),
-        syscalls=_load_category_selection(data.get("syscalls", {})),
-        pageins=_load_category_selection(data.get("pageins", {})),
-        state=_load_state_selection(data.get("state", {})),
+        score_threshold=data.get("score_threshold", d.score_threshold),
+        max_count=data.get("max_count", d.max_count),
     )

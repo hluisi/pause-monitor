@@ -2,13 +2,11 @@
 
 from pause_monitor.config import (
     BandsConfig,
-    CategorySelection,
     Config,
     NormalizationConfig,
     RetentionConfig,
-    ScoringWeights,
+    RogueSelectionConfig,
     StateMultipliers,
-    StateSelection,
     SystemConfig,
 )
 
@@ -148,34 +146,12 @@ def test_full_config_includes_system_and_bands():
     assert config.bands.medium == BandsConfig().medium
 
 
-def test_scoring_weights_default():
-    """Scoring weights should match ScoringWeights defaults."""
-    config = Config()
-    defaults = ScoringWeights()
-    assert config.scoring.weights.cpu == defaults.cpu
-    assert config.scoring.weights.state == defaults.state
-    assert config.scoring.weights.pageins == defaults.pageins
-    assert config.scoring.weights.mem == defaults.mem
-    assert config.scoring.weights.csw == defaults.csw
-    assert config.scoring.weights.syscalls == defaults.syscalls
-    assert config.scoring.weights.threads == defaults.threads
-    # New fields in v12
-    assert config.scoring.weights.disk_io_rate == defaults.disk_io_rate
-    assert config.scoring.weights.energy_rate == defaults.energy_rate
-    assert config.scoring.weights.wakeups == defaults.wakeups
-    assert config.scoring.weights.ipc == defaults.ipc
-
-
 def test_rogue_selection_default():
-    """Rogue selection should match CategorySelection/StateSelection defaults."""
+    """Rogue selection has correct defaults."""
     config = Config()
-    cat_defaults = CategorySelection()
-    state_defaults = StateSelection()
-    assert config.rogue_selection.cpu.enabled == cat_defaults.enabled
-    assert config.rogue_selection.cpu.count == cat_defaults.count
-    assert config.rogue_selection.cpu.threshold == cat_defaults.threshold
-    assert config.rogue_selection.state.enabled == state_defaults.enabled
-    assert config.rogue_selection.state.states == state_defaults.states
+    defaults = RogueSelectionConfig()
+    assert config.rogue_selection.score_threshold == defaults.score_threshold
+    assert config.rogue_selection.max_count == defaults.max_count
 
 
 def test_band_thresholds_in_config():
@@ -189,80 +165,32 @@ def test_band_thresholds_in_config():
     assert config.bands.critical == defaults.critical
 
 
-def test_config_save_includes_scoring_section(tmp_path):
-    """Config.save() writes scoring section with weights."""
-    config_path = tmp_path / "config.toml"
-    config = Config()
-    config.scoring.weights.cpu = 30
-    config.scoring.weights.state = 25
-    config.save(config_path)
-
-    content = config_path.read_text()
-    assert "[scoring.weights]" in content
-    assert "cpu = 30" in content
-    assert "state = 25" in content
-
-
-def test_config_loads_scoring_section(tmp_path):
-    """Config.load() reads scoring section from TOML."""
-    config_file = tmp_path / "config.toml"
-    config_file.write_text("""
-[scoring.weights]
-cpu = 30
-state = 25
-pageins = 20
-""")
-
-    config = Config.load(config_file)
-    defaults = ScoringWeights()
-    assert config.scoring.weights.cpu == 30
-    assert config.scoring.weights.state == 25
-    assert config.scoring.weights.pageins == 20
-    # Defaults for unspecified weights
-    assert config.scoring.weights.mem == defaults.mem
-    assert config.scoring.weights.threads == defaults.threads
-
-
 def test_config_save_includes_rogue_selection(tmp_path):
     """Config.save() writes rogue_selection section."""
     config_path = tmp_path / "config.toml"
     config = Config()
-    config.rogue_selection.cpu.count = 5
-    config.rogue_selection.state.states = ["stuck", "zombie", "uninterruptible"]
+    config.rogue_selection.score_threshold = 30
+    config.rogue_selection.max_count = 15
     config.save(config_path)
 
     content = config_path.read_text()
-    assert "[rogue_selection.cpu]" in content
-    assert "count = 5" in content
-    assert "[rogue_selection.state]" in content
+    assert "[rogue_selection]" in content
+    assert "score_threshold = 30" in content
+    assert "max_count = 15" in content
 
 
 def test_config_loads_rogue_selection(tmp_path):
     """Config.load() reads rogue_selection section from TOML."""
     config_file = tmp_path / "config.toml"
     config_file.write_text("""
-[rogue_selection.cpu]
-enabled = false
-count = 5
-threshold = 10.0
-
-[rogue_selection.state]
-enabled = true
-count = 2
-states = ["stuck"]
+[rogue_selection]
+score_threshold = 25
+max_count = 10
 """)
 
     config = Config.load(config_file)
-    defaults = CategorySelection()
-    assert config.rogue_selection.cpu.enabled is False
-    assert config.rogue_selection.cpu.count == 5
-    assert config.rogue_selection.cpu.threshold == 10.0
-    assert config.rogue_selection.state.enabled is True
-    assert config.rogue_selection.state.count == 2
-    assert config.rogue_selection.state.states == ["stuck"]
-    # Defaults for unspecified categories
-    assert config.rogue_selection.mem.enabled == defaults.enabled
-    assert config.rogue_selection.mem.count == defaults.count
+    assert config.rogue_selection.score_threshold == 25
+    assert config.rogue_selection.max_count == 10
 
 
 def test_normalization_config_defaults():
@@ -271,15 +199,16 @@ def test_normalization_config_defaults():
     defaults = NormalizationConfig()
     assert norm.cpu == defaults.cpu
     assert norm.mem_gb == defaults.mem_gb
-    assert norm.pageins == defaults.pageins
-    assert norm.csw == defaults.csw
-    assert norm.syscalls == defaults.syscalls
+    assert norm.pageins_rate == defaults.pageins_rate
+    assert norm.csw_rate == defaults.csw_rate
+    assert norm.syscalls_rate == defaults.syscalls_rate
     assert norm.threads == defaults.threads
-    # New fields in v12
     assert norm.disk_io_rate == defaults.disk_io_rate
-    assert norm.energy_rate == defaults.energy_rate
-    assert norm.wakeups == defaults.wakeups
+    assert norm.wakeups_rate == defaults.wakeups_rate
     assert norm.ipc_min == defaults.ipc_min
+    # Contention thresholds
+    assert norm.runnable_time_rate == defaults.runnable_time_rate
+    assert norm.qos_interactive_rate == defaults.qos_interactive_rate
 
 
 def test_bands_config_defaults():
@@ -350,13 +279,13 @@ def test_config_save_includes_normalization(tmp_path):
     config_path = tmp_path / "config.toml"
     config = Config()
     config.scoring.normalization.mem_gb = 16.0
-    config.scoring.normalization.pageins = 2000
+    config.scoring.normalization.pageins_rate = 200.0
     config.save(config_path)
 
     content = config_path.read_text()
     assert "[scoring.normalization]" in content
     assert "mem_gb = 16.0" in content
-    assert "pageins = 2000" in content
+    assert "pageins_rate = 200.0" in content
 
 
 def test_config_loads_normalization(tmp_path):
@@ -366,25 +295,31 @@ def test_config_loads_normalization(tmp_path):
 [scoring.normalization]
 cpu = 100.0
 mem_gb = 32.0
-pageins = 5000
-csw = 200000
-syscalls = 150000
-threads = 500
+pageins_rate = 200.0
+faults_rate = 20000.0
+csw_rate = 20000.0
+syscalls_rate = 200000.0
+mach_msgs_rate = 20000.0
+wakeups_rate = 2000.0
 disk_io_rate = 200000000
-energy_rate = 2000000
-wakeups = 20000
+runnable_time_rate = 200.0
+qos_interactive_rate = 200.0
+threads = 200
 ipc_min = 0.3
 """)
 
     config = Config.load(config_file)
     assert config.scoring.normalization.mem_gb == 32.0
-    assert config.scoring.normalization.pageins == 5000
-    assert config.scoring.normalization.csw == 200000
-    assert config.scoring.normalization.syscalls == 150000
-    assert config.scoring.normalization.threads == 500
+    assert config.scoring.normalization.pageins_rate == 200.0
+    assert config.scoring.normalization.faults_rate == 20000.0
+    assert config.scoring.normalization.csw_rate == 20000.0
+    assert config.scoring.normalization.syscalls_rate == 200000.0
+    assert config.scoring.normalization.mach_msgs_rate == 20000.0
+    assert config.scoring.normalization.wakeups_rate == 2000.0
     assert config.scoring.normalization.disk_io_rate == 200000000
-    assert config.scoring.normalization.energy_rate == 2000000
-    assert config.scoring.normalization.wakeups == 20000
+    assert config.scoring.normalization.runnable_time_rate == 200.0
+    assert config.scoring.normalization.qos_interactive_rate == 200.0
+    assert config.scoring.normalization.threads == 200
     assert config.scoring.normalization.ipc_min == 0.3
 
 
@@ -402,7 +337,7 @@ mem_gb = 64.0
     assert config.scoring.normalization.mem_gb == 64.0
     # Defaults for unspecified
     assert config.scoring.normalization.cpu == defaults.cpu
-    assert config.scoring.normalization.pageins == defaults.pageins
+    assert config.scoring.normalization.pageins_rate == defaults.pageins_rate
 
 
 def test_bands_get_threshold_raises_for_invalid_band():

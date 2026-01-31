@@ -53,27 +53,42 @@ def make_test_process_score(**kwargs) -> ProcessScore:
     cap_time = kwargs.pop("captured_at", time.time())
     pid = kwargs.pop("pid", 1)
     command = kwargs.pop("command", "test_proc")
-    categories = kwargs.pop("categories", ["cpu"])
+    dominant_category = kwargs.pop("dominant_category", "blocking")
+    dominant_metrics = kwargs.pop("dominant_metrics", ["cpu:50%"])
 
     # Handle MetricValue fields - convert simple values to MetricValue
     cpu = kwargs.pop("cpu", 50.0)
     mem = kwargs.pop("mem", 1024 * 1024)
     pageins = kwargs.pop("pageins", 10)
+    pageins_rate = kwargs.pop("pageins_rate", 0.0)
     faults = kwargs.pop("faults", 0)
+    faults_rate = kwargs.pop("faults_rate", 0.0)
     disk_io = kwargs.pop("disk_io", 0)
     disk_io_rate = kwargs.pop("disk_io_rate", 0.0)
     csw = kwargs.pop("csw", 100)
+    csw_rate = kwargs.pop("csw_rate", 0.0)
     syscalls = kwargs.pop("syscalls", 50)
+    syscalls_rate = kwargs.pop("syscalls_rate", 0.0)
     threads = kwargs.pop("threads", 4)
     mach_msgs = kwargs.pop("mach_msgs", 0)
+    mach_msgs_rate = kwargs.pop("mach_msgs_rate", 0.0)
     instructions = kwargs.pop("instructions", 0)
     cycles = kwargs.pop("cycles", 0)
     ipc = kwargs.pop("ipc", 0.0)
     energy = kwargs.pop("energy", 0)
     energy_rate = kwargs.pop("energy_rate", 0.0)
     wakeups = kwargs.pop("wakeups", 0)
+    wakeups_rate = kwargs.pop("wakeups_rate", 0.0)
+    runnable_time = kwargs.pop("runnable_time", 0)
+    runnable_time_rate = kwargs.pop("runnable_time_rate", 0.0)
+    qos_interactive = kwargs.pop("qos_interactive", 0)
+    qos_interactive_rate = kwargs.pop("qos_interactive_rate", 0.0)
     priority = kwargs.pop("priority", 31)
     score = kwargs.pop("score", 50)
+    blocking_score = kwargs.pop("blocking_score", score * 0.4)
+    contention_score = kwargs.pop("contention_score", score * 0.3)
+    pressure_score = kwargs.pop("pressure_score", score * 0.2)
+    efficiency_score = kwargs.pop("efficiency_score", score * 0.1)
 
     # MetricValueStr fields
     state = kwargs.pop("state", "running")
@@ -87,24 +102,41 @@ def make_test_process_score(**kwargs) -> ProcessScore:
         mem=_metric(mem),
         mem_peak=mem,
         pageins=_metric(pageins),
+        pageins_rate=_metric(pageins_rate),
         faults=_metric(faults),
+        faults_rate=_metric(faults_rate),
         disk_io=_metric(disk_io),
         disk_io_rate=_metric(disk_io_rate),
         csw=_metric(csw),
+        csw_rate=_metric(csw_rate),
         syscalls=_metric(syscalls),
+        syscalls_rate=_metric(syscalls_rate),
         threads=_metric(threads),
         mach_msgs=_metric(mach_msgs),
+        mach_msgs_rate=_metric(mach_msgs_rate),
         instructions=_metric(instructions),
         cycles=_metric(cycles),
         ipc=_metric(ipc),
         energy=_metric(energy),
         energy_rate=_metric(energy_rate),
         wakeups=_metric(wakeups),
+        wakeups_rate=_metric(wakeups_rate),
+        runnable_time=_metric(runnable_time),
+        runnable_time_rate=_metric(runnable_time_rate),
+        qos_interactive=_metric(qos_interactive),
+        qos_interactive_rate=_metric(qos_interactive_rate),
         state=_metric_str(state),
         priority=_metric(priority),
         score=_metric(score),
         band=_metric_str(band),
-        categories=list(categories) if isinstance(categories, frozenset) else categories,
+        blocking_score=_metric(blocking_score),
+        contention_score=_metric(contention_score),
+        pressure_score=_metric(pressure_score),
+        efficiency_score=_metric(efficiency_score),
+        dominant_category=dominant_category,
+        dominant_metrics=(
+            list(dominant_metrics) if isinstance(dominant_metrics, frozenset) else dominant_metrics
+        ),
     )
 
 

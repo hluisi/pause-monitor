@@ -17,7 +17,6 @@ from pause_monitor.collector import (
     MetricValue,
     MetricValueStr,
     ProcessSamples,
-    ProcessScore,
 )
 from pause_monitor.config import Config
 from pause_monitor.daemon import Daemon, DaemonState
@@ -588,7 +587,9 @@ async def test_daemon_main_loop_collects_samples(patched_config_paths, monkeypat
 
     monkeypatch.setattr(daemon.ring_buffer, "push", track_push)
 
-    # Create mock samples
+    # Create mock samples using shared helper
+    from tests.conftest import make_process_score
+
     mock_samples = [
         ProcessSamples(
             timestamp=datetime.now(),
@@ -596,32 +597,14 @@ async def test_daemon_main_loop_collects_samples(patched_config_paths, monkeypat
             process_count=100,
             max_score=25,
             rogues=[
-                ProcessScore(
+                make_process_score(
                     pid=123,
                     command="test_proc",
                     captured_at=TEST_TIMESTAMP,
-                    cpu=_metric(50.0),
-                    mem=_metric(1024 * 1024 * 100),
-                    mem_peak=1024 * 1024 * 100,
-                    pageins=_metric(10),
-                    faults=_metric(0),
-                    disk_io=_metric(0),
-                    disk_io_rate=_metric(0.0),
-                    csw=_metric(500),
-                    syscalls=_metric(200),
-                    threads=_metric(5),
-                    mach_msgs=_metric(0),
-                    instructions=_metric(0),
-                    cycles=_metric(0),
-                    ipc=_metric(0.0),
-                    energy=_metric(0),
-                    energy_rate=_metric(0.0),
-                    wakeups=_metric(0),
-                    state=_metric_str("running"),
-                    priority=_metric(31),
-                    score=_metric(25),
-                    band=_metric_str("medium"),
-                    categories=["cpu"],
+                    cpu=50.0,
+                    mem=1024 * 1024 * 100,
+                    score=25,
+                    band="medium",
                 )
             ],
         ),
@@ -631,32 +614,14 @@ async def test_daemon_main_loop_collects_samples(patched_config_paths, monkeypat
             process_count=100,
             max_score=45,
             rogues=[
-                ProcessScore(
+                make_process_score(
                     pid=456,
                     command="heavy_proc",
                     captured_at=TEST_TIMESTAMP,
-                    cpu=_metric(80.0),
-                    mem=_metric(1024 * 1024 * 500),
-                    mem_peak=1024 * 1024 * 500,
-                    pageins=_metric(100),
-                    faults=_metric(0),
-                    disk_io=_metric(0),
-                    disk_io_rate=_metric(0.0),
-                    csw=_metric(5000),
-                    syscalls=_metric(2000),
-                    threads=_metric(20),
-                    mach_msgs=_metric(0),
-                    instructions=_metric(0),
-                    cycles=_metric(0),
-                    ipc=_metric(0.0),
-                    energy=_metric(0),
-                    energy_rate=_metric(0.0),
-                    wakeups=_metric(0),
-                    state=_metric_str("running"),
-                    priority=_metric(31),
-                    score=_metric(45),
-                    band=_metric_str("elevated"),
-                    categories=["cpu", "mem"],
+                    cpu=80.0,
+                    mem=1024 * 1024 * 500,
+                    score=45,
+                    band="elevated",
                 )
             ],
         ),
@@ -758,38 +723,22 @@ async def test_daemon_main_loop_updates_tracker(patched_config_paths, monkeypatc
     monkeypatch.setattr(daemon.tracker, "update", track_update)
 
     # Create mock samples
+    from tests.conftest import make_process_score
+
     mock_samples = ProcessSamples(
         timestamp=datetime.now(),
         elapsed_ms=1000,
         process_count=100,
         max_score=25,
         rogues=[
-            ProcessScore(
+            make_process_score(
                 pid=123,
                 command="test_proc",
                 captured_at=TEST_TIMESTAMP,
-                cpu=_metric(50.0),
-                mem=_metric(1024 * 1024 * 100),
-                mem_peak=1024 * 1024 * 100,
-                pageins=_metric(10),
-                faults=_metric(0),
-                disk_io=_metric(0),
-                disk_io_rate=_metric(0.0),
-                csw=_metric(500),
-                syscalls=_metric(200),
-                threads=_metric(5),
-                mach_msgs=_metric(0),
-                instructions=_metric(0),
-                cycles=_metric(0),
-                ipc=_metric(0.0),
-                energy=_metric(0),
-                energy_rate=_metric(0.0),
-                wakeups=_metric(0),
-                state=_metric_str("running"),
-                priority=_metric(31),
-                score=_metric(25),
-                band=_metric_str("medium"),
-                categories=["cpu"],
+                cpu=50.0,
+                mem=1024 * 1024 * 100,
+                score=25,
+                band="medium",
             )
         ],
     )

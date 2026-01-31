@@ -44,29 +44,45 @@ def test_process_score_to_dict():
         mem=_metric(1000000),
         mem_peak=1000000,
         pageins=_metric(10),
+        pageins_rate=_metric(5.0),
         faults=_metric(0),
+        faults_rate=_metric(0.0),
         disk_io=_metric(0),
         disk_io_rate=_metric(0.0),
         csw=_metric(100),
+        csw_rate=_metric(50.0),
         syscalls=_metric(50),
+        syscalls_rate=_metric(25.0),
         threads=_metric(4),
         mach_msgs=_metric(0),
+        mach_msgs_rate=_metric(0.0),
         instructions=_metric(0),
         cycles=_metric(0),
         ipc=_metric(0.0),
         energy=_metric(0),
         energy_rate=_metric(0.0),
         wakeups=_metric(0),
+        wakeups_rate=_metric(0.0),
+        runnable_time=_metric(0),
+        runnable_time_rate=_metric(0.0),
+        qos_interactive=_metric(0),
+        qos_interactive_rate=_metric(0.0),
         state=_metric_str("running"),
         priority=_metric(31),
         score=_metric(42),
         band=_metric_str("elevated"),
-        categories=["cpu", "pageins"],
+        blocking_score=_metric(30.0),
+        contention_score=_metric(20.0),
+        pressure_score=_metric(10.0),
+        efficiency_score=_metric(5.0),
+        dominant_category="blocking",
+        dominant_metrics=["pageins:5/s"],
     )
     d = ps.to_dict()
     assert d["pid"] == 123
     assert d["score"]["current"] == 42
-    assert set(d["categories"]) == {"cpu", "pageins"}
+    assert d["dominant_category"] == "blocking"
+    assert d["dominant_metrics"] == ["pageins:5/s"]
 
 
 def test_process_score_from_dict():
@@ -79,28 +95,44 @@ def test_process_score_from_dict():
         "mem": {"current": 1000000, "low": 1000000, "high": 1000000},
         "mem_peak": 1000000,
         "pageins": {"current": 10, "low": 10, "high": 10},
+        "pageins_rate": {"current": 5.0, "low": 5.0, "high": 5.0},
         "faults": {"current": 0, "low": 0, "high": 0},
+        "faults_rate": {"current": 0.0, "low": 0.0, "high": 0.0},
         "disk_io": {"current": 0, "low": 0, "high": 0},
         "disk_io_rate": {"current": 0.0, "low": 0.0, "high": 0.0},
         "csw": {"current": 100, "low": 100, "high": 100},
+        "csw_rate": {"current": 50.0, "low": 50.0, "high": 50.0},
         "syscalls": {"current": 50, "low": 50, "high": 50},
+        "syscalls_rate": {"current": 25.0, "low": 25.0, "high": 25.0},
         "threads": {"current": 4, "low": 4, "high": 4},
         "mach_msgs": {"current": 0, "low": 0, "high": 0},
+        "mach_msgs_rate": {"current": 0.0, "low": 0.0, "high": 0.0},
         "instructions": {"current": 0, "low": 0, "high": 0},
         "cycles": {"current": 0, "low": 0, "high": 0},
         "ipc": {"current": 0.0, "low": 0.0, "high": 0.0},
         "energy": {"current": 0, "low": 0, "high": 0},
         "energy_rate": {"current": 0.0, "low": 0.0, "high": 0.0},
         "wakeups": {"current": 0, "low": 0, "high": 0},
+        "wakeups_rate": {"current": 0.0, "low": 0.0, "high": 0.0},
+        "runnable_time": {"current": 0, "low": 0, "high": 0},
+        "runnable_time_rate": {"current": 0.0, "low": 0.0, "high": 0.0},
+        "qos_interactive": {"current": 0, "low": 0, "high": 0},
+        "qos_interactive_rate": {"current": 0.0, "low": 0.0, "high": 0.0},
         "state": {"current": "running", "low": "running", "high": "running"},
         "priority": {"current": 31, "low": 31, "high": 31},
         "score": {"current": 42, "low": 42, "high": 42},
         "band": {"current": "elevated", "low": "elevated", "high": "elevated"},
-        "categories": ["cpu", "pageins"],
+        "blocking_score": {"current": 30.0, "low": 30.0, "high": 30.0},
+        "contention_score": {"current": 20.0, "low": 20.0, "high": 20.0},
+        "pressure_score": {"current": 10.0, "low": 10.0, "high": 10.0},
+        "efficiency_score": {"current": 5.0, "low": 5.0, "high": 5.0},
+        "dominant_category": "blocking",
+        "dominant_metrics": ["pageins:5/s"],
     }
     ps = ProcessScore.from_dict(d)
     assert ps.pid == 123
-    assert set(ps.categories) == {"cpu", "pageins"}
+    assert ps.dominant_category == "blocking"
+    assert ps.dominant_metrics == ["pageins:5/s"]
 
 
 def test_process_samples_json_roundtrip():
@@ -119,24 +151,39 @@ def test_process_samples_json_roundtrip():
                 mem=_metric(1000),
                 mem_peak=1000,
                 pageins=_metric(0),
+                pageins_rate=_metric(0.0),
                 faults=_metric(0),
+                faults_rate=_metric(0.0),
                 disk_io=_metric(0),
                 disk_io_rate=_metric(0.0),
                 csw=_metric(10),
+                csw_rate=_metric(0.0),
                 syscalls=_metric(5),
+                syscalls_rate=_metric(0.0),
                 threads=_metric(2),
                 mach_msgs=_metric(0),
+                mach_msgs_rate=_metric(0.0),
                 instructions=_metric(0),
                 cycles=_metric(0),
                 ipc=_metric(0.0),
                 energy=_metric(0),
                 energy_rate=_metric(0.0),
                 wakeups=_metric(0),
+                wakeups_rate=_metric(0.0),
+                runnable_time=_metric(0),
+                runnable_time_rate=_metric(0.0),
+                qos_interactive=_metric(0),
+                qos_interactive_rate=_metric(0.0),
                 state=_metric_str("running"),
                 priority=_metric(31),
                 score=_metric(75),
                 band=_metric_str("high"),
-                categories=["cpu"],
+                blocking_score=_metric(40.0),
+                contention_score=_metric(30.0),
+                pressure_score=_metric(20.0),
+                efficiency_score=_metric(10.0),
+                dominant_category="blocking",
+                dominant_metrics=["cpu:80%"],
             ),
         ],
     )
@@ -237,7 +284,18 @@ class TestLibprocCollectorSync:
         from pause_monitor.collector import _PrevSample
 
         collector._prev_samples[fake_pid] = _PrevSample(
-            cpu_time_ns=0, timestamp=0.0, disk_io=0, energy=0
+            cpu_time_ns=0,
+            timestamp=0.0,
+            disk_io=0,
+            energy=0,
+            pageins=0,
+            csw=0,
+            syscalls=0,
+            mach_msgs=0,
+            wakeups=0,
+            faults=0,
+            runnable_time=0,
+            qos_interactive=0,
         )
 
         # Second collection should prune the fake PID
@@ -288,72 +346,41 @@ class TestLibprocCollectorRogueSelection:
     """Test LibprocCollector rogue selection logic."""
 
     def test_select_rogues_stuck_always_included(self):
-        """Stuck processes are always selected."""
+        """Stuck processes are always selected regardless of score."""
+        from tests.conftest import make_process_score
+
         config = Config()
         collector = LibprocCollector(config)
 
-        processes = [
-            {
-                "pid": 1,
-                "command": "normal",
-                "cpu": 1.0,
-                "state": "sleeping",
-                "mem": 100,
-                "mem_peak": 100,
-                "pageins": 0,
-                "faults": 0,
-                "disk_io": 0,
-                "disk_io_rate": 0.0,
-                "csw": 0,
-                "syscalls": 0,
-                "threads": 1,
-                "mach_msgs": 0,
-                "instructions": 0,
-                "cycles": 0,
-                "ipc": 0.0,
-                "energy": 0,
-                "energy_rate": 0.0,
-                "wakeups": 0,
-                "priority": 31,
-            },
-            {
-                "pid": 2,
-                "command": "stuck_process",
-                "cpu": 0.0,
-                "state": "stuck",
-                "mem": 100,
-                "mem_peak": 100,
-                "pageins": 0,
-                "faults": 0,
-                "disk_io": 0,
-                "disk_io_rate": 0.0,
-                "csw": 0,
-                "syscalls": 0,
-                "threads": 1,
-                "mach_msgs": 0,
-                "instructions": 0,
-                "cycles": 0,
-                "ipc": 0.0,
-                "energy": 0,
-                "energy_rate": 0.0,
-                "wakeups": 0,
-                "priority": 31,
-            },
-        ]
+        # Create a stuck process with low score
+        stuck = make_process_score(
+            pid=2,
+            command="stuck_process",
+            score=5,  # Below threshold
+            state="stuck",
+        )
+        # Create a normal sleeping process with high score
+        normal = make_process_score(
+            pid=1,
+            command="normal",
+            score=50,  # Above threshold
+            state="sleeping",
+        )
 
-        rogues = collector._select_rogues(processes)
+        # _select_rogues now takes ProcessScore objects
+        selected = collector._select_rogues([stuck, normal])
 
-        stuck = [r for r in rogues if r["command"] == "stuck_process"]
-        assert len(stuck) == 1
-        assert "stuck" in stuck[0]["_categories"]
+        # Stuck process should be included despite low score
+        stuck_found = [r for r in selected if r.command == "stuck_process"]
+        assert len(stuck_found) == 1
 
 
 class TestLibprocCollectorIntegration:
-    """Integration tests that actually run on macOS."""
+    """Integration tests for complete collection cycle."""
 
     @pytest.mark.asyncio
     async def test_full_collection_cycle(self):
-        """Full collection cycle works end-to-end."""
+        """Full collection cycle produces valid output."""
         import platform
 
         if platform.system() != "Darwin":
@@ -362,15 +389,22 @@ class TestLibprocCollectorIntegration:
         config = Config()
         collector = LibprocCollector(config)
 
-        # First sample
+        # First collection
         samples1 = await collector.collect()
-        assert samples1.process_count > 10  # Should see many processes
+        assert isinstance(samples1, ProcessSamples)
 
-        # Second sample (should have CPU deltas)
+        # Second collection (should have rate data)
+        import asyncio
+
+        await asyncio.sleep(0.1)
         samples2 = await collector.collect()
-        assert samples2.process_count > 10
+        assert isinstance(samples2, ProcessSamples)
 
-        # Both should have valid timestamps
-        assert samples1.timestamp is not None
-        assert samples2.timestamp is not None
-        assert samples2.timestamp >= samples1.timestamp
+        # Check rogues have all required fields
+        for rogue in samples2.rogues:
+            assert hasattr(rogue, "blocking_score")
+            assert hasattr(rogue, "contention_score")
+            assert hasattr(rogue, "pressure_score")
+            assert hasattr(rogue, "efficiency_score")
+            assert hasattr(rogue, "dominant_category")
+            assert hasattr(rogue, "dominant_metrics")

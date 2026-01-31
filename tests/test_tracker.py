@@ -48,24 +48,39 @@ def make_score(
         mem=_metric(kwargs.get("mem", 1000)),
         mem_peak=kwargs.get("mem_peak", 1500),
         pageins=_metric(kwargs.get("pageins", 0)),
+        pageins_rate=_metric(kwargs.get("pageins_rate", 0.0)),
         faults=_metric(kwargs.get("faults", 0)),
+        faults_rate=_metric(kwargs.get("faults_rate", 0.0)),
         disk_io=_metric(kwargs.get("disk_io", 0)),
         disk_io_rate=_metric(kwargs.get("disk_io_rate", 0.0)),
         csw=_metric(kwargs.get("csw", 10)),
+        csw_rate=_metric(kwargs.get("csw_rate", 0.0)),
         syscalls=_metric(kwargs.get("syscalls", 5)),
+        syscalls_rate=_metric(kwargs.get("syscalls_rate", 0.0)),
         threads=_metric(kwargs.get("threads", 2)),
         mach_msgs=_metric(kwargs.get("mach_msgs", 0)),
+        mach_msgs_rate=_metric(kwargs.get("mach_msgs_rate", 0.0)),
         instructions=_metric(kwargs.get("instructions", 0)),
         cycles=_metric(kwargs.get("cycles", 0)),
         ipc=_metric(kwargs.get("ipc", 0.0)),
         energy=_metric(kwargs.get("energy", 0)),
         energy_rate=_metric(kwargs.get("energy_rate", 0.0)),
         wakeups=_metric(kwargs.get("wakeups", 0)),
+        wakeups_rate=_metric(kwargs.get("wakeups_rate", 0.0)),
+        runnable_time=_metric(kwargs.get("runnable_time", 0)),
+        runnable_time_rate=_metric(kwargs.get("runnable_time_rate", 0.0)),
+        qos_interactive=_metric(kwargs.get("qos_interactive", 0)),
+        qos_interactive_rate=_metric(kwargs.get("qos_interactive_rate", 0.0)),
         state=_metric_str(state),
         priority=_metric(kwargs.get("priority", 31)),
         score=_metric(score),
         band=_metric_str(band),
-        categories=kwargs.get("categories", ["cpu"] if score >= 40 else []),
+        blocking_score=_metric(kwargs.get("blocking_score", score * 0.4)),
+        contention_score=_metric(kwargs.get("contention_score", score * 0.3)),
+        pressure_score=_metric(kwargs.get("pressure_score", score * 0.2)),
+        efficiency_score=_metric(kwargs.get("efficiency_score", score * 0.1)),
+        dominant_category=kwargs.get("dominant_category", "blocking"),
+        dominant_metrics=kwargs.get("dominant_metrics", ["cpu:50%"] if score >= 40 else []),
     )
 
 
@@ -248,7 +263,8 @@ def test_tracker_inserts_entry_snapshot(tmp_path):
         csw=20,
         syscalls=10,
         threads=4,
-        categories=["cpu", "mem"],
+        dominant_category="blocking",
+        dominant_metrics=["cpu:60%", "mem:2KB"],
     )
     tracker.update([score])
 
@@ -263,7 +279,8 @@ def test_tracker_inserts_entry_snapshot(tmp_path):
     assert snap["score"]["current"] == 55
     assert snap["cpu"]["current"] == 60.0
     assert snap["mem"]["current"] == 2000
-    assert set(snap["categories"]) == {"cpu", "mem"}
+    assert snap["dominant_category"] == "blocking"
+    assert snap["dominant_metrics"] == ["cpu:60%", "mem:2KB"]
 
     conn.close()
 

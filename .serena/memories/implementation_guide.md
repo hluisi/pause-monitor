@@ -1,12 +1,16 @@
 # Implementation Guide
 
-**Last updated:** 2026-01-30
-**Schema version:** 13
+**Last updated:** 2026-01-31
+**Schema version:** 14
+
+## Overview
+
+**Rogue Hunter** is a real-time process surveillance tool for macOS that identifies processes negatively affecting system performance. It scores all processes on four dimensions of rogue behavior (blocking, contention, pressure, efficiency) and tracks those that cross configurable thresholds.
 
 ## Architecture
 
 ```
-                              pause-monitor Architecture
+                              Rogue Hunter Architecture
 ================================================================================
 
                     ┌─────────────────────────────────────┐
@@ -40,7 +44,6 @@
 │  ┌─────────────────────────────┐    │
 │  │   ForensicsCapture          │    │
 │  │   (forensics.py)            │    │
-│  │   • spindump                │    │
 │  │   • tailspin                │    │
 │  │   • log show                │    │
 │  └─────────────────────────────┘    │
@@ -133,19 +136,21 @@ class MetricValue:
 
 **CPU:** `cpu` (MetricValue)
 
-**Memory:** `mem`, `mem_peak`, `pageins`, `faults` (MetricValue + int)
+**Memory:** `mem`, `mem_peak`, `pageins`, `pageins_rate`, `faults`, `faults_rate` (5 MetricValue + 1 int)
 
-**Disk I/O:** `disk_io`, `disk_io_rate` (MetricValue)
+**Disk I/O:** `disk_io`, `disk_io_rate` (2 MetricValue)
 
-**Activity:** `csw`, `syscalls`, `threads`, `mach_msgs` (MetricValue)
+**Activity:** `csw`, `csw_rate`, `syscalls`, `syscalls_rate`, `threads`, `mach_msgs`, `mach_msgs_rate` (7 MetricValue)
 
-**Efficiency:** `instructions`, `cycles`, `ipc` (MetricValue)
+**Efficiency:** `instructions`, `cycles`, `ipc` (3 MetricValue)
 
-**Power:** `energy`, `energy_rate`, `wakeups` (MetricValue)
+**Power:** `energy`, `energy_rate`, `wakeups`, `wakeups_rate` (4 MetricValue)
+
+**Contention:** `runnable_time`, `runnable_time_rate`, `qos_interactive`, `qos_interactive_rate` (4 MetricValue)
 
 **State:** `state` (MetricValueStr), `priority` (MetricValue)
 
-**Scoring:** `score` (MetricValue), `band` (MetricValueStr), `categories` (list[str])
+**Scoring:** `score`, `blocking_score`, `contention_score`, `pressure_score`, `efficiency_score` (5 MetricValue), `band` (MetricValueStr), `dominant_category` (str), `dominant_metrics` (list[str])
 
 ### Key Methods
 | Method | Purpose |
@@ -157,29 +162,76 @@ class MetricValue:
 | `_normalize_state()` | Convert state name to 0-1 severity |
 | `_get_band()` | Map score to band name (low/medium/elevated/high/critical) |
 
-### Scoring Algorithm
+### Scoring Algorithm (4-Category System)
+
+The scoring system uses 4 categories to identify different types of process stress:
+
 ```
-1. Normalize each metric to 0-1 scale using config maximums
-2. Weighted sum: base_score = sum(normalized[i] * weight[i])
-3. Apply state multiplier (discount inactive processes)
-4. Apply category bonus: 1.0 + 0.1 * max(0, category_count - 2)
-5. Cap at 100
+final_score = blocking × 0.40 + contention × 0.30 + pressure × 0.20 + efficiency × 0.10
 ```
 
-**Factors and Default Weights:**
-| Factor | Weight | Normalization |
-|--------|--------|---------------|
-| cpu | 25 | cpu / 100 |
-| state | 20 | stuck=1.0, zombie=0.8, etc. |
-| pageins | 15 | pageins / 1000 |
-| mem | 15 | mem / 8GB |
-| csw | 10 | csw / 100k |
-| syscalls | 5 | syscalls / 100k |
-| threads | 0 | threads / 100 |
-| disk_io_rate | 0 | rate / 100MB/s |
-| energy_rate | 0 | rate / 100mW |
-| wakeups | 0 | wakeups / 1000 |
-| ipc | 0 | inverse (low IPC = stalled) |
+**Blocking Score (40% of final) — Causes pauses:**
+```
+if state == "stuck": 100.0
+else:
+  pageins_rate / 100 × 35 +
+  disk_io_rate / 100M × 35 +
+  faults_rate / 10k × 30
+```
+
+**Contention Score (30% of final) — Fighting for resources:**
+```
+runnable_time_rate / 100 × 30 +
+csw_rate / 10k × 30 +
+cpu / 100 × 25 +
+qos_interactive_rate / 100 × 15
+```
+
+**Pressure Score (20% of final) — Stressing system:**
+```
+mem / 8GB × 35 +
+wakeups_rate / 1k × 25 +
+syscalls_rate / 100k × 20 +
+mach_msgs_rate / 10k × 20
+```
+
+**Efficiency Score (10% of final) — Wasting resources:**
+```
+ipc_penalty × has_cycles × 60 +
+threads / 100 × 40
+
+where ipc_penalty = max(0, 1 - ipc/0.5) if ipc < 0.5 else 0
+```
+
+**Normalization Thresholds (rate-based):**
+| Metric | Threshold | Unit |
+|--------|-----------|------|
+| cpu | 100 | % |
+| mem | 8 | GB |
+| disk_io_rate | 100,000,000 | bytes/sec |
+| pageins_rate | 100 | page-ins/sec |
+| faults_rate | 10,000 | faults/sec |
+| csw_rate | 10,000 | switches/sec |
+| syscalls_rate | 100,000 | syscalls/sec |
+| mach_msgs_rate | 10,000 | msgs/sec |
+| wakeups_rate | 1,000 | wakeups/sec |
+| runnable_time_rate | 100 | ms/sec (10% contention) |
+| qos_interactive_rate | 100 | ms/sec |
+| threads | 100 | count |
+| ipc_min | 0.5 | IPC (below is penalty) |
+
+**State Multipliers (post-score):**
+| State | Multiplier |
+|-------|------------|
+| idle | 0.5 |
+| sleeping | 0.5 |
+| stopped | 0.7 |
+| halted | 0.8 |
+| zombie | 0.9 |
+| running | 1.0 |
+| stuck | 1.0 |
+
+**Dominant Category:** The category with the highest score becomes `dominant_category`, and the top metrics in that category become `dominant_metrics` (formatted as "metric:value/s").
 
 ---
 
@@ -215,7 +267,7 @@ Unlike `nice -10`, QoS doesn't require root — it's a scheduler hint. Falls bac
 
 ### Daemon Attributes
 | Attribute | Purpose |
-|-----------|---------
+|-----------|---------|
 | `config` | Config instance |
 | `collector` | LibprocCollector |
 | `ring_buffer` | RingBuffer for recent samples |
@@ -236,6 +288,8 @@ Unlike `nice -10`, QoS doesn't require root — it's a scheduler hint. Falls bac
 | `_auto_prune()` | Daily pruning of old data |
 | `_compute_pid_low_high()` | Enrich samples with historical ranges |
 | `_forensics_callback()` | Callback for tracker-triggered forensics |
+| `_ensure_tailspin_enabled()` | Enable tailspin on daemon start |
+| `_disable_tailspin()` | Disable tailspin on daemon stop |
 
 ### Main Loop Flow
 ```
@@ -247,8 +301,15 @@ while not shutdown:
     5. tracker.update(samples.rogues)  # Opens/closes events, triggers forensics
     6. socket_server.broadcast(samples)
     7. state.update_sample(samples.max_score)
-    8. Sleep remaining interval (default 0.2s = 5Hz)
+    8. Sleep remaining interval (default ~0.333s = 3Hz)
 ```
+
+### Tailspin Lifecycle
+
+The daemon manages tailspin's lifecycle:
+- `_ensure_tailspin_enabled()` runs `tailspin enable` at startup
+- `_disable_tailspin()` runs `tailspin disable` at shutdown
+- This ensures continuous kernel tracing while daemon runs
 
 ### Logging
 Daemon uses structlog with dual output:
@@ -285,7 +346,7 @@ class TrackedProcess:
     command: str
     peak_score: int         # Highest score seen
     peak_snapshot_id: int   # DB ID of peak snapshot
-    last_checkpoint: float  # Timestamp of last checkpoint
+    last_checkpoint: float = 0.0  # Timestamp of last checkpoint
 ```
 
 ### ProcessTracker Attributes
@@ -313,7 +374,7 @@ class TrackedProcess:
 3. Checkpoints every `checkpoint_interval` seconds (default: 30)
 4. Peak updated when score exceeds previous peak
 5. Exit when score drops below threshold OR process disappears
-6. Forensics triggered when process enters high band (score >= 80)
+6. Forensics triggered when process enters high band (score >= 50)
 
 ---
 
@@ -324,7 +385,7 @@ class TrackedProcess:
 ### Constants
 | Constant | Value | Purpose |
 |----------|-------|---------|
-| `SCHEMA_VERSION` | 13 | Current schema version |
+| `SCHEMA_VERSION` | 14 | Current schema version |
 
 ### Tables
 
@@ -340,17 +401,31 @@ entry_time, exit_time (NULL if open),
 entry_band, peak_band, peak_score, peak_snapshot_id
 ```
 
-**process_snapshots** - Full ProcessScore at entry/exit/checkpoint:
+**process_snapshots** - Full ProcessScore at entry/exit/checkpoint (108 columns in v14):
 ```sql
 id, event_id (FK), snapshot_type, captured_at,
 -- Each MetricValue field has current/low/high columns:
 cpu, cpu_low, cpu_high,
 mem, mem_low, mem_high, mem_peak,
 pageins, pageins_low, pageins_high,
-... (all metrics)
+pageins_rate, pageins_rate_low, pageins_rate_high,
+faults, faults_low, faults_high,
+faults_rate, faults_rate_low, faults_rate_high,
+-- ... (all metrics including new rate fields) ...
+-- Contention section (new in v14):
+runnable_time, runnable_time_low, runnable_time_high,
+runnable_time_rate, runnable_time_rate_low, runnable_time_rate_high,
+qos_interactive, qos_interactive_low, qos_interactive_high,
+qos_interactive_rate, qos_interactive_rate_low, qos_interactive_rate_high,
+-- Scoring section (expanded in v14):
 score, score_low, score_high,
 band, band_low, band_high,
-categories (TEXT JSON)
+blocking_score, blocking_score_low, blocking_score_high,
+contention_score, contention_score_low, contention_score_high,
+pressure_score, pressure_score_low, pressure_score_high,
+efficiency_score, efficiency_score_low, efficiency_score_high,
+dominant_category TEXT,
+dominant_metrics TEXT (JSON array)
 ```
 
 **forensic_captures** - Forensics capture metadata:
@@ -411,19 +486,28 @@ id, capture_id (FK), sample_count, peak_score, culprits (JSON)
 | `StateMultipliers` | Post-score state discounts |
 | `NormalizationConfig` | Max values for normalization |
 | `ScoringConfig` | Weights + multipliers + normalization |
+| `CategorySelection` | Per-category rogue selection config |
+| `StateSelection` | State-based rogue selection config |
 | `RogueSelectionConfig` | Category selection rules |
 | `Config` | Main container |
+
+### SystemConfig Defaults
+| Field | Default | Purpose |
+|-------|---------|---------|
+| `ring_buffer_size` | 60 | Samples in ring buffer |
+| `sample_interval` | 1/3 (~0.333s) | Seconds between samples (3Hz) |
+| `forensics_debounce` | 2.0 | Min seconds between forensics captures |
 
 ### BandsConfig Defaults
 | Band | Threshold |
 |------|-----------|
-| low | 20 |
-| medium | 40 |
-| elevated | 60 |
-| high | 80 |
-| critical | 100 |
+| low | 0 |
+| medium | 20 |
+| elevated | 40 |
+| high | 50 |
+| critical | 70 |
 | tracking_band | "elevated" (40) |
-| forensics_band | "high" (80) |
+| forensics_band | "high" (50) |
 | checkpoint_interval | 30 seconds |
 
 ### Config Paths
@@ -458,8 +542,10 @@ id, capture_id (FK), sample_count, peak_score, culprits (JSON)
 | `update_latest(samples)` | Replace most recent (after enrichment) |
 | `freeze()` | Return immutable BufferContents |
 | `clear()` | Empty buffer |
-| `capacity` | Max size (default: 150 = 30s at 5Hz) |
+| `capacity` | Max size (default: 60 = ~20s at 3Hz) |
 | `samples` | List of ProcessSamples |
+
+**Note:** Ring buffer always contains data (top N rogues by score). This ensures forensic context is available when incidents occur.
 
 ---
 
@@ -531,12 +617,22 @@ Newline-delimited JSON over Unix socket at `/tmp/pause-monitor/daemon.sock`
 | `_process_logs()` | Parse NDJSON, store in DB |
 | `_store_buffer_context()` | Store ring buffer culprits |
 
+### Helper Functions
+| Function | Purpose |
+|----------|---------|
+| `parse_spindump()` | Parse spindump output into process/thread dataclasses |
+| `parse_logs_ndjson()` | Parse log show NDJSON output |
+| `identify_culprits()` | Identify top processes from ring buffer |
+
 ### Capture Flow
 1. Create temp directory (for logs)
 2. Run `sudo -n tailspin save -o /tmp/pause-monitor/...` and `log show` in parallel
 3. Decode tailspin via `spindump -i` (unprivileged)
 4. Parse and store in database
 5. Clean up temp directory (tailspin files in /tmp cleared on reboot)
+
+### Debouncing
+Forensics captures are debounced via `forensics_debounce` config (default: 2 seconds). This prevents rapid-fire captures when a process hovers around the threshold.
 
 ### Why No Live Spindump
 
@@ -578,10 +674,22 @@ The `pause-monitor install` command (requires sudo) sets up:
 |------|---------|
 | `HeaderBar` | Score gauge with Unicode sparkline |
 | `ProcessTable` | Top rogues with metrics |
-| `DisplayTrackedProcess` | Tracked event for panel |
+| `DisplayTrackedProcess` | Tracked event for panel display |
 | `TrackedEventsPanel` | Active tracking events |
 | `ActivityLog` | Band transition log |
 | `PauseMonitorApp` | Main App class |
+
+### DisplayTrackedProcess Fields
+```python
+@dataclass
+class DisplayTrackedProcess:
+    command: str
+    entry_time: float
+    peak_score: int
+    peak_categories: list[str] = field(default_factory=list)
+    exit_time: float | None = None
+    exit_reason: str = ""
+```
 
 ### Layout
 ```
@@ -625,20 +733,69 @@ TUI automatically reconnects when daemon restarts:
 
 ---
 
+## Supporting Modules
+
+### boottime.py
+**Purpose:** Get system boot timestamp via sysctl.
+
+| Function | Purpose |
+|----------|---------|
+| `get_boot_time()` | Returns boot timestamp as float |
+
+### sleepwake.py
+**Purpose:** Sleep/wake detection via pmset log parsing.
+
+| Type | Purpose |
+|------|---------|
+| `SleepWakeType` | Enum: SLEEP, WAKE |
+| `SleepWakeEvent` | Event with type, timestamp, reason |
+
+| Function | Purpose |
+|----------|---------|
+| `parse_pmset_log()` | Parse pmset log output |
+| `get_recent_sleep_events()` | Get recent sleep/wake events |
+| `was_recently_asleep()` | Check if system was recently asleep |
+
+### formatting.py
+**Purpose:** Display formatting utilities.
+
+| Function | Purpose |
+|----------|---------|
+| `format_duration()` | Format seconds as "1h 2m 3s" |
+| `format_duration_verbose()` | Format with full words |
+| `calculate_duration()` | Calculate duration between timestamps |
+
+### sysctl.py
+**Purpose:** ctypes bindings to sysctl.
+
+| Function | Purpose |
+|----------|---------|
+| `sysctl_int()` | Read sysctl integer value |
+
+---
+
 ## Design Decisions
 
 | Decision | Why |
 |----------|-----|
 | libproc over top | Direct API: ~10-50ms vs ~2s, no subprocess overhead |
-| Per-process tracking | Identify specific culprits, not just system stress |
+| Per-process scoring | Identify specific rogue processes, not just "system stressed" |
+| 4-category scoring | Blocking/Contention/Pressure/Efficiency captures different rogue behaviors |
+| Always show top N | TUI always has data; threshold only affects persistence |
+| Score ALL, then select | All 500 processes scored, top N selected for display |
+| Separate display vs tracking | Collector shows top rogues; ProcessTracker decides what to persist |
 | MetricValue (current/low/high) | Show volatility and trends in single view |
 | Ring buffer enrichment | Compute low/high from recent history without DB queries |
 | Socket for TUI | Real-time streaming, no polling, minimal latency |
 | No DB queries in TUI | Separation of concerns: daemon owns data, TUI displays |
 | ProcessScore as canonical | Single source of truth for process data schema |
-| Band-based thresholds | Configurable severity levels for different behaviors |
-| Forensics on band entry | Capture diagnostic data when problems emerge |
+| Band-based thresholds | Configurable severity levels for different rogue behaviors |
+| Forensics on band entry | Capture diagnostic data when rogues emerge |
 | WAL mode SQLite | Safe concurrent access, crash recovery |
+| Tailspin over live spindump | Captures kernel trace during incident, not after |
+| Forensics debouncing | Prevents capture storms at threshold boundaries |
+| Daemon manages tailspin lifecycle | Enable on start, disable on stop |
+| Bidirectional socket | TUI can send logs to daemon's unified log file |
 
 ---
 
@@ -655,6 +812,7 @@ TUI automatically reconnects when daemon restarts:
 | test_socket_server.py | Server start/stop/broadcast |
 | test_socket_client.py | Client connect/read |
 | test_tui_connection.py | TUI socket integration |
+| test_tui_reconnect.py | TUI auto-reconnect behavior |
 | test_forensics.py | Forensics capture, parsing |
 | test_boottime.py | Boot time detection |
 | test_config.py | Config loading/saving |
@@ -665,5 +823,6 @@ TUI automatically reconnects when daemon restarts:
 | test_cli.py | CLI commands |
 | test_integration.py | End-to-end tests |
 | test_no_tiers.py | Regression: no tier system |
+| test_logging.py | Logging configuration |
 
 Run: `uv run pytest`

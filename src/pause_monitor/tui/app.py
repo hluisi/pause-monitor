@@ -8,7 +8,7 @@ Philosophy: TUI = Real-time window into daemon state. Nothing more.
 
 import asyncio
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
@@ -44,6 +44,18 @@ def format_bytes(bytes_val: int) -> str:
         return f"{bytes_val / (1024 * 1024):.1f}M"
     else:
         return f"{bytes_val / (1024 * 1024 * 1024):.1f}G"
+
+
+def format_rate(bytes_per_sec: float) -> str:
+    """Format bytes/sec as human-readable rate."""
+    if bytes_per_sec < 1024:
+        return f"{bytes_per_sec:.0f}B"
+    elif bytes_per_sec < 1024 * 1024:
+        return f"{bytes_per_sec / 1024:.0f}K"
+    elif bytes_per_sec < 1024 * 1024 * 1024:
+        return f"{bytes_per_sec / (1024 * 1024):.1f}M"
+    else:
+        return f"{bytes_per_sec / (1024 * 1024 * 1024):.1f}G"
 
 
 def format_count(val: int | float | str | None) -> str:
@@ -281,9 +293,10 @@ class HeaderBar(Static):
 
 
 class ProcessTable(Static):
-    """Table showing rogue processes with full metrics.
+    """Table showing rogue processes with 4-category scoring.
 
     Uses CSS Grid layout for proper proportional column widths.
+    Shows category breakdown: 🔴 blocking, 🟠 contention, 🟡 pressure, ⚪ efficiency.
     Includes decay: processes stay visible (dimmed) for 10s after leaving rogues.
     """
 
@@ -306,19 +319,26 @@ class ProcessTable(Static):
         width: 100%;
         height: auto;
         layout: grid;
-        grid-size: 9;
-        /* Column widths: trend, process(flex), score, cpu, mem, pgin, csw, state, why(flex) */
-        grid-columns: 3 1fr 7 6 6 6 8 10 2fr;
+        grid-size: 10;
+        grid-gutter: 0 1;
+        /* Columns: trend, pid, proc, score, B, C, P, E, state, detail */
+        grid-columns: 3 6 2fr 5 4 4 4 4 8 1fr;
     }
 
     ProcessTable .header {
         text-style: bold;
         background: $surface;
         height: 1;
+        width: 100%;
     }
 
     ProcessTable .cell {
         height: 1;
+        width: 100%;
+    }
+
+    ProcessTable .center {
+        text-align: center;
     }
 
     ProcessTable .decayed {
@@ -345,7 +365,32 @@ class ProcessTable(Static):
     ProcessTable .low {
         color: $success;
     }
+
+    /* Category colors */
+    ProcessTable .cat-blocking {
+        color: $error;
+    }
+
+    ProcessTable .cat-contention {
+        color: orange;
+    }
+
+    ProcessTable .cat-pressure {
+        color: $warning;
+    }
+
+    ProcessTable .cat-efficiency {
+        color: $text-muted;
+    }
     """
+
+    # Category icons
+    CATEGORY_ICONS = {
+        "blocking": "🔴",
+        "contention": "🟠",
+        "pressure": "🟡",
+        "efficiency": "⚪",
+    }
 
     DECAY_SECONDS = 10.0
 
@@ -360,16 +405,17 @@ class ProcessTable(Static):
         """Create the process table using CSS Grid."""
         with ScrollableContainer():
             with Grid(id="process-grid"):
-                # Header row
+                # Header row - B/C/P/E are category score columns
                 yield Label("", classes="header")
+                yield Label("PID", classes="header")
                 yield Label("Process", classes="header")
-                yield Label("Score", classes="header")
-                yield Label("CPU%", classes="header")
-                yield Label("Mem", classes="header")
-                yield Label("Pgin", classes="header")
-                yield Label("CSW", classes="header")
+                yield Label("Score", classes="header center")
+                yield Label("B", classes="header center")  # Blocking
+                yield Label("C", classes="header center")  # Contention
+                yield Label("P", classes="header center")  # Pressure
+                yield Label("E", classes="header center")  # Efficiency
                 yield Label("State", classes="header")
-                yield Label("Why", classes="header")
+                yield Label("Dominant", classes="header")
 
     def on_mount(self) -> None:
         """Get grid reference."""
@@ -381,7 +427,7 @@ class ProcessTable(Static):
         if not self._grid:
             return
         children = list(self._grid.children)
-        for child in children[9:]:
+        for child in children[10:]:  # 10 columns now
             child.remove()
 
     def _get_score_class(self, score: int) -> str:
@@ -396,17 +442,26 @@ class ProcessTable(Static):
             return "medium"
         return "low"
 
+    def _format_cat_score(self, score: float) -> str:
+        """Format a category score (0-100) compactly."""
+        s = int(score)
+        if s == 0:
+            return "·"
+        return str(s)
+
     def _add_row(
         self,
         trend: str,
+        pid: str,
         command: str,
         score_val: int,
-        cpu: str,
-        mem: str,
-        pgin: str,
-        csw: str,
+        blocking: float,
+        contention: float,
+        pressure: float,
+        efficiency: float,
         state: str,
-        why: str,
+        dominant_cat: str,
+        dominant_metrics: list[str],
         decayed: bool = False,
     ) -> None:
         """Add a data row to the grid."""
@@ -418,15 +473,21 @@ class ProcessTable(Static):
         if decayed:
             base_class += " decayed"
 
+        # Build dominant display with icon
+        icon = self.CATEGORY_ICONS.get(dominant_cat, "")
+        metrics_str = " ".join(dominant_metrics[:2])  # Show top 2 metrics
+        dominant_display = f"{icon} {metrics_str}" if metrics_str else icon
+
         self._grid.mount(Label(trend, classes=base_class))
+        self._grid.mount(Label(pid, classes=base_class))
         self._grid.mount(Label(command, classes=base_class))
-        self._grid.mount(Label(str(score_val), classes=base_class))
-        self._grid.mount(Label(cpu, classes=base_class))
-        self._grid.mount(Label(mem, classes=base_class))
-        self._grid.mount(Label(pgin, classes=base_class))
-        self._grid.mount(Label(csw, classes=base_class))
+        self._grid.mount(Label(str(score_val), classes=f"{base_class} center"))
+        self._grid.mount(Label(self._format_cat_score(blocking), classes=f"{base_class} center"))
+        self._grid.mount(Label(self._format_cat_score(contention), classes=f"{base_class} center"))
+        self._grid.mount(Label(self._format_cat_score(pressure), classes=f"{base_class} center"))
+        self._grid.mount(Label(self._format_cat_score(efficiency), classes=f"{base_class} center"))
         self._grid.mount(Label(state, classes=base_class))
-        self._grid.mount(Label(why, classes=base_class))
+        self._grid.mount(Label(dominant_display, classes=base_class))
 
     def update_rogues(self, rogues: list[dict], now: float) -> None:
         """Update with rogue process list.
@@ -487,29 +548,28 @@ class ProcessTable(Static):
 
             self._prev_scores[pid] = score
 
-            categories = rogue.get("categories", [])
-            if isinstance(categories, (list, tuple, set, frozenset)):
-                why = ",".join(sorted(categories))
-            else:
-                why = str(categories)
+            # Extract category scores
+            blocking = rogue.get("blocking_score", {}).get("current", 0)
+            contention = rogue.get("contention_score", {}).get("current", 0)
+            pressure = rogue.get("pressure_score", {}).get("current", 0)
+            efficiency = rogue.get("efficiency_score", {}).get("current", 0)
+            dominant_cat = rogue.get("dominant_category", "")
+            dominant_metrics = rogue.get("dominant_metrics", [])
 
-            # Extract .current from MetricValue dicts
-            cpu = rogue["cpu"]["current"]
-            mem = rogue["mem"]["current"]
-            pageins = rogue["pageins"]["current"]
-            csw = rogue["csw"]["current"]
             state = rogue["state"]["current"]
 
             self._add_row(
                 trend,
+                str(pid),
                 str(rogue.get("command", "?")),
-                score,  # Pass int for color coding
-                f"{cpu:.1f}",
-                format_bytes(mem),
-                format_count(pageins),
-                format_count(csw),
+                score,
+                blocking,
+                contention,
+                pressure,
+                efficiency,
                 str(state),
-                why,
+                dominant_cat,
+                dominant_metrics,
                 decayed=is_decayed,
             )
 
@@ -517,7 +577,7 @@ class ProcessTable(Static):
         """Show disconnected state."""
         self.add_class("disconnected")
         self._clear_data_rows()
-        self._add_row("", "(not connected)", 0, "---", "---", "---", "---", "---", "")
+        self._add_row("", "", "(not connected)", 0, 0, 0, 0, 0, "---", "", [], decayed=False)
 
 
 @dataclass
@@ -531,7 +591,7 @@ class DisplayTrackedProcess:
     command: str
     entry_time: float
     peak_score: int
-    peak_categories: list[str] = field(default_factory=list)
+    dominant_category: str = ""  # blocking, contention, pressure, efficiency
     exit_time: float | None = None
     exit_reason: str = ""
 
@@ -596,7 +656,7 @@ class TrackedEventsPanel(Static):
         self._table.add_column("Process")
         self._table.add_column("Peak", width=4)
         self._table.add_column("Dur", width=6)
-        self._table.add_column("Why")
+        self._table.add_column("Cat", width=5)  # Category icon
         self._table.add_column("Status", width=8)
         self._table.show_header = True
         self._table.cursor_type = "none"
@@ -633,9 +693,7 @@ class TrackedEventsPanel(Static):
         # Check for new/updated active entries
         for cmd, rogue in current_above.items():
             score = self._extract_score(rogue)
-            categories = rogue.get("categories", [])
-            if isinstance(categories, (set, frozenset)):
-                categories = list(categories)
+            dominant_cat = rogue.get("dominant_category", "")
 
             if cmd not in self._active:
                 # New tracking entry
@@ -643,14 +701,14 @@ class TrackedEventsPanel(Static):
                     command=cmd,
                     entry_time=now,
                     peak_score=score,
-                    peak_categories=categories,
+                    dominant_category=dominant_cat,
                 )
             else:
                 # Update peak if higher
                 tracked = self._active[cmd]
                 if score > tracked.peak_score:
                     tracked.peak_score = score
-                    tracked.peak_categories = categories
+                    tracked.dominant_category = dominant_cat
 
         # Check for exits (commands that were active but no longer above threshold)
         for cmd in list(self._active.keys()):
@@ -683,6 +741,14 @@ class TrackedEventsPanel(Static):
 
         self._table.clear()
 
+        # Category icons for display
+        cat_icons = {
+            "blocking": "🔴",
+            "contention": "🟠",
+            "pressure": "🟡",
+            "efficiency": "⚪",
+        }
+
         # Show active tracking first (sorted by peak score desc)
         active_sorted = sorted(
             self._active.values(),
@@ -691,7 +757,7 @@ class TrackedEventsPanel(Static):
         )
         for tracked in active_sorted:
             time_str = datetime.fromtimestamp(tracked.entry_time).strftime("%H:%M:%S")
-            why = ",".join(sorted(tracked.peak_categories)) if tracked.peak_categories else ""
+            cat_icon = cat_icons.get(tracked.dominant_category, "")
             duration = format_duration(tracked.duration)
 
             self._table.add_row(
@@ -699,7 +765,7 @@ class TrackedEventsPanel(Static):
                 tracked.command[:15],
                 str(tracked.peak_score),
                 duration,
-                why,
+                cat_icon,
                 "[green]active[/]",
             )
 
@@ -711,7 +777,7 @@ class TrackedEventsPanel(Static):
         )
         for tracked in history_sorted:
             time_str = datetime.fromtimestamp(tracked.entry_time).strftime("%H:%M:%S")
-            why = ",".join(sorted(tracked.peak_categories)) if tracked.peak_categories else ""
+            cat_icon = cat_icons.get(tracked.dominant_category, "")
             duration = format_duration(tracked.duration)
 
             self._table.add_row(
@@ -719,7 +785,7 @@ class TrackedEventsPanel(Static):
                 tracked.command[:15],
                 str(tracked.peak_score),
                 duration,
-                why,
+                cat_icon,
                 "[dim]ended[/]",
             )
 

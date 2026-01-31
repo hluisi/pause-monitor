@@ -31,9 +31,10 @@ def make_process_score(
     command: str = "test",
     cpu: float = 50.0,
     score: int = 25,
-    categories: list[str] | None = None,
     state: str = "running",
     band: str = "low",
+    dominant_category: str = "blocking",
+    dominant_metrics: list[str] | None = None,
     **kwargs,
 ) -> ProcessScore:
     """Create ProcessScore with sensible defaults for testing."""
@@ -45,24 +46,39 @@ def make_process_score(
         mem=_metric(kwargs.get("mem", 100 * 1024 * 1024)),
         mem_peak=kwargs.get("mem_peak", 150 * 1024 * 1024),
         pageins=_metric(kwargs.get("pageins", 100)),
+        pageins_rate=_metric(kwargs.get("pageins_rate", 0.0)),
         faults=_metric(kwargs.get("faults", 0)),
+        faults_rate=_metric(kwargs.get("faults_rate", 0.0)),
         disk_io=_metric(kwargs.get("disk_io", 0)),
         disk_io_rate=_metric(kwargs.get("disk_io_rate", 0.0)),
         csw=_metric(kwargs.get("csw", 1000)),
+        csw_rate=_metric(kwargs.get("csw_rate", 0.0)),
         syscalls=_metric(kwargs.get("syscalls", 500)),
+        syscalls_rate=_metric(kwargs.get("syscalls_rate", 0.0)),
         threads=_metric(kwargs.get("threads", 10)),
         mach_msgs=_metric(kwargs.get("mach_msgs", 0)),
+        mach_msgs_rate=_metric(kwargs.get("mach_msgs_rate", 0.0)),
         instructions=_metric(kwargs.get("instructions", 0)),
         cycles=_metric(kwargs.get("cycles", 0)),
         ipc=_metric(kwargs.get("ipc", 0.0)),
         energy=_metric(kwargs.get("energy", 0)),
         energy_rate=_metric(kwargs.get("energy_rate", 0.0)),
         wakeups=_metric(kwargs.get("wakeups", 0)),
+        wakeups_rate=_metric(kwargs.get("wakeups_rate", 0.0)),
+        runnable_time=_metric(kwargs.get("runnable_time", 0)),
+        runnable_time_rate=_metric(kwargs.get("runnable_time_rate", 0.0)),
+        qos_interactive=_metric(kwargs.get("qos_interactive", 0)),
+        qos_interactive_rate=_metric(kwargs.get("qos_interactive_rate", 0.0)),
         state=_metric_str(state),
         priority=_metric(kwargs.get("priority", 31)),
         score=_metric(score),
         band=_metric_str(band),
-        categories=categories or ["cpu"],
+        blocking_score=_metric(kwargs.get("blocking_score", score * 0.4)),
+        contention_score=_metric(kwargs.get("contention_score", score * 0.3)),
+        pressure_score=_metric(kwargs.get("pressure_score", score * 0.2)),
+        efficiency_score=_metric(kwargs.get("efficiency_score", score * 0.1)),
+        dominant_category=dominant_category,
+        dominant_metrics=dominant_metrics or ["cpu:50%"],
     )
 
 
@@ -256,7 +272,9 @@ def test_parse_logs_ndjson_handles_invalid_json():
 
 def test_identify_culprits_from_buffer():
     """identify_culprits returns top rogues by score."""
-    rogue = make_process_score(pid=100, command="Chrome", score=30, categories=["cpu", "mem"])
+    rogue = make_process_score(
+        pid=100, command="Chrome", score=30, dominant_metrics=["cpu:50%", "mem:100MB"]
+    )
     samples = make_process_samples(rogues=[rogue])
     ring_sample = RingSample(samples=samples)
     contents = BufferContents(samples=(ring_sample,))
@@ -268,7 +286,8 @@ def test_identify_culprits_from_buffer():
     assert culprits[0]["command"] == "Chrome"
     # identify_culprits returns full MetricValue dict for score
     assert culprits[0]["score"]["current"] == 30
-    assert set(culprits[0]["categories"]) == {"cpu", "mem"}
+    assert culprits[0]["dominant_category"] == "blocking"
+    assert culprits[0]["dominant_metrics"] == ["cpu:50%", "mem:100MB"]
 
 
 def test_identify_culprits_multiple_processes():

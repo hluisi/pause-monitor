@@ -64,7 +64,8 @@ Same principle applies to config: define defaults in one place (the dataclass), 
 Always recording, only persisting on incident — "time machine" that lets you look backward from detection:
 - Separation of *collection frequency* from *storage frequency*
 - Circular buffer (`collections.deque` with `maxlen`) for O(1) append with automatic eviction
-- When pause detected, context is immediately available for forensics
+- When rogue detected, context is immediately available for forensics
+- Ring buffer always has data (top N by score) — even on healthy systems
 
 ## Decisions
 
@@ -168,12 +169,18 @@ Pageins (swap page-ins per second) is the most direct measurement of memory thra
 - A system with 0 pageins rarely pauses no matter how high other metrics
 - `top_pagein_processes` answers "who's causing pauses?" vs `top_cpu_processes` for "who's using resources?"
 
-### Per-Process Scoring vs System Scoring
+### Per-Process Rogue Detection
 
 **Old model:** Measure system stress, then hunt for culprits
 **New model:** Continuously identify rogue processes with attribution built-in
 
-Sum/max of top process scores effectively IS system stress — no separate "find culprit" step.
+The peak score from ALL processes IS the system stress indicator — the worst rogue's score tells you how bad things are. No separate "find culprit" step needed.
+
+**Four dimensions of rogue behavior:**
+- **Blocking (40%)**: I/O bottlenecks, memory thrashing — directly hurts others
+- **Contention (30%)**: CPU fighting, scheduler pressure — forces others to wait
+- **Pressure (20%)**: Memory hogging, kernel overhead — degrades capacity
+- **Efficiency (10%)**: Stalled pipelines, thread proliferation — wastes resources
 
 ### Process State Multipliers
 
@@ -182,9 +189,11 @@ Applied *after* base score to reflect current impact vs capability:
 
 A sleeping process with base score 60 shows as 36 (60 × 0.6). Base score is what it *would* contribute if active.
 
-### Pause Detection from Timing
+### System Freeze Detection
 
-**You cannot observe a freeze from inside a frozen system.** The only way to detect "system was unresponsive" is to notice afterward that time jumped. Sample arrival latency IS the pause measurement — if `top` takes 10 seconds instead of 1.5, that's a 10-second pause.
+**You cannot observe a freeze from inside a frozen system.** The only way to detect "system was unresponsive" is to notice afterward that time jumped. Sample arrival latency IS the freeze measurement — if collection takes 10 seconds instead of 0.05, that's a 10-second freeze.
+
+Note: Rogue Hunter's primary goal is identifying processes causing system stress BEFORE they cause freezes. The forensics capture (tailspin) provides kernel-level detail for post-mortem analysis when freezes do occur.
 
 ## Debugging
 

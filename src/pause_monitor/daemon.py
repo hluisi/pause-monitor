@@ -518,7 +518,8 @@ class Daemon:
                         command=rogue.command,
                         score=rogue.score.current,
                         pid=pid,
-                        categories=sorted(rogue.categories),
+                        dominant_category=rogue.dominant_category,
+                        dominant_metrics=rogue.dominant_metrics,
                     )
 
                 # Processes exiting rogue selection (debug - use -v to see)
@@ -669,15 +670,20 @@ class Daemon:
             mem=self._enrich_metric(rogue.mem, hist_vals("mem")),
             mem_peak=rogue.mem_peak,  # Lifetime peak, no range needed
             pageins=self._enrich_metric(rogue.pageins, hist_vals("pageins")),
+            pageins_rate=self._enrich_metric(rogue.pageins_rate, hist_vals("pageins_rate")),
             faults=self._enrich_metric(rogue.faults, hist_vals("faults")),
+            faults_rate=self._enrich_metric(rogue.faults_rate, hist_vals("faults_rate")),
             # Disk I/O
             disk_io=self._enrich_metric(rogue.disk_io, hist_vals("disk_io")),
             disk_io_rate=self._enrich_metric(rogue.disk_io_rate, hist_vals("disk_io_rate")),
             # Activity
             csw=self._enrich_metric(rogue.csw, hist_vals("csw")),
+            csw_rate=self._enrich_metric(rogue.csw_rate, hist_vals("csw_rate")),
             syscalls=self._enrich_metric(rogue.syscalls, hist_vals("syscalls")),
+            syscalls_rate=self._enrich_metric(rogue.syscalls_rate, hist_vals("syscalls_rate")),
             threads=self._enrich_metric(rogue.threads, hist_vals("threads")),
             mach_msgs=self._enrich_metric(rogue.mach_msgs, hist_vals("mach_msgs")),
+            mach_msgs_rate=self._enrich_metric(rogue.mach_msgs_rate, hist_vals("mach_msgs_rate")),
             # Efficiency
             instructions=self._enrich_metric(rogue.instructions, hist_vals("instructions")),
             cycles=self._enrich_metric(rogue.cycles, hist_vals("cycles")),
@@ -686,13 +692,34 @@ class Daemon:
             energy=self._enrich_metric(rogue.energy, hist_vals("energy")),
             energy_rate=self._enrich_metric(rogue.energy_rate, hist_vals("energy_rate")),
             wakeups=self._enrich_metric(rogue.wakeups, hist_vals("wakeups")),
+            wakeups_rate=self._enrich_metric(rogue.wakeups_rate, hist_vals("wakeups_rate")),
+            # Contention
+            runnable_time=self._enrich_metric(rogue.runnable_time, hist_vals("runnable_time")),
+            runnable_time_rate=self._enrich_metric(
+                rogue.runnable_time_rate, hist_vals("runnable_time_rate")
+            ),
+            qos_interactive=self._enrich_metric(
+                rogue.qos_interactive, hist_vals("qos_interactive")
+            ),
+            qos_interactive_rate=self._enrich_metric(
+                rogue.qos_interactive_rate, hist_vals("qos_interactive_rate")
+            ),
             # State (categorical)
             state=self._enrich_metric_str(rogue.state, hist_vals_str("state"), STATE_SEVERITY),
             priority=self._enrich_metric(rogue.priority, hist_vals("priority")),
-            # Scoring
+            # Scoring (4-category system)
             score=self._enrich_metric(rogue.score, hist_vals("score")),
             band=self._enrich_metric_str(rogue.band, hist_vals_str("band"), BAND_SEVERITY),
-            categories=rogue.categories,
+            blocking_score=self._enrich_metric(rogue.blocking_score, hist_vals("blocking_score")),
+            contention_score=self._enrich_metric(
+                rogue.contention_score, hist_vals("contention_score")
+            ),
+            pressure_score=self._enrich_metric(rogue.pressure_score, hist_vals("pressure_score")),
+            efficiency_score=self._enrich_metric(
+                rogue.efficiency_score, hist_vals("efficiency_score")
+            ),
+            dominant_category=rogue.dominant_category,
+            dominant_metrics=rogue.dominant_metrics,
         )
 
     def _compute_pid_low_high(self, samples: ProcessSamples) -> ProcessSamples:

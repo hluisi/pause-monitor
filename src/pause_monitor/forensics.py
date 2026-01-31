@@ -282,7 +282,8 @@ def identify_culprits(contents: "BufferContents") -> list[dict]:
                     "pid": rogue.pid,
                     "command": rogue.command,
                     "score": rogue.score.to_dict(),
-                    "categories": list(rogue.categories),
+                    "dominant_category": rogue.dominant_category,
+                    "dominant_metrics": list(rogue.dominant_metrics),
                 }
 
     # Sort by score descending
