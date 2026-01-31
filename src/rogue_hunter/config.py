@@ -76,13 +76,20 @@ class BandsConfig:
 
 @dataclass
 class StateMultipliers:
-    """Post-score multipliers based on process state. Applied after base score calculation."""
+    """Post-score multipliers based on process state. Applied after base score calculation.
 
-    idle: float = 0.5
-    sleeping: float = 0.5
-    stopped: float = 0.7
-    halted: float = 0.8
-    zombie: float = 0.9
+    Multiplier reasoning:
+    - running/stuck (1.0): Actively executing, full weight
+    - sleeping (0.75): May be I/O-bound; sleeping WITH high disk_io_rate is significant
+    - idle (0.3): Brief transitional state during process creation
+    - stopped (0.2): Frozen (SIGSTOP/debugger), cannot execute until resumed
+    - zombie (0.0): Dead. Metrics are stale history. Cannot cause problems.
+    """
+
+    idle: float = 0.3
+    sleeping: float = 0.75
+    stopped: float = 0.2
+    zombie: float = 0.0
     running: float = 1.0
     stuck: float = 1.0
 
@@ -118,9 +125,15 @@ class NormalizationConfig:
     runnable_time_rate: float = 100.0  # 100ms runnable per second (10% contention)
     qos_interactive_rate: float = 100.0  # 100ms interactive QoS per second
 
+    # GPU thresholds
+    gpu_time_rate: float = 500.0  # 500ms GPU/sec = significant GPU load
+
     # Efficiency thresholds
     threads: int = 100  # 100 threads is already excessive
     ipc_min: float = 0.5  # IPC below this is concerning (inverse scoring)
+
+    # Pressure thresholds
+    zombie_children: int = 10  # 10+ unreaped zombies = significant problem
 
 
 @dataclass
@@ -323,7 +336,6 @@ def _load_scoring_config(data: dict) -> ScoringConfig:
             idle=state_mult_data.get("idle", m.idle),
             sleeping=state_mult_data.get("sleeping", m.sleeping),
             stopped=state_mult_data.get("stopped", m.stopped),
-            halted=state_mult_data.get("halted", m.halted),
             zombie=state_mult_data.get("zombie", m.zombie),
             running=state_mult_data.get("running", m.running),
             stuck=state_mult_data.get("stuck", m.stuck),
@@ -340,8 +352,10 @@ def _load_scoring_config(data: dict) -> ScoringConfig:
             disk_io_rate=norm_data.get("disk_io_rate", n.disk_io_rate),
             runnable_time_rate=norm_data.get("runnable_time_rate", n.runnable_time_rate),
             qos_interactive_rate=norm_data.get("qos_interactive_rate", n.qos_interactive_rate),
+            gpu_time_rate=norm_data.get("gpu_time_rate", n.gpu_time_rate),
             threads=norm_data.get("threads", n.threads),
             ipc_min=norm_data.get("ipc_min", n.ipc_min),
+            zombie_children=norm_data.get("zombie_children", n.zombie_children),
         ),
     )
 

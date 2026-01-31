@@ -314,14 +314,14 @@ def test_schema_has_process_snapshots_table(tmp_path):
     conn.close()
 
 
-def test_schema_version_14(initialized_db: Path):
-    """Schema version should be 14 (4-category scoring with rate fields)."""
+def test_schema_version_16(initialized_db: Path):
+    """Schema version should be 16 (zombie_children added, state multipliers updated)."""
     from rogue_hunter.storage import get_connection
 
     conn = get_connection(initialized_db)
     version = get_schema_version(conn)
     conn.close()
-    assert version == 14
+    assert version == 16
 
 
 # --- Process Event CRUD Tests ---

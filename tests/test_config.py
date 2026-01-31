@@ -401,5 +401,5 @@ def test_state_multipliers_defaults():
     assert mult.idle < mult.running
     assert mult.sleeping < mult.running
     assert mult.stopped < mult.running
-    assert mult.halted < mult.running
-    assert mult.zombie < mult.running
+    # Zombie = 0.0 (dead, metrics are stale)
+    assert mult.zombie == 0.0

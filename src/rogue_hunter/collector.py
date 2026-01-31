@@ -14,14 +14,14 @@ from rogue_hunter.config import Config
 log = structlog.get_logger()
 
 # Severity orderings for categorical metrics
+# Note: "halted" removed - not a real macOS process state
 STATE_SEVERITY = {
     "idle": 0,
     "sleeping": 1,
     "running": 2,
     "stopped": 3,
-    "halted": 4,
-    "zombie": 5,
-    "stuck": 6,
+    "zombie": 4,
+    "stuck": 5,
 }
 BAND_SEVERITY = {
     "low": 0,
@@ -139,6 +139,17 @@ class ProcessScore:
     qos_interactive_rate: MetricValue  # ms interactive per second
 
     # ─────────────────────────────────────────────────────────────
+    # GPU (WindowServer/GPU-related metrics)
+    # ─────────────────────────────────────────────────────────────
+    gpu_time: MetricValue  # Cumulative GPU time (ns)
+    gpu_time_rate: MetricValue  # ms GPU per second
+
+    # ─────────────────────────────────────────────────────────────
+    # Zombie Children (parent not reaping - potential bug indicator)
+    # ─────────────────────────────────────────────────────────────
+    zombie_children: MetricValue  # Count of zombie child processes
+
+    # ─────────────────────────────────────────────────────────────
     # State (categorical with hierarchy)
     # ─────────────────────────────────────────────────────────────
     state: MetricValueStr
@@ -196,6 +207,11 @@ class ProcessScore:
             "runnable_time_rate": self.runnable_time_rate.to_dict(),
             "qos_interactive": self.qos_interactive.to_dict(),
             "qos_interactive_rate": self.qos_interactive_rate.to_dict(),
+            # GPU
+            "gpu_time": self.gpu_time.to_dict(),
+            "gpu_time_rate": self.gpu_time_rate.to_dict(),
+            # Zombie children
+            "zombie_children": self.zombie_children.to_dict(),
             # State
             "state": self.state.to_dict(),
             "priority": self.priority.to_dict(),
@@ -251,6 +267,11 @@ class ProcessScore:
             runnable_time_rate=MetricValue.from_dict(data["runnable_time_rate"]),
             qos_interactive=MetricValue.from_dict(data["qos_interactive"]),
             qos_interactive_rate=MetricValue.from_dict(data["qos_interactive_rate"]),
+            # GPU
+            gpu_time=MetricValue.from_dict(data["gpu_time"]),
+            gpu_time_rate=MetricValue.from_dict(data["gpu_time_rate"]),
+            # Zombie children
+            zombie_children=MetricValue.from_dict(data["zombie_children"]),
             # State
             state=MetricValueStr.from_dict(data["state"]),
             priority=MetricValue.from_dict(data["priority"]),
@@ -315,6 +336,11 @@ class ProcessScore:
             runnable_time_rate=MetricValue.from_dict(data["runnable_time_rate"]),
             qos_interactive=MetricValue.from_dict(data["qos_interactive"]),
             qos_interactive_rate=MetricValue.from_dict(data["qos_interactive_rate"]),
+            # GPU
+            gpu_time=MetricValue.from_dict(data["gpu_time"]),
+            gpu_time_rate=MetricValue.from_dict(data["gpu_time_rate"]),
+            # Zombie children
+            zombie_children=MetricValue.from_dict(data["zombie_children"]),
             # State
             state=MetricValueStr.from_dict(data["state"]),
             priority=MetricValue.from_dict(data["priority"]),
@@ -390,6 +416,7 @@ class _PrevSample:
     faults: int  # Total page faults
     runnable_time: int  # Total runnable time (mach time units)
     qos_interactive: int  # Total QoS interactive time (mach time units)
+    gpu_time: int  # Total GPU time (nanoseconds)
 
 
 class LibprocCollector:
@@ -413,6 +440,7 @@ class LibprocCollector:
 
     def _collect_sync(self) -> ProcessSamples:
         """Synchronous collection - runs in executor."""
+        from rogue_hunter.iokit import get_gpu_usage
         from rogue_hunter.libproc import (
             abs_to_ns,
             get_bsd_info,
@@ -431,6 +459,9 @@ class LibprocCollector:
         else:
             wall_delta_ns = 0.0
         self._last_collect_time = start
+
+        # Get GPU usage for all processes (one IORegistry scan per cycle)
+        gpu_usage = get_gpu_usage()
 
         # Collect all PIDs
         pids = list_all_pids()
@@ -481,6 +512,9 @@ class LibprocCollector:
             runnable_time = rusage.ri_runnable_time
             qos_interactive = rusage.ri_cpu_time_qos_user_interactive
 
+            # Get GPU time for this process (0 if not using GPU)
+            gpu_time = gpu_usage.get(pid, 0)
+
             # Calculate deltas/rates from previous sample
             cpu_percent = 0.0
             disk_io_rate = 0.0
@@ -493,6 +527,7 @@ class LibprocCollector:
             faults_rate = 0.0
             runnable_time_rate = 0.0  # ms of runnable per second
             qos_interactive_rate = 0.0  # ms of interactive QoS per second
+            gpu_time_rate = 0.0  # ms of GPU per second
 
             wall_delta_sec = wall_delta_ns / 1e9
 
@@ -549,6 +584,11 @@ class LibprocCollector:
                         qos_ns = abs_to_ns(qos_delta, self._timebase)
                         qos_interactive_rate = (qos_ns / 1e6) / wall_delta_sec
 
+                    # gpu_time is already in nanoseconds, convert to ms/sec
+                    gpu_delta = gpu_time - prev.gpu_time
+                    if gpu_delta > 0:
+                        gpu_time_rate = (gpu_delta / 1e6) / wall_delta_sec
+
             # IPC (instructions per cycle) - no delta needed
             ipc = instructions / cycles if cycles > 0 else 0.0
 
@@ -566,6 +606,7 @@ class LibprocCollector:
                 faults=faults,
                 runnable_time=runnable_time,
                 qos_interactive=qos_interactive,
+                gpu_time=gpu_time,
             )
 
             # Get process name (try proc_name first, fall back to pbi_comm)
@@ -581,6 +622,7 @@ class LibprocCollector:
             # Build process dict with all metrics
             proc = {
                 "pid": pid,
+                "ppid": bsd_info.pbi_ppid,  # Parent PID (for zombie counting)
                 "command": command,
                 # CPU
                 "cpu": cpu_percent,
@@ -616,6 +658,9 @@ class LibprocCollector:
                 "runnable_time_rate": runnable_time_rate,
                 "qos_interactive": qos_interactive,
                 "qos_interactive_rate": qos_interactive_rate,
+                # GPU
+                "gpu_time": gpu_time,
+                "gpu_time_rate": gpu_time_rate,
                 # State
                 "state": state,
                 "priority": task_info.pti_priority,
@@ -626,6 +671,18 @@ class LibprocCollector:
         stale_pids = set(self._prev_samples.keys()) - current_pids
         for pid in stale_pids:
             del self._prev_samples[pid]
+
+        # Count zombie children per parent (for pressure scoring)
+        # A process with many zombie children isn't reaping them = potential bug
+        zombie_count: dict[int, int] = {}
+        for proc in all_processes:
+            if proc["state"] == "zombie":
+                ppid = proc["ppid"]
+                zombie_count[ppid] = zombie_count.get(ppid, 0) + 1
+
+        # Backfill zombie_children into each process dict
+        for proc in all_processes:
+            proc["zombie_children"] = zombie_count.get(proc["pid"], 0)
 
         # Score ALL processes first (cheap - just math), then select
         all_scored = [self._score_process(p) for p in all_processes]
@@ -701,7 +758,7 @@ class LibprocCollector:
         metrics = []
 
         if category == "blocking":
-            # Check pageins_rate, disk_io_rate, faults_rate
+            # Check pageins_rate, disk_io_rate, faults_rate, gpu_time_rate
             if proc["pageins_rate"] > 0:
                 metrics.append(f"pageins:{int(proc['pageins_rate'])}/s")
             if proc["disk_io_rate"] > 0:
@@ -714,6 +771,8 @@ class LibprocCollector:
                     metrics.append(f"disk:{rate:.0f}B/s")
             if proc["faults_rate"] > 0:
                 metrics.append(f"faults:{int(proc['faults_rate'])}/s")
+            if proc["gpu_time_rate"] > 0:
+                metrics.append(f"gpu:{proc['gpu_time_rate']:.0f}ms/s")
 
         elif category == "contention":
             # Check runnable_time_rate, csw_rate, cpu
@@ -729,7 +788,10 @@ class LibprocCollector:
                 metrics.append(f"cpu:{proc['cpu']:.0f}%")
 
         elif category == "pressure":
-            # Check mem, wakeups_rate, syscalls_rate
+            # Check mem, wakeups_rate, syscalls_rate, zombie_children
+            if proc["zombie_children"] > 0:
+                # Show first since unreaped zombies are unusual/significant
+                metrics.append(f"zombies:{proc['zombie_children']}")
             if proc["mem"] > 0:
                 mem = proc["mem"]
                 if mem >= 1024**3:
@@ -773,9 +835,10 @@ class LibprocCollector:
             blocking_score = 100.0  # Automatic max for stuck processes
         else:
             blocking_score = (
-                min(1.0, proc["pageins_rate"] / norm.pageins_rate) * 35
-                + min(1.0, proc["disk_io_rate"] / norm.disk_io_rate) * 35
-                + min(1.0, proc["faults_rate"] / norm.faults_rate) * 30
+                min(1.0, proc["pageins_rate"] / norm.pageins_rate) * 30
+                + min(1.0, proc["disk_io_rate"] / norm.disk_io_rate) * 30
+                + min(1.0, proc["faults_rate"] / norm.faults_rate) * 20
+                + min(1.0, proc["gpu_time_rate"] / norm.gpu_time_rate) * 20
             )
 
         # ═══════════════════════════════════════════════════════════════════
@@ -792,10 +855,11 @@ class LibprocCollector:
         # PRESSURE SCORE (20% of final) - Stressing system resources
         # ═══════════════════════════════════════════════════════════════════
         pressure_score = (
-            min(1.0, proc["mem"] / (norm.mem_gb * 1024**3)) * 35
+            min(1.0, proc["mem"] / (norm.mem_gb * 1024**3)) * 30
             + min(1.0, proc["wakeups_rate"] / norm.wakeups_rate) * 25
-            + min(1.0, proc["syscalls_rate"] / norm.syscalls_rate) * 20
-            + min(1.0, proc["mach_msgs_rate"] / norm.mach_msgs_rate) * 20
+            + min(1.0, proc["syscalls_rate"] / norm.syscalls_rate) * 15
+            + min(1.0, proc["mach_msgs_rate"] / norm.mach_msgs_rate) * 15
+            + min(1.0, proc["zombie_children"] / norm.zombie_children) * 15
         )
 
         # ═══════════════════════════════════════════════════════════════════
@@ -875,6 +939,11 @@ class LibprocCollector:
             runnable_time_rate=self._make_metric(proc["runnable_time_rate"]),
             qos_interactive=self._make_metric(proc["qos_interactive"]),
             qos_interactive_rate=self._make_metric(proc["qos_interactive_rate"]),
+            # GPU
+            gpu_time=self._make_metric(proc["gpu_time"]),
+            gpu_time_rate=self._make_metric(proc["gpu_time_rate"]),
+            # Zombie children
+            zombie_children=self._make_metric(proc["zombie_children"]),
             # State
             state=self._make_metric_str(proc["state"]),
             priority=self._make_metric(proc["priority"]),

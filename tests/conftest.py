@@ -76,6 +76,9 @@ def make_process_score(
     runnable_time_rate: float = 0.0,
     qos_interactive: int = 0,
     qos_interactive_rate: float = 0.0,
+    gpu_time: int = 0,
+    gpu_time_rate: float = 0.0,
+    zombie_children: int = 0,
     priority: int = 31,
     band: str = "elevated",
     blocking_score: float = 0.0,
@@ -129,6 +132,11 @@ def make_process_score(
         runnable_time_rate=make_metric(runnable_time_rate),
         qos_interactive=make_metric(qos_interactive),
         qos_interactive_rate=make_metric(qos_interactive_rate),
+        # GPU
+        gpu_time=make_metric(gpu_time),
+        gpu_time_rate=make_metric(gpu_time_rate),
+        # Zombie children
+        zombie_children=make_metric(zombie_children),
         # State
         state=make_metric_str(state),
         priority=make_metric(priority),

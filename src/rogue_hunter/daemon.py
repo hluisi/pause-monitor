@@ -704,6 +704,13 @@ class Daemon:
             qos_interactive_rate=self._enrich_metric(
                 rogue.qos_interactive_rate, hist_vals("qos_interactive_rate")
             ),
+            # GPU
+            gpu_time=self._enrich_metric(rogue.gpu_time, hist_vals("gpu_time")),
+            gpu_time_rate=self._enrich_metric(rogue.gpu_time_rate, hist_vals("gpu_time_rate")),
+            # Zombie children
+            zombie_children=self._enrich_metric(
+                rogue.zombie_children, hist_vals("zombie_children")
+            ),
             # State (categorical)
             state=self._enrich_metric_str(rogue.state, hist_vals_str("state"), STATE_SEVERITY),
             priority=self._enrich_metric(rogue.priority, hist_vals("priority")),

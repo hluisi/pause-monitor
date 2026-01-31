@@ -14,7 +14,7 @@ if TYPE_CHECKING:
 
 log = structlog.get_logger()
 
-SCHEMA_VERSION = 14  # 4-category scoring with rate fields
+SCHEMA_VERSION = 16  # Added zombie_children, updated state multipliers
 
 
 SCHEMA = """
@@ -129,6 +129,17 @@ CREATE TABLE IF NOT EXISTS process_snapshots (
     qos_interactive_rate REAL NOT NULL,
     qos_interactive_rate_low REAL NOT NULL,
     qos_interactive_rate_high REAL NOT NULL,
+    -- GPU (MetricValue + rate)
+    gpu_time INTEGER NOT NULL,
+    gpu_time_low INTEGER NOT NULL,
+    gpu_time_high INTEGER NOT NULL,
+    gpu_time_rate REAL NOT NULL,
+    gpu_time_rate_low REAL NOT NULL,
+    gpu_time_rate_high REAL NOT NULL,
+    -- Zombie children (MetricValue)
+    zombie_children INTEGER NOT NULL,
+    zombie_children_low INTEGER NOT NULL,
+    zombie_children_high INTEGER NOT NULL,
     -- State (MetricValueStr: current/low/high)
     state TEXT NOT NULL,
     state_low TEXT NOT NULL,
@@ -641,6 +652,9 @@ def insert_process_snapshot(
             runnable_time_rate, runnable_time_rate_low, runnable_time_rate_high,
             qos_interactive, qos_interactive_low, qos_interactive_high,
             qos_interactive_rate, qos_interactive_rate_low, qos_interactive_rate_high,
+            gpu_time, gpu_time_low, gpu_time_high,
+            gpu_time_rate, gpu_time_rate_low, gpu_time_rate_high,
+            zombie_children, zombie_children_low, zombie_children_high,
             state, state_low, state_high,
             priority, priority_low, priority_high,
             score, score_low, score_high,
@@ -653,6 +667,9 @@ def insert_process_snapshot(
            VALUES (?, ?, ?,
                    ?, ?, ?,
                    ?, ?, ?, ?,
+                   ?, ?, ?,
+                   ?, ?, ?,
+                   ?, ?, ?,
                    ?, ?, ?,
                    ?, ?, ?,
                    ?, ?, ?,
@@ -776,6 +793,17 @@ def insert_process_snapshot(
             score.qos_interactive_rate.current,
             score.qos_interactive_rate.low,
             score.qos_interactive_rate.high,
+            # GPU
+            score.gpu_time.current,
+            score.gpu_time.low,
+            score.gpu_time.high,
+            score.gpu_time_rate.current,
+            score.gpu_time_rate.low,
+            score.gpu_time_rate.high,
+            # Zombie children
+            score.zombie_children.current,
+            score.zombie_children.low,
+            score.zombie_children.high,
             # State
             score.state.current,
             score.state.low,
@@ -842,6 +870,9 @@ def get_snapshot(conn: sqlite3.Connection, snapshot_id: int) -> dict | None:
                   runnable_time_rate, runnable_time_rate_low, runnable_time_rate_high,
                   qos_interactive, qos_interactive_low, qos_interactive_high,
                   qos_interactive_rate, qos_interactive_rate_low, qos_interactive_rate_high,
+                  gpu_time, gpu_time_low, gpu_time_high,
+                  gpu_time_rate, gpu_time_rate_low, gpu_time_rate_high,
+                  zombie_children, zombie_children_low, zombie_children_high,
                   state, state_low, state_high,
                   priority, priority_low, priority_high,
                   score, score_low, score_high,
@@ -897,18 +928,23 @@ def get_snapshot(conn: sqlite3.Connection, snapshot_id: int) -> dict | None:
         "runnable_time_rate": {"current": row[74], "low": row[75], "high": row[76]},
         "qos_interactive": {"current": row[77], "low": row[78], "high": row[79]},
         "qos_interactive_rate": {"current": row[80], "low": row[81], "high": row[82]},
+        # GPU
+        "gpu_time": {"current": row[83], "low": row[84], "high": row[85]},
+        "gpu_time_rate": {"current": row[86], "low": row[87], "high": row[88]},
+        # Zombie children
+        "zombie_children": {"current": row[89], "low": row[90], "high": row[91]},
         # State
-        "state": {"current": row[83], "low": row[84], "high": row[85]},
-        "priority": {"current": row[86], "low": row[87], "high": row[88]},
+        "state": {"current": row[92], "low": row[93], "high": row[94]},
+        "priority": {"current": row[95], "low": row[96], "high": row[97]},
         # Scoring
-        "score": {"current": row[89], "low": row[90], "high": row[91]},
-        "band": {"current": row[92], "low": row[93], "high": row[94]},
-        "blocking_score": {"current": row[95], "low": row[96], "high": row[97]},
-        "contention_score": {"current": row[98], "low": row[99], "high": row[100]},
-        "pressure_score": {"current": row[101], "low": row[102], "high": row[103]},
-        "efficiency_score": {"current": row[104], "low": row[105], "high": row[106]},
-        "dominant_category": row[107],
-        "dominant_metrics": json.loads(row[108]) if row[108] else [],
+        "score": {"current": row[98], "low": row[99], "high": row[100]},
+        "band": {"current": row[101], "low": row[102], "high": row[103]},
+        "blocking_score": {"current": row[104], "low": row[105], "high": row[106]},
+        "contention_score": {"current": row[107], "low": row[108], "high": row[109]},
+        "pressure_score": {"current": row[110], "low": row[111], "high": row[112]},
+        "efficiency_score": {"current": row[113], "low": row[114], "high": row[115]},
+        "dominant_category": row[116],
+        "dominant_metrics": json.loads(row[117]) if row[117] else [],
     }
 
 
@@ -945,6 +981,9 @@ def get_process_snapshots(conn: sqlite3.Connection, event_id: int) -> list[dict]
                   runnable_time_rate, runnable_time_rate_low, runnable_time_rate_high,
                   qos_interactive, qos_interactive_low, qos_interactive_high,
                   qos_interactive_rate, qos_interactive_rate_low, qos_interactive_rate_high,
+                  gpu_time, gpu_time_low, gpu_time_high,
+                  gpu_time_rate, gpu_time_rate_low, gpu_time_rate_high,
+                  zombie_children, zombie_children_low, zombie_children_high,
                   state, state_low, state_high,
                   priority, priority_low, priority_high,
                   score, score_low, score_high,
@@ -998,18 +1037,23 @@ def get_process_snapshots(conn: sqlite3.Connection, event_id: int) -> list[dict]
             "runnable_time_rate": {"current": r[74], "low": r[75], "high": r[76]},
             "qos_interactive": {"current": r[77], "low": r[78], "high": r[79]},
             "qos_interactive_rate": {"current": r[80], "low": r[81], "high": r[82]},
+            # GPU
+            "gpu_time": {"current": r[83], "low": r[84], "high": r[85]},
+            "gpu_time_rate": {"current": r[86], "low": r[87], "high": r[88]},
+            # Zombie children
+            "zombie_children": {"current": r[89], "low": r[90], "high": r[91]},
             # State
-            "state": {"current": r[83], "low": r[84], "high": r[85]},
-            "priority": {"current": r[86], "low": r[87], "high": r[88]},
+            "state": {"current": r[92], "low": r[93], "high": r[94]},
+            "priority": {"current": r[95], "low": r[96], "high": r[97]},
             # Scoring
-            "score": {"current": r[89], "low": r[90], "high": r[91]},
-            "band": {"current": r[92], "low": r[93], "high": r[94]},
-            "blocking_score": {"current": r[95], "low": r[96], "high": r[97]},
-            "contention_score": {"current": r[98], "low": r[99], "high": r[100]},
-            "pressure_score": {"current": r[101], "low": r[102], "high": r[103]},
-            "efficiency_score": {"current": r[104], "low": r[105], "high": r[106]},
-            "dominant_category": r[107],
-            "dominant_metrics": json.loads(r[108]) if r[108] else [],
+            "score": {"current": r[98], "low": r[99], "high": r[100]},
+            "band": {"current": r[101], "low": r[102], "high": r[103]},
+            "blocking_score": {"current": r[104], "low": r[105], "high": r[106]},
+            "contention_score": {"current": r[107], "low": r[108], "high": r[109]},
+            "pressure_score": {"current": r[110], "low": r[111], "high": r[112]},
+            "efficiency_score": {"current": r[113], "low": r[114], "high": r[115]},
+            "dominant_category": r[116],
+            "dominant_metrics": json.loads(r[117]) if r[117] else [],
         }
         for r in cursor.fetchall()
     ]

@@ -322,7 +322,8 @@ class ProcessTable(Static):
         grid-size: 10;
         grid-gutter: 0 1;
         /* Columns: trend, pid, proc, score, B, C, P, E, state, detail */
-        grid-columns: 3 6 2fr 5 4 4 4 4 8 1fr;
+        /* Process column: 32 chars matches macOS pbi_name limit (2*MAXCOMLEN) */
+        grid-columns: 3 6 32 5 5 5 5 5 8 1fr;
     }
 
     ProcessTable .header {
@@ -410,10 +411,10 @@ class ProcessTable(Static):
                 yield Label("PID", classes="header")
                 yield Label("Process", classes="header")
                 yield Label("Score", classes="header center")
-                yield Label("B", classes="header center")  # Blocking
-                yield Label("C", classes="header center")  # Contention
-                yield Label("P", classes="header center")  # Pressure
-                yield Label("E", classes="header center")  # Efficiency
+                yield Label("Blk", classes="header center")  # Blocking
+                yield Label("Ctn", classes="header center")  # Contention
+                yield Label("Prs", classes="header center")  # Pressure
+                yield Label("Eff", classes="header center")  # Efficiency
                 yield Label("State", classes="header")
                 yield Label("Dominant", classes="header")
 

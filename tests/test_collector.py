@@ -67,6 +67,9 @@ def test_process_score_to_dict():
         runnable_time_rate=_metric(0.0),
         qos_interactive=_metric(0),
         qos_interactive_rate=_metric(0.0),
+        gpu_time=_metric(0),
+        gpu_time_rate=_metric(0.0),
+        zombie_children=_metric(0),
         state=_metric_str("running"),
         priority=_metric(31),
         score=_metric(42),
@@ -118,6 +121,9 @@ def test_process_score_from_dict():
         "runnable_time_rate": {"current": 0.0, "low": 0.0, "high": 0.0},
         "qos_interactive": {"current": 0, "low": 0, "high": 0},
         "qos_interactive_rate": {"current": 0.0, "low": 0.0, "high": 0.0},
+        "gpu_time": {"current": 0, "low": 0, "high": 0},
+        "gpu_time_rate": {"current": 0.0, "low": 0.0, "high": 0.0},
+        "zombie_children": {"current": 0, "low": 0, "high": 0},
         "state": {"current": "running", "low": "running", "high": "running"},
         "priority": {"current": 31, "low": 31, "high": 31},
         "score": {"current": 42, "low": 42, "high": 42},
@@ -174,6 +180,9 @@ def test_process_samples_json_roundtrip():
                 runnable_time_rate=_metric(0.0),
                 qos_interactive=_metric(0),
                 qos_interactive_rate=_metric(0.0),
+                gpu_time=_metric(0),
+                gpu_time_rate=_metric(0.0),
+                zombie_children=_metric(0),
                 state=_metric_str("running"),
                 priority=_metric(31),
                 score=_metric(75),
@@ -296,6 +305,7 @@ class TestLibprocCollectorSync:
             faults=0,
             runnable_time=0,
             qos_interactive=0,
+            gpu_time=0,
         )
 
         # Second collection should prune the fake PID

@@ -83,6 +83,9 @@ def make_test_process_score(**kwargs) -> ProcessScore:
     runnable_time_rate = kwargs.pop("runnable_time_rate", 0.0)
     qos_interactive = kwargs.pop("qos_interactive", 0)
     qos_interactive_rate = kwargs.pop("qos_interactive_rate", 0.0)
+    gpu_time = kwargs.pop("gpu_time", 0)
+    gpu_time_rate = kwargs.pop("gpu_time_rate", 0.0)
+    zombie_children = kwargs.pop("zombie_children", 0)
     priority = kwargs.pop("priority", 31)
     score = kwargs.pop("score", 50)
     blocking_score = kwargs.pop("blocking_score", score * 0.4)
@@ -125,6 +128,9 @@ def make_test_process_score(**kwargs) -> ProcessScore:
         runnable_time_rate=_metric(runnable_time_rate),
         qos_interactive=_metric(qos_interactive),
         qos_interactive_rate=_metric(qos_interactive_rate),
+        gpu_time=_metric(gpu_time),
+        gpu_time_rate=_metric(gpu_time_rate),
+        zombie_children=_metric(zombie_children),
         state=_metric_str(state),
         priority=_metric(priority),
         score=_metric(score),
