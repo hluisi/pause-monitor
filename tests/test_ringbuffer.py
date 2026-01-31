@@ -5,8 +5,8 @@ from datetime import datetime
 
 import pytest
 
-from pause_monitor.collector import ProcessSamples
-from pause_monitor.ringbuffer import BufferContents, RingBuffer, RingSample
+from rogue_hunter.collector import ProcessSamples
+from rogue_hunter.ringbuffer import BufferContents, RingBuffer, RingSample
 
 
 def make_test_samples(**kwargs) -> ProcessSamples:

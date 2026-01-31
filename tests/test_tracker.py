@@ -1,7 +1,7 @@
 # tests/test_tracker.py
 """Tests for per-process band tracker."""
 
-from pause_monitor.collector import MetricValue, MetricValueStr, ProcessScore
+from rogue_hunter.collector import MetricValue, MetricValueStr, ProcessScore
 
 
 def _metric(val: float | int) -> MetricValue:
@@ -86,9 +86,9 @@ def make_score(
 
 def test_tracker_creates_event_on_threshold_crossing(tmp_path):
     """ProcessTracker creates event when score crosses tracking threshold."""
-    from pause_monitor.config import BandsConfig
-    from pause_monitor.storage import get_connection, get_open_events, init_database
-    from pause_monitor.tracker import ProcessTracker
+    from rogue_hunter.config import BandsConfig
+    from rogue_hunter.storage import get_connection, get_open_events, init_database
+    from rogue_hunter.tracker import ProcessTracker
 
     db_path = tmp_path / "test.db"
     init_database(db_path)
@@ -112,9 +112,9 @@ def test_tracker_creates_event_on_threshold_crossing(tmp_path):
 
 def test_tracker_closes_event_when_score_drops(tmp_path):
     """ProcessTracker closes event when score drops below threshold."""
-    from pause_monitor.config import BandsConfig
-    from pause_monitor.storage import get_connection, get_open_events, init_database
-    from pause_monitor.tracker import ProcessTracker
+    from rogue_hunter.config import BandsConfig
+    from rogue_hunter.storage import get_connection, get_open_events, init_database
+    from rogue_hunter.tracker import ProcessTracker
 
     db_path = tmp_path / "test.db"
     init_database(db_path)
@@ -136,9 +136,9 @@ def test_tracker_closes_event_when_score_drops(tmp_path):
 
 def test_tracker_updates_peak(tmp_path):
     """ProcessTracker updates peak when score increases."""
-    from pause_monitor.config import BandsConfig
-    from pause_monitor.storage import get_connection, init_database
-    from pause_monitor.tracker import ProcessTracker
+    from rogue_hunter.config import BandsConfig
+    from rogue_hunter.storage import get_connection, init_database
+    from rogue_hunter.tracker import ProcessTracker
 
     db_path = tmp_path / "test.db"
     init_database(db_path)
@@ -164,9 +164,9 @@ def test_tracker_updates_peak(tmp_path):
 
 def test_tracker_closes_missing_pids(tmp_path):
     """ProcessTracker closes events for PIDs no longer in scores."""
-    from pause_monitor.config import BandsConfig
-    from pause_monitor.storage import get_connection, get_open_events, init_database
-    from pause_monitor.tracker import ProcessTracker
+    from rogue_hunter.config import BandsConfig
+    from rogue_hunter.storage import get_connection, get_open_events, init_database
+    from rogue_hunter.tracker import ProcessTracker
 
     db_path = tmp_path / "test.db"
     init_database(db_path)
@@ -188,15 +188,15 @@ def test_tracker_closes_missing_pids(tmp_path):
 
 def test_tracker_restores_state_from_db(tmp_path):
     """ProcessTracker restores tracking state from open events on init."""
-    from pause_monitor.config import BandsConfig
-    from pause_monitor.storage import (
+    from rogue_hunter.config import BandsConfig
+    from rogue_hunter.storage import (
         create_process_event,
         get_connection,
         init_database,
         insert_process_snapshot,
         update_process_event_peak,
     )
-    from pause_monitor.tracker import ProcessTracker
+    from rogue_hunter.tracker import ProcessTracker
 
     db_path = tmp_path / "test.db"
     init_database(db_path)
@@ -241,9 +241,9 @@ def test_tracker_restores_state_from_db(tmp_path):
 
 def test_tracker_inserts_entry_snapshot(tmp_path):
     """ProcessTracker inserts entry snapshot when event opens."""
-    from pause_monitor.config import BandsConfig
-    from pause_monitor.storage import get_connection, get_process_snapshots, init_database
-    from pause_monitor.tracker import ProcessTracker
+    from rogue_hunter.config import BandsConfig
+    from rogue_hunter.storage import get_connection, get_process_snapshots, init_database
+    from rogue_hunter.tracker import ProcessTracker
 
     db_path = tmp_path / "test.db"
     init_database(db_path)
@@ -287,9 +287,9 @@ def test_tracker_inserts_entry_snapshot(tmp_path):
 
 def test_tracker_inserts_exit_snapshot_on_score_drop(tmp_path):
     """ProcessTracker inserts exit snapshot when score drops below threshold."""
-    from pause_monitor.config import BandsConfig
-    from pause_monitor.storage import get_connection, get_process_snapshots, init_database
-    from pause_monitor.tracker import ProcessTracker
+    from rogue_hunter.config import BandsConfig
+    from rogue_hunter.storage import get_connection, get_process_snapshots, init_database
+    from rogue_hunter.tracker import ProcessTracker
 
     db_path = tmp_path / "test.db"
     init_database(db_path)
@@ -320,9 +320,9 @@ def test_tracker_inserts_exit_snapshot_on_score_drop(tmp_path):
 
 def test_tracker_no_exit_snapshot_for_disappeared_pid(tmp_path):
     """ProcessTracker does NOT insert exit snapshot when PID disappears."""
-    from pause_monitor.config import BandsConfig
-    from pause_monitor.storage import get_connection, init_database
-    from pause_monitor.tracker import ProcessTracker
+    from rogue_hunter.config import BandsConfig
+    from rogue_hunter.storage import get_connection, init_database
+    from rogue_hunter.tracker import ProcessTracker
 
     db_path = tmp_path / "test.db"
     init_database(db_path)
@@ -351,9 +351,9 @@ def test_tracker_no_exit_snapshot_for_disappeared_pid(tmp_path):
 
 def test_tracker_does_not_update_peak_for_equal_score(tmp_path):
     """ProcessTracker does NOT update peak when new score equals current peak."""
-    from pause_monitor.config import BandsConfig
-    from pause_monitor.storage import get_connection, get_snapshot, init_database
-    from pause_monitor.tracker import ProcessTracker
+    from rogue_hunter.config import BandsConfig
+    from rogue_hunter.storage import get_connection, get_snapshot, init_database
+    from rogue_hunter.tracker import ProcessTracker
 
     db_path = tmp_path / "test.db"
     init_database(db_path)
@@ -388,9 +388,9 @@ def test_tracker_does_not_update_peak_for_equal_score(tmp_path):
 
 def test_tracker_handles_multiple_simultaneous_processes(tmp_path):
     """ProcessTracker tracks multiple PIDs simultaneously."""
-    from pause_monitor.config import BandsConfig
-    from pause_monitor.storage import get_connection, get_open_events, init_database
-    from pause_monitor.tracker import ProcessTracker
+    from rogue_hunter.config import BandsConfig
+    from rogue_hunter.storage import get_connection, get_open_events, init_database
+    from rogue_hunter.tracker import ProcessTracker
 
     db_path = tmp_path / "test.db"
     init_database(db_path)
@@ -454,9 +454,9 @@ def test_tracker_inserts_checkpoint_snapshots(tmp_path):
     is stored by ID), so we use scores that don't exceed the entry peak to
     isolate the periodic checkpoint behavior.
     """
-    from pause_monitor.config import BandsConfig
-    from pause_monitor.storage import get_connection, init_database
-    from pause_monitor.tracker import SNAPSHOT_CHECKPOINT, SNAPSHOT_ENTRY, ProcessTracker
+    from rogue_hunter.config import BandsConfig
+    from rogue_hunter.storage import get_connection, init_database
+    from rogue_hunter.tracker import SNAPSHOT_CHECKPOINT, SNAPSHOT_ENTRY, ProcessTracker
 
     db_path = tmp_path / "test.db"
     init_database(db_path)

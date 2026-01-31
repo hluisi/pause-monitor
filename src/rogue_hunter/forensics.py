@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING
 
 import structlog
 
-from pause_monitor.storage import (
+from rogue_hunter.storage import (
     create_forensic_capture,
     insert_buffer_context,
     insert_log_entry,
@@ -27,12 +27,12 @@ from pause_monitor.storage import (
 )
 
 if TYPE_CHECKING:
-    from pause_monitor.ringbuffer import BufferContents
+    from rogue_hunter.ringbuffer import BufferContents
 
 log = structlog.get_logger()
 
 # Tailspin captures are written here (sudoers rule restricts to this path)
-TAILSPIN_DIR = Path("/tmp/pause-monitor")
+TAILSPIN_DIR = Path("/tmp/rogue-hunter")
 
 
 # --- Parsing Data Structures ---
@@ -336,7 +336,7 @@ class ForensicsCapture:
             The capture_id of the created forensic_captures record
         """
         # Create temp directory (for logs capture)
-        self._temp_dir = Path(tempfile.mkdtemp(prefix="pause-monitor-"))
+        self._temp_dir = Path(tempfile.mkdtemp(prefix="rogue-hunter-"))
         log.debug("forensics_temp_dir", path=str(self._temp_dir))
 
         try:
@@ -387,8 +387,8 @@ class ForensicsCapture:
     async def _capture_tailspin(self) -> Path:
         """Capture tailspin to temp directory. Requires sudo.
 
-        Writes to TAILSPIN_DIR (/tmp/pause-monitor/) which is allowed by
-        the sudoers rule installed during `pause-monitor install`.
+        Writes to TAILSPIN_DIR (/tmp/rogue-hunter/) which is allowed by
+        the sudoers rule installed during `rogue-hunter install`.
 
         Returns:
             Path to the tailspin file

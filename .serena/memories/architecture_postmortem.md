@@ -74,7 +74,7 @@ Database is the forensic record
 Process crosses threshold (or pause detected, or score >= 80 with cooldown)
          │
          ▼
-Create directory in ~/.local/share/pause-monitor/events/
+Create directory in ~/.local/share/rogue-hunter/events/
          │
          ▼
 Write ring_buffer.json (entire buffer serialized)
@@ -166,8 +166,8 @@ Currently: raw files written to persistent storage, never parsed.
 A CLI exists to query the database for forensic data. But the forensic data isn't in the database — it's in disk files.
 
 This means:
-- `pause-monitor events` shows event metadata but not the actual forensics
-- The real diagnostic data requires manually browsing `~/.local/share/pause-monitor/events/`
+- `rogue-hunter events` shows event metadata but not the actual forensics
+- The real diagnostic data requires manually browsing `~/.local/share/rogue-hunter/events/`
 - The database serves as an index to disk files rather than the forensic record itself
 
 ---

@@ -35,7 +35,7 @@ No stubs found. All `pass` statements are in Click groups or custom exceptions (
 | `system.forensics_debounce` | `config.py:22` | Used in daemon, but `config show` doesn't display it |
 | `bands.checkpoint_interval` | `config.py:37` | Used in tracker, but `config show` doesn't display it |
 
-**Impact:** Users running `pause-monitor config show` see an incomplete config. Low severity since users can read the TOML file directly.
+**Impact:** Users running `rogue-hunter config show` see an incomplete config. Low severity since users can read the TOML file directly.
 
 ---
 
@@ -76,7 +76,7 @@ No stubs found. All `pass` statements are in Click groups or custom exceptions (
 | Feature | Status |
 |---------|--------|
 | SIGHUP config reload | Only SIGTERM/SIGINT handled in daemon. Hot reloading requires daemon restart. |
-| Event directory cleanup on prune | Prune deletes DB records but forensics artifacts go to `/tmp/pause-monitor/` and are deleted after processing. No orphan cleanup issue exists. |
+| Event directory cleanup on prune | Prune deletes DB records but forensics artifacts go to `/tmp/rogue-hunter/` and are deleted after processing. No orphan cleanup issue exists. |
 
 ---
 

@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from pause_monitor.socket_client import SocketClient
+from rogue_hunter.socket_client import SocketClient
 
 
 @pytest.fixture

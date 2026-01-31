@@ -186,4 +186,4 @@ Textual's Sparkline aggregates data to fit available width automatically.
 
 ## Source File
 
-`src/pause_monitor/tui/app.py`
+`src/rogue_hunter/tui/app.py`

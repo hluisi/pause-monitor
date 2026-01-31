@@ -1,12 +1,12 @@
-"""Shared test fixtures for pause-monitor."""
+"""Shared test fixtures for rogue-hunter."""
 
 import time
 from pathlib import Path
 
 import pytest
 
-from pause_monitor.collector import MetricValue, MetricValueStr, ProcessScore
-from pause_monitor.storage import init_database
+from rogue_hunter.collector import MetricValue, MetricValueStr, ProcessScore
+from rogue_hunter.storage import init_database
 
 
 @pytest.fixture

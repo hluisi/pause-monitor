@@ -7,15 +7,15 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from pause_monitor.collector import MetricValue, MetricValueStr, ProcessSamples, ProcessScore
-from pause_monitor.forensics import (
+from rogue_hunter.collector import MetricValue, MetricValueStr, ProcessSamples, ProcessScore
+from rogue_hunter.forensics import (
     ForensicsCapture,
     identify_culprits,
     parse_logs_ndjson,
     parse_spindump,
 )
-from pause_monitor.ringbuffer import BufferContents, RingBuffer, RingSample
-from pause_monitor.storage import get_connection, init_database
+from rogue_hunter.ringbuffer import BufferContents, RingBuffer, RingSample
+from rogue_hunter.storage import get_connection, init_database
 
 
 def _metric(val: float | int) -> MetricValue:
@@ -395,7 +395,7 @@ def forensics_db(tmp_path: Path):
     # Create a process event to attach forensics to
     import time
 
-    from pause_monitor.storage import create_process_event
+    from rogue_hunter.storage import create_process_event
 
     event_id = create_process_event(
         conn,
@@ -426,7 +426,7 @@ async def test_forensics_capture_stores_in_database(forensics_db, tmp_path: Path
     contents = buffer.freeze()
 
     # Mock the system commands
-    with patch("pause_monitor.forensics.asyncio.create_subprocess_exec") as mock_exec:
+    with patch("rogue_hunter.forensics.asyncio.create_subprocess_exec") as mock_exec:
         mock_process = AsyncMock()
         mock_process.communicate.return_value = (b"", b"")
         mock_process.wait = AsyncMock(return_value=0)
@@ -441,7 +441,7 @@ async def test_forensics_capture_stores_in_database(forensics_db, tmp_path: Path
             capture_id = await capture.capture_and_store(contents, trigger="test_trigger")
 
     # Verify capture record created
-    from pause_monitor.storage import get_buffer_context, get_forensic_captures
+    from rogue_hunter.storage import get_buffer_context, get_forensic_captures
 
     captures = get_forensic_captures(conn, event_id)
     assert len(captures) == 1
@@ -464,7 +464,7 @@ async def test_forensics_capture_cleans_up_temp_dir(forensics_db, tmp_path: Path
     buffer.push(samples)
     contents = buffer.freeze()
 
-    with patch("pause_monitor.forensics.asyncio.create_subprocess_exec") as mock_exec:
+    with patch("rogue_hunter.forensics.asyncio.create_subprocess_exec") as mock_exec:
         mock_process = AsyncMock()
         mock_process.communicate.return_value = (b"", b"")
         mock_process.wait = AsyncMock(return_value=0)
@@ -491,14 +491,14 @@ async def test_forensics_capture_handles_failures_gracefully(forensics_db):
     contents = buffer.freeze()
 
     # Mock all captures to fail
-    with patch("pause_monitor.forensics.asyncio.create_subprocess_exec") as mock_exec:
+    with patch("rogue_hunter.forensics.asyncio.create_subprocess_exec") as mock_exec:
         mock_exec.side_effect = FileNotFoundError("Command not found")
 
         capture = ForensicsCapture(conn, event_id)
         await capture.capture_and_store(contents, trigger="test")
 
     # Should still create capture record with failure status
-    from pause_monitor.storage import get_forensic_captures
+    from rogue_hunter.storage import get_forensic_captures
 
     captures = get_forensic_captures(conn, event_id)
     assert len(captures) == 1
@@ -514,7 +514,7 @@ async def test_tailspin_capture_uses_sudo(forensics_db):
 
     capture = ForensicsCapture(conn, event_id)
 
-    with patch("pause_monitor.forensics.asyncio.create_subprocess_exec") as mock_exec:
+    with patch("rogue_hunter.forensics.asyncio.create_subprocess_exec") as mock_exec:
         # Simulate successful sudo tailspin
         mock_process = AsyncMock()
         mock_process.communicate.return_value = (b"", b"")
@@ -522,7 +522,7 @@ async def test_tailspin_capture_uses_sudo(forensics_db):
         mock_exec.return_value = mock_process
 
         # Create the expected output file so the check passes
-        from pause_monitor.forensics import TAILSPIN_DIR
+        from rogue_hunter.forensics import TAILSPIN_DIR
 
         TAILSPIN_DIR.mkdir(parents=True, exist_ok=True)
         expected_path = TAILSPIN_DIR / f"capture_{event_id}.tailspin"
@@ -539,7 +539,7 @@ async def test_tailspin_capture_uses_sudo(forensics_db):
             assert call_args[2] == "/usr/bin/tailspin"
             assert call_args[3] == "save"
             assert call_args[4] == "-o"
-            assert "/tmp/pause-monitor/capture_" in call_args[5]
+            assert "/tmp/rogue-hunter/capture_" in call_args[5]
 
             assert result == expected_path
         finally:
@@ -555,7 +555,7 @@ async def test_tailspin_capture_permission_error(forensics_db):
 
     capture = ForensicsCapture(conn, event_id)
 
-    with patch("pause_monitor.forensics.asyncio.create_subprocess_exec") as mock_exec:
+    with patch("rogue_hunter.forensics.asyncio.create_subprocess_exec") as mock_exec:
         # Simulate sudo -n failure (password required)
         mock_process = AsyncMock()
         mock_process.communicate.return_value = (b"", b"sudo: a password is required")

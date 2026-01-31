@@ -1,4 +1,4 @@
-"""Sleep/Wake detection for pause-monitor."""
+"""Sleep/Wake detection for rogue-hunter."""
 
 import re
 import subprocess

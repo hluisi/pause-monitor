@@ -99,7 +99,7 @@ Example: `C1,C0x25,S0x0521,S0x0523`
 | **spindump** | `spindump -file file.tailspin` |
 | **fs_usage** | File system activity analysis |
 
-## Why tailspin matters for pause-monitor
+## Why tailspin matters for rogue-hunter
 
 **The problem:** When a system pause occurs, our daemon is frozen too. We cannot observe the pause while it's happening. Any metrics we collect are from *before* and *after* the pause, not *during*.
 
@@ -114,7 +114,7 @@ Example: `C1,C0x25,S0x0521,S0x0523`
 
 This is the only way to see inside a system freeze.
 
-## Integration with pause-monitor
+## Integration with rogue-hunter
 
 **Status:** Tailspin is the primary forensics capture tool. Live spindump is not used.
 
@@ -123,9 +123,9 @@ This is the only way to see inside a system freeze.
 2. `spindump -i <file> -stdout` — decode to readable format (unprivileged)
 3. Parse and store in database
 
-**Sudoers rule** (`/etc/sudoers.d/pause-monitor`):
+**Sudoers rule** (`/etc/sudoers.d/rogue-hunter`):
 ```bash
-<user> ALL = (root) NOPASSWD: /usr/bin/tailspin save -o /Users/<user>/.local/share/pause-monitor/events/*
+<user> ALL = (root) NOPASSWD: /usr/bin/tailspin save -o /Users/<user>/.local/share/rogue-hunter/events/*
 ```
 
 **Why tailspin over live spindump:** During a system pause, our daemon is frozen too. We can only detect the pause after it ends. Live spindump shows post-recovery state; tailspin's buffer shows what happened during the freeze.

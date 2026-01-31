@@ -1,4 +1,4 @@
-# src/pause_monitor/tracker.py
+# src/rogue_hunter/tracker.py
 """Per-process band tracking."""
 
 from __future__ import annotations
@@ -10,9 +10,9 @@ from dataclasses import dataclass
 
 import structlog
 
-from pause_monitor.collector import ProcessScore
-from pause_monitor.config import BandsConfig
-from pause_monitor.storage import (
+from rogue_hunter.collector import ProcessScore
+from rogue_hunter.config import BandsConfig
+from rogue_hunter.storage import (
     close_process_event,
     create_process_event,
     get_open_events,

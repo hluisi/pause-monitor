@@ -1,4 +1,4 @@
-"""Configuration system for pause-monitor."""
+"""Configuration system for rogue-hunter."""
 
 from dataclasses import dataclass, field, fields, is_dataclass
 from pathlib import Path
@@ -174,7 +174,7 @@ class Config:
     @property
     def config_dir(self) -> Path:
         """Configuration directory."""
-        return Path.home() / ".config" / "pause-monitor"
+        return Path.home() / ".config" / "rogue-hunter"
 
     @property
     def config_path(self) -> Path:
@@ -184,12 +184,12 @@ class Config:
     @property
     def data_dir(self) -> Path:
         """Data directory."""
-        return Path.home() / ".local" / "share" / "pause-monitor"
+        return Path.home() / ".local" / "share" / "rogue-hunter"
 
     @property
     def state_dir(self) -> Path:
         """State directory for logs and other expendable persistent state."""
-        return Path.home() / ".local" / "state" / "pause-monitor"
+        return Path.home() / ".local" / "state" / "rogue-hunter"
 
     @property
     def db_path(self) -> Path:
@@ -210,7 +210,7 @@ class Config:
 
         Stored in /tmp/ so it's cleared on reboot, avoiding stale PID issues.
         """
-        return Path("/tmp/pause-monitor/daemon.pid")
+        return Path("/tmp/rogue-hunter/daemon.pid")
 
     @property
     def socket_path(self) -> Path:
@@ -218,7 +218,7 @@ class Config:
 
         Stored in /tmp/ so it's cleared on reboot, avoiding stale socket issues.
         """
-        return Path("/tmp/pause-monitor/daemon.sock")
+        return Path("/tmp/rogue-hunter/daemon.sock")
 
     def save(self, path: Path | None = None) -> None:
         """Save config to TOML file."""

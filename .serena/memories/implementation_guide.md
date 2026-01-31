@@ -314,7 +314,7 @@ The daemon manages tailspin's lifecycle:
 ### Logging
 Daemon uses structlog with dual output:
 - **Console:** Human-readable format for development
-- **File:** JSON Lines format at `~/.local/state/pause-monitor/daemon.log`
+- **File:** JSON Lines format at `~/.local/state/rogue-hunter/daemon.log`
   - Rotating: 5MB max, 3 backup files
   - Source field: `"source": "daemon"` or `"source": "tui"` (forwarded via socket)
 
@@ -513,14 +513,14 @@ id, capture_id (FK), sample_count, peak_score, culprits (JSON)
 ### Config Paths
 | Property | Path |
 |----------|------|
-| `config_dir` | `~/.config/pause-monitor/` |
-| `config_path` | `~/.config/pause-monitor/config.toml` |
-| `data_dir` | `~/.local/share/pause-monitor/` |
-| `state_dir` | `~/.local/state/pause-monitor/` |
-| `db_path` | `~/.local/share/pause-monitor/data.db` |
-| `log_path` | `~/.local/state/pause-monitor/daemon.log` |
-| `pid_path` | `/tmp/pause-monitor/daemon.pid` |
-| `socket_path` | `/tmp/pause-monitor/daemon.sock` |
+| `config_dir` | `~/.config/rogue-hunter/` |
+| `config_path` | `~/.config/rogue-hunter/config.toml` |
+| `data_dir` | `~/.local/share/rogue-hunter/` |
+| `state_dir` | `~/.local/state/rogue-hunter/` |
+| `db_path` | `~/.local/share/rogue-hunter/data.db` |
+| `log_path` | `~/.local/state/rogue-hunter/daemon.log` |
+| `pid_path` | `/tmp/rogue-hunter/daemon.pid` |
+| `socket_path` | `/tmp/rogue-hunter/daemon.sock` |
 
 ---
 
@@ -554,7 +554,7 @@ id, capture_id (FK), sample_count, peak_score, culprits (JSON)
 **Purpose:** Bidirectional daemon-TUI communication via Unix socket.
 
 ### Protocol
-Newline-delimited JSON over Unix socket at `/tmp/pause-monitor/daemon.sock`
+Newline-delimited JSON over Unix socket at `/tmp/rogue-hunter/daemon.sock`
 
 **Bidirectional:** Socket supports messages in both directions:
 - Daemon → TUI: sample broadcasts, initial state
@@ -592,7 +592,7 @@ Newline-delimited JSON over Unix socket at `/tmp/pause-monitor/daemon.sock`
 
 **Purpose:** Diagnostic capture (tailspin + logs) when process enters high band.
 
-**Privilege Model:** Only `tailspin save` requires sudo. Decoding and log extraction are unprivileged. The sudoers rule is configured during `pause-monitor install` and restricts writes to `/tmp/pause-monitor/`.
+**Privilege Model:** Only `tailspin save` requires sudo. Decoding and log extraction are unprivileged. The sudoers rule is configured during `rogue-hunter install` and restricts writes to `/tmp/rogue-hunter/`.
 
 ### Key Types
 | Type | Purpose |
@@ -605,7 +605,7 @@ Newline-delimited JSON over Unix socket at `/tmp/pause-monitor/daemon.sock`
 ### Module Constants
 | Constant | Value | Purpose |
 |----------|-------|---------|
-| `TAILSPIN_DIR` | `/tmp/pause-monitor` | Sudoers-allowed write location |
+| `TAILSPIN_DIR` | `/tmp/rogue-hunter` | Sudoers-allowed write location |
 
 ### ForensicsCapture Methods
 | Method | Purpose |
@@ -626,7 +626,7 @@ Newline-delimited JSON over Unix socket at `/tmp/pause-monitor/daemon.sock`
 
 ### Capture Flow
 1. Create temp directory (for logs)
-2. Run `sudo -n tailspin save -o /tmp/pause-monitor/...` and `log show` in parallel
+2. Run `sudo -n tailspin save -o /tmp/rogue-hunter/...` and `log show` in parallel
 3. Decode tailspin via `spindump -i` (unprivileged)
 4. Parse and store in database
 5. Clean up temp directory (tailspin files in /tmp cleared on reboot)
@@ -640,8 +640,8 @@ Live spindump (`spindump -notarget`) shows process state *after* a pause ends. B
 
 ### Install Command and Sudoers
 
-The `pause-monitor install` command (requires sudo) sets up:
-1. Sudoers rule at `/etc/sudoers.d/pause-monitor` allowing only `tailspin save -o /tmp/pause-monitor/*`
+The `rogue-hunter install` command (requires sudo) sets up:
+1. Sudoers rule at `/etc/sudoers.d/rogue-hunter` allowing only `tailspin save -o /tmp/rogue-hunter/*`
 2. Enables tailspin via `tailspin enable`
 3. Creates launchd plist for service management
 

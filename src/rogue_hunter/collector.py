@@ -9,7 +9,7 @@ from datetime import datetime
 
 import structlog
 
-from pause_monitor.config import Config
+from rogue_hunter.config import Config
 
 log = structlog.get_logger()
 
@@ -407,13 +407,13 @@ class LibprocCollector:
         self._last_collect_time: float = 0.0
 
         # Get timebase info once (for Apple Silicon time conversion)
-        from pause_monitor.libproc import get_timebase_info
+        from rogue_hunter.libproc import get_timebase_info
 
         self._timebase = get_timebase_info()
 
     def _collect_sync(self) -> ProcessSamples:
         """Synchronous collection - runs in executor."""
-        from pause_monitor.libproc import (
+        from rogue_hunter.libproc import (
             abs_to_ns,
             get_bsd_info,
             get_process_name,

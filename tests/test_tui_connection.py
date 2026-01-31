@@ -10,7 +10,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from pause_monitor.config import Config
+from rogue_hunter.config import Config
 
 
 @pytest.fixture
@@ -38,7 +38,7 @@ def _patch_socket_path(stack: ExitStack, base_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_tui_connects_via_socket_when_daemon_running(short_tmp_path: Path):
     """TUI should connect via socket when daemon is running."""
-    from pause_monitor.tui.app import PauseMonitorApp
+    from rogue_hunter.tui.app import PauseMonitorApp
 
     with ExitStack() as stack:
         _patch_socket_path(stack, short_tmp_path)
@@ -73,7 +73,7 @@ async def test_tui_connects_via_socket_when_daemon_running(short_tmp_path: Path)
 @pytest.mark.asyncio
 async def test_tui_shows_waiting_state_when_no_daemon(short_tmp_path: Path):
     """TUI should show waiting state when daemon not running."""
-    from pause_monitor.tui.app import PauseMonitorApp
+    from rogue_hunter.tui.app import PauseMonitorApp
 
     with ExitStack() as stack:
         _patch_socket_path(stack, short_tmp_path)
@@ -94,7 +94,7 @@ async def test_tui_shows_waiting_state_when_no_daemon(short_tmp_path: Path):
 
 def test_tui_set_disconnected_updates_subtitle():
     """TUI should show error state when daemon connection is lost."""
-    from pause_monitor.tui.app import PauseMonitorApp
+    from rogue_hunter.tui.app import PauseMonitorApp
 
     config = Config()
     app = PauseMonitorApp(config)
@@ -110,7 +110,7 @@ def test_tui_set_disconnected_updates_subtitle():
 
 def test_tui_handle_socket_data_updates_widgets():
     """TUI should update widgets with socket data (new ProcessSamples format)."""
-    from pause_monitor.tui.app import PauseMonitorApp
+    from rogue_hunter.tui.app import PauseMonitorApp
 
     config = Config()
     app = PauseMonitorApp(config)

@@ -1,4 +1,4 @@
-# src/pause_monitor/ringbuffer.py
+# src/rogue_hunter/ringbuffer.py
 """Ring buffer for process samples.
 
 Stores 30 samples at 1Hz resolution (30 seconds of history).
@@ -8,7 +8,7 @@ On pause detection, buffer is frozen and included in forensics.
 from collections import deque
 from dataclasses import dataclass
 
-from pause_monitor.collector import ProcessSamples
+from rogue_hunter.collector import ProcessSamples
 
 
 @dataclass

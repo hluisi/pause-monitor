@@ -4,7 +4,7 @@ from datetime import datetime
 
 import pytest
 
-from pause_monitor.collector import (
+from rogue_hunter.collector import (
     LibprocCollector,
     MetricValue,
     MetricValueStr,
@@ -12,7 +12,7 @@ from pause_monitor.collector import (
     ProcessScore,
     get_core_count,
 )
-from pause_monitor.config import Config
+from rogue_hunter.config import Config
 
 
 def _metric(val: float | int) -> MetricValue:
@@ -281,7 +281,7 @@ class TestLibprocCollectorSync:
 
         # Add a fake PID that doesn't exist
         fake_pid = 999999999
-        from pause_monitor.collector import _PrevSample
+        from rogue_hunter.collector import _PrevSample
 
         collector._prev_samples[fake_pid] = _PrevSample(
             cpu_time_ns=0,

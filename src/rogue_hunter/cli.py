@@ -1,4 +1,4 @@
-"""CLI commands for pause-monitor."""
+"""CLI commands for rogue-hunter."""
 
 import click
 
@@ -15,7 +15,7 @@ def daemon() -> None:
     """Run the background sampler."""
     import asyncio
 
-    from pause_monitor.daemon import run_daemon
+    from rogue_hunter.daemon import run_daemon
 
     asyncio.run(run_daemon())
 
@@ -23,8 +23,8 @@ def daemon() -> None:
 @main.command()
 def tui() -> None:
     """Launch interactive dashboard."""
-    from pause_monitor.config import Config
-    from pause_monitor.tui import run_tui
+    from rogue_hunter.config import Config
+    from rogue_hunter.tui import run_tui
 
     config = Config.load()
     run_tui(config)
@@ -35,9 +35,9 @@ def status() -> None:
     """Quick health check."""
     import time
 
-    from pause_monitor.boottime import get_boot_time
-    from pause_monitor.config import Config
-    from pause_monitor.storage import DatabaseNotAvailable, get_open_events, require_database
+    from rogue_hunter.boottime import get_boot_time
+    from rogue_hunter.config import Config
+    from rogue_hunter.storage import DatabaseNotAvailable, get_open_events, require_database
 
     config = Config.load()
 
@@ -78,9 +78,9 @@ def events(ctx, limit: int, open_only: bool) -> None:
     """
     import time
 
-    from pause_monitor.boottime import get_boot_time
-    from pause_monitor.config import Config
-    from pause_monitor.storage import (
+    from rogue_hunter.boottime import get_boot_time
+    from rogue_hunter.config import Config
+    from rogue_hunter.storage import (
         DatabaseNotAvailable,
         get_open_events,
         get_process_events,
@@ -117,7 +117,7 @@ def events(ctx, limit: int, open_only: bool) -> None:
             )
             click.echo("-" * 75)
 
-            from pause_monitor.formatting import format_duration
+            from rogue_hunter.formatting import format_duration
 
             now = time.time()
             for event in events_list:
@@ -142,7 +142,7 @@ def events_show(ctx, event_id: int, forensics: bool, threads: bool, logs: bool) 
     import json
     from datetime import datetime
 
-    from pause_monitor.storage import (
+    from rogue_hunter.storage import (
         get_buffer_context,
         get_forensic_captures,
         get_log_entries,
@@ -162,7 +162,7 @@ def events_show(ctx, event_id: int, forensics: bool, threads: bool, logs: bool) 
             click.echo(f"Error: Event {event_id} not found", err=True)
             raise SystemExit(1)
 
-        from pause_monitor.formatting import format_duration_verbose
+        from rogue_hunter.formatting import format_duration_verbose
 
         entry_time = datetime.fromtimestamp(event["entry_time"])
         exit_time = datetime.fromtimestamp(event["exit_time"]) if event["exit_time"] else None
@@ -278,8 +278,8 @@ def history(hours: int, fmt: str) -> None:
     import time
     from datetime import datetime
 
-    from pause_monitor.config import Config
-    from pause_monitor.storage import DatabaseNotAvailable, get_process_events, require_database
+    from rogue_hunter.config import Config
+    from rogue_hunter.storage import DatabaseNotAvailable, get_process_events, require_database
 
     config = Config.load()
 
@@ -293,7 +293,7 @@ def history(hours: int, fmt: str) -> None:
                 click.echo(f"No events in the last {hours} hour{'s' if hours != 1 else ''}.")
                 return
 
-            from pause_monitor.formatting import calculate_duration
+            from rogue_hunter.formatting import calculate_duration
 
             if fmt == "json":
                 data = []
@@ -380,13 +380,13 @@ def prune(events_days: int | None, dry_run: bool, force: bool) -> None:
 
     Prunes closed process_events older than events_days.
     """
-    from pause_monitor.config import Config
-    from pause_monitor.storage import get_connection, prune_old_data
+    from rogue_hunter.config import Config
+    from rogue_hunter.storage import get_connection, prune_old_data
 
     config = Config.load()
 
     if not config.db_path.exists():
-        click.echo("Database not found. Run 'pause-monitor daemon' first.")
+        click.echo("Database not found. Run 'rogue-hunter daemon' first.")
         return
 
     events_days = events_days or config.retention.events_days
@@ -419,7 +419,7 @@ def config() -> None:
 @config.command("show")
 def config_show() -> None:
     """Display current configuration."""
-    from pause_monitor.config import Config
+    from rogue_hunter.config import Config
 
     cfg = Config.load()
 
@@ -447,7 +447,7 @@ def config_edit() -> None:
     import os
     import subprocess
 
-    from pause_monitor.config import Config
+    from rogue_hunter.config import Config
 
     cfg = Config.load()
 
@@ -464,7 +464,7 @@ def config_edit() -> None:
 @click.confirmation_option(prompt="Reset config to defaults?")
 def config_reset() -> None:
     """Reset configuration to defaults."""
-    from pause_monitor.config import Config
+    from rogue_hunter.config import Config
 
     cfg = Config()
     cfg.save()
@@ -474,8 +474,8 @@ def config_reset() -> None:
 def _setup_sudoers(username: str) -> None:
     """Create sudoers rule for tailspin save.
 
-    Creates /etc/sudoers.d/pause-monitor with a narrow rule allowing
-    tailspin to write only to /tmp/pause-monitor/.
+    Creates /etc/sudoers.d/rogue-hunter with a narrow rule allowing
+    tailspin to write only to /tmp/rogue-hunter/.
 
     Args:
         username: The user to grant sudo access to
@@ -487,10 +487,10 @@ def _setup_sudoers(username: str) -> None:
     import subprocess
     from pathlib import Path
 
-    sudoers_path = Path("/etc/sudoers.d/pause-monitor")
+    sudoers_path = Path("/etc/sudoers.d/rogue-hunter")
 
-    # Narrow rule: only allow tailspin save to /tmp/pause-monitor/
-    rule = f"{username} ALL = (root) NOPASSWD: /usr/bin/tailspin save -o /tmp/pause-monitor/*\n"
+    # Narrow rule: only allow tailspin save to /tmp/rogue-hunter/
+    rule = f"{username} ALL = (root) NOPASSWD: /usr/bin/tailspin save -o /tmp/rogue-hunter/*\n"
 
     # Write with correct permissions (must be done atomically)
     sudoers_path.write_text(rule)
@@ -521,7 +521,7 @@ def install(system_wide: bool, force: bool) -> None:
     import sys
     from pathlib import Path
 
-    label = "com.pause-monitor.daemon"
+    label = "com.rogue-hunter.daemon"
 
     # Require root for sudoers setup
     if os.getuid() != 0:
@@ -537,7 +537,7 @@ def install(system_wide: bool, force: bool) -> None:
     # 1. Set up sudoers for tailspin
     click.echo("Setting up sudoers rule for tailspin...")
     _setup_sudoers(username)
-    click.echo("  Created /etc/sudoers.d/pause-monitor")
+    click.echo("  Created /etc/sudoers.d/rogue-hunter")
 
     # 2. Enable tailspin (requires root, which we have)
     click.echo("Enabling tailspin...")
@@ -568,7 +568,7 @@ def install(system_wide: bool, force: bool) -> None:
     import pwd
 
     user_info = pwd.getpwnam(username)
-    log_dir = Path(f"/Users/{username}/.local/share/pause-monitor")
+    log_dir = Path(f"/Users/{username}/.local/share/rogue-hunter")
     log_dir.mkdir(parents=True, exist_ok=True)
     os.chown(log_dir, user_info.pw_uid, user_info.pw_gid)
 
@@ -586,7 +586,7 @@ def install(system_wide: bool, force: bool) -> None:
     <array>
         <string>{python_path}</string>
         <string>-m</string>
-        <string>pause_monitor.cli</string>
+        <string>rogue_hunter.cli</string>
         <string>daemon</string>
     </array>
     <key>RunAtLoad</key>
@@ -594,9 +594,9 @@ def install(system_wide: bool, force: bool) -> None:
     <key>KeepAlive</key>
     <true/>
     <key>StandardOutPath</key>
-    <string>/Users/{username}/.local/share/pause-monitor/daemon.log</string>
+    <string>/Users/{username}/.local/share/rogue-hunter/daemon.log</string>
     <key>StandardErrorPath</key>
-    <string>/Users/{username}/.local/share/pause-monitor/daemon.log</string>
+    <string>/Users/{username}/.local/share/rogue-hunter/daemon.log</string>
     <key>ProcessType</key>
     <string>Background</string>
     <key>LegacyTimers</key>
@@ -630,7 +630,7 @@ def install(system_wide: bool, force: bool) -> None:
             click.echo(f"Warning: Could not start service: {stderr_text}")
 
     click.echo(f"\nTo check status: launchctl print {service_target}/{label}")
-    click.echo(f"To view logs: tail -f /Users/{username}/.local/share/pause-monitor/daemon.log")
+    click.echo(f"To view logs: tail -f /Users/{username}/.local/share/rogue-hunter/daemon.log")
 
 
 @main.command()
@@ -647,7 +647,7 @@ def uninstall(system_wide: bool, keep_data: bool, force: bool) -> None:
     import subprocess
     from pathlib import Path
 
-    label = "com.pause-monitor.daemon"
+    label = "com.rogue-hunter.daemon"
 
     # Require root for sudoers removal
     if os.getuid() != 0:
@@ -661,10 +661,10 @@ def uninstall(system_wide: bool, keep_data: bool, force: bool) -> None:
         raise SystemExit(1)
 
     # 1. Remove sudoers rule
-    sudoers_path = Path("/etc/sudoers.d/pause-monitor")
+    sudoers_path = Path("/etc/sudoers.d/rogue-hunter")
     if sudoers_path.exists():
         sudoers_path.unlink()
-        click.echo("Removed /etc/sudoers.d/pause-monitor")
+        click.echo("Removed /etc/sudoers.d/rogue-hunter")
     else:
         click.echo("Sudoers rule was not installed")
 
@@ -703,7 +703,7 @@ def uninstall(system_wide: bool, keep_data: bool, force: bool) -> None:
 
     # 4. Optionally remove data
     if not keep_data:
-        from pause_monitor.config import Config
+        from rogue_hunter.config import Config
 
         config = Config()
 

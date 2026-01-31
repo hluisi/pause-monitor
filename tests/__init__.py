@@ -1,1 +1,1 @@
-"""Tests for pause-monitor."""
+"""Tests for rogue-hunter."""

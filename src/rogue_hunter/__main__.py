@@ -1,6 +1,6 @@
-"""Entry point for python -m pause_monitor."""
+"""Entry point for python -m rogue_hunter."""
 
-from pause_monitor.cli import main
+from rogue_hunter.cli import main
 
 if __name__ == "__main__":
     main()

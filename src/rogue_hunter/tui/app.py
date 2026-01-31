@@ -1,4 +1,4 @@
-"""Real-time monitoring dashboard for pause-monitor.
+"""Real-time monitoring dashboard for rogue-hunter.
 
 Philosophy: TUI = Real-time window into daemon state. Nothing more.
 - Display what the daemon sends via socket — no contrived data
@@ -18,8 +18,8 @@ from textual.css.query import NoMatches
 from textual.reactive import reactive
 from textual.widgets import DataTable, Footer, Label, Static
 
-from pause_monitor.config import Config
-from pause_monitor.socket_client import SocketClient
+from rogue_hunter.config import Config
+from rogue_hunter.socket_client import SocketClient
 
 # Score band thresholds (matches daemon's tracking threshold)
 TRACKING_THRESHOLD = 40
@@ -246,7 +246,7 @@ class HeaderBar(Static):
 
         if not self.connected:
             gauge_left.update("STRESS ░░░░░░░░░░░░░░░░░░░░ ---/100   DISCONNECTED")
-            gauge_right.update("Run: pause-monitor daemon")
+            gauge_right.update("Run: rogue-hunter daemon")
             return
 
         filled = self.score // 5
@@ -881,7 +881,7 @@ class ActivityLog(Static):
 
 
 class PauseMonitorApp(App):
-    """Real-time monitoring dashboard for pause-monitor."""
+    """Real-time monitoring dashboard for rogue-hunter."""
 
     CSS = """
     Screen {
@@ -936,7 +936,7 @@ class PauseMonitorApp(App):
 
     def on_mount(self) -> None:
         """Initialize on startup."""
-        self.title = "pause-monitor"
+        self.title = "rogue-hunter"
         self.sub_title = "Real-time Dashboard"
         asyncio.create_task(self._initial_connect())
 
@@ -988,7 +988,7 @@ class PauseMonitorApp(App):
             self._set_disconnected("socket not found", start_reconnect=False)
             if show_notification:
                 self.notify(
-                    "Daemon not running. Start with: pause-monitor daemon",
+                    "Daemon not running. Start with: rogue-hunter daemon",
                     severity="warning",
                 )
             return False

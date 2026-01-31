@@ -7,7 +7,7 @@ Both tools capture system state for debugging hangs and pauses, but they answer 
 - **spindump**: "Where is code executing?" (callstacks, thread states)
 - **tailspin**: "What is the kernel doing?" (kdebug events, kernel activity)
 
-For **pause-monitor's purpose** (diagnosing system pauses), tailspin is more valuable because it captures what happened *during* the freeze. Our daemon is frozen too during a pause — we can't observe it while it happens. Tailspin's rolling buffer is the only way to see inside a system freeze.
+For **rogue-hunter's purpose** (diagnosing system pauses), tailspin is more valuable because it captures what happened *during* the freeze. Our daemon is frozen too during a pause — we can't observe it while it happens. Tailspin's rolling buffer is the only way to see inside a system freeze.
 
 | Aspect | **spindump** | **tailspin** |
 |--------|--------------|--------------|
@@ -27,7 +27,7 @@ For **pause-monitor's purpose** (diagnosing system pauses), tailspin is more val
 | **Kernel-level debugging** | tailspin | kdebug events: scheduler, I/O, interrupts, syscalls |
 | **Process-level debugging** | spindump | Detailed per-thread callstacks and blocking info |
 
-**Key insight for pause-monitor:** When a system pause occurs, our daemon is frozen too. We cannot observe the pause while it's happening. Tailspin's rolling buffer (recording continuously in the kernel) is the only way to see what caused the freeze.
+**Key insight for rogue-hunter:** When a system pause occurs, our daemon is frozen too. We cannot observe the pause while it's happening. Tailspin's rolling buffer (recording continuously in the kernel) is the only way to see what caused the freeze.
 
 ## Why spindump Needs sudo
 
@@ -98,7 +98,7 @@ tailspin augment -a file.tailspin  # All augmentation
 tailspin stat file.tailspin
 ```
 
-## Integration Pattern (pause-monitor)
+## Integration Pattern (rogue-hunter)
 
 When a pause is detected (if running privileged):
 
@@ -108,7 +108,7 @@ When a pause is detected (if running privileged):
 
 **Key insight:** Both `tailspin save` and live `spindump` require sudo. Only parsing existing files (`spindump -i`) works unprivileged.
 
-**Current pause-monitor status:** Forensics silently fails for tailspin because it doesn't use sudo. Either needs sudoers rules or should skip tailspin entirely when unprivileged.
+**Current rogue-hunter status:** Forensics silently fails for tailspin because it doesn't use sudo. Either needs sudoers rules or should skip tailspin entirely when unprivileged.
 
 ## Output Locations
 
@@ -159,7 +159,7 @@ This is kernel-level activity that no userspace tool can observe. During a syste
 | tailspin | Must be enabled beforehand; buffer may not capture everything |
 | Both | Symbolication requires matching system/binary versions |
 
-## Decision for pause-monitor
+## Decision for rogue-hunter
 
 **We use tailspin only. Live spindump is not used.**
 
@@ -182,9 +182,9 @@ During a system pause, our daemon is frozen too. We can only detect the pause *a
 
 ### Sudoers Rule
 
-Single rule in `/etc/sudoers.d/pause-monitor`:
+Single rule in `/etc/sudoers.d/rogue-hunter`:
 ```bash
-<user> ALL = (root) NOPASSWD: /usr/bin/tailspin save -o /Users/<user>/.local/share/pause-monitor/events/*
+<user> ALL = (root) NOPASSWD: /usr/bin/tailspin save -o /Users/<user>/.local/share/rogue-hunter/events/*
 ```
 
 This restricts tailspin to only write to the events directory, limiting blast radius of any accidents.

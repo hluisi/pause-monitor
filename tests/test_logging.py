@@ -9,9 +9,9 @@ from unittest.mock import patch
 
 import pytest
 
-from pause_monitor.ringbuffer import RingBuffer
-from pause_monitor.socket_client import SocketClient
-from pause_monitor.socket_server import SocketServer
+from rogue_hunter.ringbuffer import RingBuffer
+from rogue_hunter.socket_client import SocketClient
+from rogue_hunter.socket_server import SocketServer
 
 
 @pytest.fixture

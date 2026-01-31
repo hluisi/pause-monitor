@@ -1,4 +1,4 @@
-# src/pause_monitor/socket_server.py
+# src/rogue_hunter/socket_server.py
 """Unix socket server for real-time streaming to TUI.
 
 PUSH-BASED DESIGN (per Design Simplifications):
@@ -17,8 +17,8 @@ from typing import TYPE_CHECKING
 import structlog
 
 if TYPE_CHECKING:
-    from pause_monitor.collector import ProcessSamples
-    from pause_monitor.ringbuffer import RingBuffer
+    from rogue_hunter.collector import ProcessSamples
+    from rogue_hunter.ringbuffer import RingBuffer
 
 log = structlog.get_logger()
 

@@ -7,10 +7,10 @@
 
 | Document | Date Processed | Status |
 |----------|----------------|--------|
-| docs/plans/2026-01-20-pause-monitor-design.md | 2026-01-21 | Archived |
+| docs/plans/2026-01-20-rogue-hunter-design.md | 2026-01-21 | Archived |
 | docs/plans/2026-01-21-ring-buffer-sentinel-design.md | 2026-01-22 | Archived |
-| docs/plans/2026-01-21-pause-monitor-redesign.md | 2026-01-23 | Archived |
-| docs/plans/2026-01-21-pause-monitor-implementation.md | 2026-01-23 | Archived |
+| docs/plans/2026-01-21-rogue-hunter-redesign.md | 2026-01-23 | Archived |
+| docs/plans/2026-01-21-rogue-hunter-implementation.md | 2026-01-23 | Archived |
 | docs/plans/phase-4-socket-server.md | 2026-01-23 | Archived |
 | docs/plans/phase-5-socket-client-tui.md | 2026-01-23 | Archived |
 | docs/plans/phase-6-cleanup.md | 2026-01-23 | Archived |
@@ -139,7 +139,7 @@ Pressure + Efficiency (30%) = "Resource hog" — secondary concern
 
 ### SocketServer / SocketClient
 - **Purpose:** Real-time streaming to TUI via Unix socket
-- **Protocol:** Newline-delimited JSON at `/tmp/pause-monitor/daemon.sock`
+- **Protocol:** Newline-delimited JSON at `/tmp/rogue-hunter/daemon.sock`
 
 ### Storage (storage.py)
 - **Purpose:** SQLite with WAL mode, schema v13
@@ -247,7 +247,7 @@ class ProcessSamples:
 
 ## Configuration
 
-Location: `~/.config/pause-monitor/config.toml`
+Location: `~/.config/rogue-hunter/config.toml`
 
 ### BandsConfig (config.py)
 ```python
@@ -266,16 +266,16 @@ class BandsConfig:
 
 | Command | Purpose |
 |---------|---------|
-| `pause-monitor daemon` | Run background sampler (foreground) |
-| `pause-monitor tui` | Launch interactive dashboard |
-| `pause-monitor status` | Quick health check |
-| `pause-monitor events` | List process events from current boot |
-| `pause-monitor events <id>` | Inspect specific event |
-| `pause-monitor history` | Query historical event data |
-| `pause-monitor config` | Manage configuration |
-| `pause-monitor prune` | Manual data cleanup |
-| `pause-monitor install` | Set up launchd service |
-| `pause-monitor uninstall` | Remove launchd service |
+| `rogue-hunter daemon` | Run background sampler (foreground) |
+| `rogue-hunter tui` | Launch interactive dashboard |
+| `rogue-hunter status` | Quick health check |
+| `rogue-hunter events` | List process events from current boot |
+| `rogue-hunter events <id>` | Inspect specific event |
+| `rogue-hunter history` | Query historical event data |
+| `rogue-hunter config` | Manage configuration |
+| `rogue-hunter prune` | Manual data cleanup |
+| `rogue-hunter install` | Set up launchd service |
+| `rogue-hunter uninstall` | Remove launchd service |
 
 ## Design Decisions
 
@@ -294,8 +294,8 @@ class BandsConfig:
 
 | Purpose | Path |
 |---------|------|
-| Config | `~/.config/pause-monitor/config.toml` |
-| Database | `~/.local/share/pause-monitor/data.db` |
-| Events | `~/.local/share/pause-monitor/events/` |
-| Daemon log | `~/.local/state/pause-monitor/daemon.log` |
-| Socket | `/tmp/pause-monitor/daemon.sock` |
+| Config | `~/.config/rogue-hunter/config.toml` |
+| Database | `~/.local/share/rogue-hunter/data.db` |
+| Events | `~/.local/share/rogue-hunter/events/` |
+| Daemon log | `~/.local/state/rogue-hunter/daemon.log` |
+| Socket | `/tmp/rogue-hunter/daemon.sock` |

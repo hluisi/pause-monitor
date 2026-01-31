@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from pause_monitor.storage import (
+from rogue_hunter.storage import (
     SCHEMA_VERSION,
     get_schema_version,
     init_database,
@@ -127,7 +127,7 @@ def test_init_database_preserves_matching_schema(tmp_path: Path):
 
 def test_prune_rejects_zero_days(initialized_db: Path):
     """prune_old_data raises ValueError when days < 1."""
-    from pause_monitor.storage import get_connection, prune_old_data
+    from rogue_hunter.storage import get_connection, prune_old_data
 
     conn = get_connection(initialized_db)
 
@@ -139,7 +139,7 @@ def test_prune_rejects_zero_days(initialized_db: Path):
 
 def test_prune_rejects_negative_days(initialized_db: Path):
     """prune_old_data raises ValueError for negative retention days."""
-    from pause_monitor.storage import get_connection, prune_old_data
+    from rogue_hunter.storage import get_connection, prune_old_data
 
     conn = get_connection(initialized_db)
 
@@ -151,7 +151,7 @@ def test_prune_rejects_negative_days(initialized_db: Path):
 
 def test_prune_deletes_old_events(initialized_db: Path):
     """prune_old_data deletes old closed process events."""
-    from pause_monitor.storage import (
+    from rogue_hunter.storage import (
         close_process_event,
         create_process_event,
         get_connection,
@@ -202,7 +202,7 @@ def test_prune_deletes_old_events(initialized_db: Path):
 
 def test_prune_preserves_open_events(initialized_db: Path):
     """prune_old_data does not delete open events regardless of age."""
-    from pause_monitor.storage import create_process_event, get_connection, prune_old_data
+    from rogue_hunter.storage import create_process_event, get_connection, prune_old_data
 
     conn = get_connection(initialized_db)
 
@@ -234,7 +234,7 @@ def test_prune_preserves_open_events(initialized_db: Path):
 
 def test_get_daemon_state_missing_key(tmp_path):
     """get_daemon_state returns None for missing key."""
-    from pause_monitor.storage import get_connection, get_daemon_state
+    from rogue_hunter.storage import get_connection, get_daemon_state
 
     db_path = tmp_path / "test.db"
     init_database(db_path)
@@ -246,7 +246,7 @@ def test_get_daemon_state_missing_key(tmp_path):
 
 def test_set_and_get_daemon_state(tmp_path):
     """set_daemon_state stores value, get_daemon_state retrieves it."""
-    from pause_monitor.storage import get_connection, get_daemon_state, set_daemon_state
+    from rogue_hunter.storage import get_connection, get_daemon_state, set_daemon_state
 
     db_path = tmp_path / "test.db"
     init_database(db_path)
@@ -259,7 +259,7 @@ def test_set_and_get_daemon_state(tmp_path):
 
 def test_set_daemon_state_overwrites(tmp_path):
     """set_daemon_state overwrites existing value."""
-    from pause_monitor.storage import get_connection, get_daemon_state, set_daemon_state
+    from rogue_hunter.storage import get_connection, get_daemon_state, set_daemon_state
 
     db_path = tmp_path / "test.db"
     init_database(db_path)
@@ -273,7 +273,7 @@ def test_set_daemon_state_overwrites(tmp_path):
 
 def test_get_daemon_state_no_table(tmp_path):
     """get_daemon_state returns None when table doesn't exist."""
-    from pause_monitor.storage import get_daemon_state
+    from rogue_hunter.storage import get_daemon_state
 
     # Create empty database without schema
     db_path = tmp_path / "empty.db"
@@ -288,7 +288,7 @@ def test_get_daemon_state_no_table(tmp_path):
 
 def test_schema_has_process_events_table(tmp_path):
     """Schema includes process_events table."""
-    from pause_monitor.storage import get_connection, init_database
+    from rogue_hunter.storage import get_connection, init_database
 
     db_path = tmp_path / "test.db"
     init_database(db_path)
@@ -302,7 +302,7 @@ def test_schema_has_process_events_table(tmp_path):
 
 def test_schema_has_process_snapshots_table(tmp_path):
     """Schema includes process_snapshots table."""
-    from pause_monitor.storage import get_connection, init_database
+    from rogue_hunter.storage import get_connection, init_database
 
     db_path = tmp_path / "test.db"
     init_database(db_path)
@@ -316,7 +316,7 @@ def test_schema_has_process_snapshots_table(tmp_path):
 
 def test_schema_version_14(initialized_db: Path):
     """Schema version should be 14 (4-category scoring with rate fields)."""
-    from pause_monitor.storage import get_connection
+    from rogue_hunter.storage import get_connection
 
     conn = get_connection(initialized_db)
     version = get_schema_version(conn)
@@ -329,7 +329,7 @@ def test_schema_version_14(initialized_db: Path):
 
 def test_create_process_event(tmp_path):
     """create_process_event inserts and returns event ID."""
-    from pause_monitor.storage import create_process_event, get_connection, init_database
+    from rogue_hunter.storage import create_process_event, get_connection, init_database
 
     db_path = tmp_path / "test.db"
     init_database(db_path)
@@ -359,7 +359,7 @@ def test_create_process_event(tmp_path):
 
 def test_get_open_events(tmp_path):
     """get_open_events returns events with no exit_time."""
-    from pause_monitor.storage import (
+    from rogue_hunter.storage import (
         create_process_event,
         get_connection,
         get_open_events,
@@ -390,7 +390,7 @@ def test_get_open_events(tmp_path):
 
 def test_close_process_event(tmp_path):
     """close_process_event sets exit_time."""
-    from pause_monitor.storage import (
+    from rogue_hunter.storage import (
         close_process_event,
         create_process_event,
         get_connection,
@@ -422,7 +422,7 @@ def test_close_process_event(tmp_path):
 
 def test_update_process_event_peak(tmp_path):
     """update_process_event_peak updates peak fields including peak_snapshot_id."""
-    from pause_monitor.storage import (
+    from rogue_hunter.storage import (
         create_process_event,
         get_connection,
         init_database,
@@ -466,7 +466,7 @@ def test_update_process_event_peak(tmp_path):
 
 def test_insert_process_snapshot(tmp_path):
     """insert_process_snapshot adds structured snapshot and returns ID."""
-    from pause_monitor.storage import (
+    from rogue_hunter.storage import (
         create_process_event,
         get_connection,
         get_process_snapshots,
@@ -516,7 +516,7 @@ def test_insert_process_snapshot(tmp_path):
 
 def test_create_forensic_capture(tmp_path):
     """create_forensic_capture inserts and returns capture ID."""
-    from pause_monitor.storage import (
+    from rogue_hunter.storage import (
         create_forensic_capture,
         create_process_event,
         get_connection,
@@ -548,7 +548,7 @@ def test_create_forensic_capture(tmp_path):
 
 def test_get_forensic_captures(tmp_path):
     """get_forensic_captures returns captures for an event."""
-    from pause_monitor.storage import (
+    from rogue_hunter.storage import (
         create_forensic_capture,
         create_process_event,
         get_connection,
@@ -583,7 +583,7 @@ def test_get_forensic_captures(tmp_path):
 
 def test_insert_and_get_spindump_process(tmp_path):
     """insert_spindump_process and get_spindump_processes work correctly."""
-    from pause_monitor.storage import (
+    from rogue_hunter.storage import (
         create_forensic_capture,
         create_process_event,
         get_connection,
@@ -630,7 +630,7 @@ def test_insert_and_get_spindump_process(tmp_path):
 
 def test_insert_and_get_spindump_threads(tmp_path):
     """insert_spindump_thread and get_spindump_threads work correctly."""
-    from pause_monitor.storage import (
+    from rogue_hunter.storage import (
         create_forensic_capture,
         create_process_event,
         get_connection,
@@ -676,7 +676,7 @@ def test_insert_and_get_spindump_threads(tmp_path):
 
 def test_insert_and_get_log_entries(tmp_path):
     """insert_log_entry and get_log_entries work correctly."""
-    from pause_monitor.storage import (
+    from rogue_hunter.storage import (
         create_forensic_capture,
         create_process_event,
         get_connection,
@@ -722,7 +722,7 @@ def test_insert_and_get_buffer_context(tmp_path):
     """insert_buffer_context and get_buffer_context work correctly."""
     import json
 
-    from pause_monitor.storage import (
+    from rogue_hunter.storage import (
         create_forensic_capture,
         create_process_event,
         get_buffer_context,
@@ -766,7 +766,7 @@ def test_insert_and_get_buffer_context(tmp_path):
 
 def test_forensic_cascade_delete(tmp_path):
     """Deleting a process event cascades to forensic data."""
-    from pause_monitor.storage import (
+    from rogue_hunter.storage import (
         create_forensic_capture,
         create_process_event,
         get_buffer_context,

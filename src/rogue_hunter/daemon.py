@@ -1,4 +1,4 @@
-"""Background daemon for pause-monitor."""
+"""Background daemon for rogue-hunter."""
 
 import asyncio
 import ctypes
@@ -15,8 +15,8 @@ from datetime import datetime
 import psutil
 import structlog
 
-from pause_monitor.boottime import get_boot_time
-from pause_monitor.collector import (
+from rogue_hunter.boottime import get_boot_time
+from rogue_hunter.collector import (
     BAND_SEVERITY,
     STATE_SEVERITY,
     LibprocCollector,
@@ -25,12 +25,12 @@ from pause_monitor.collector import (
     ProcessSamples,
     ProcessScore,
 )
-from pause_monitor.config import Config
-from pause_monitor.forensics import ForensicsCapture
-from pause_monitor.ringbuffer import RingBuffer
-from pause_monitor.socket_server import SocketServer
-from pause_monitor.storage import init_database, prune_old_data
-from pause_monitor.tracker import ProcessTracker
+from rogue_hunter.config import Config
+from rogue_hunter.forensics import ForensicsCapture
+from rogue_hunter.ringbuffer import RingBuffer
+from rogue_hunter.socket_server import SocketServer
+from rogue_hunter.storage import init_database, prune_old_data
+from rogue_hunter.tracker import ProcessTracker
 
 log = structlog.get_logger()
 
@@ -195,7 +195,7 @@ class Daemon:
         """Start the daemon."""
         from importlib.metadata import version
 
-        log.info("daemon_starting", version=version("pause-monitor"))
+        log.info("daemon_starting", version=version("rogue-hunter"))
 
         # Log configuration for visibility
         bands = self.config.bands
@@ -401,7 +401,7 @@ class Daemon:
         """Check if daemon is already running.
 
         Verifies not just that a process with the PID exists, but that it's
-        actually the pause-monitor daemon. This prevents false positives after
+        actually the rogue-hunter daemon. This prevents false positives after
         a reboot when a different process may have the same PID.
         """
         if not self.config.pid_path.exists():
@@ -419,9 +419,9 @@ class Daemon:
             proc = psutil.Process(pid)
             cmdline = proc.cmdline()
 
-            # Check if this is actually pause-monitor
+            # Check if this is actually rogue-hunter
             cmdline_str = " ".join(cmdline).lower()
-            if "pause-monitor" in cmdline_str or "pause_monitor" in cmdline_str:
+            if "rogue-hunter" in cmdline_str or "rogue_hunter" in cmdline_str:
                 log.info(
                     "daemon_already_running_verified",
                     pid=pid,

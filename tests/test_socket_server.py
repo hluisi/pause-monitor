@@ -10,14 +10,14 @@ from pathlib import Path
 
 import pytest
 
-from pause_monitor.collector import (
+from rogue_hunter.collector import (
     MetricValue,
     MetricValueStr,
     ProcessSamples,
     ProcessScore,
 )
-from pause_monitor.ringbuffer import RingBuffer
-from pause_monitor.socket_server import SocketServer
+from rogue_hunter.ringbuffer import RingBuffer
+from rogue_hunter.socket_server import SocketServer
 
 
 async def wait_until(condition, timeout=1.0, interval=0.01):

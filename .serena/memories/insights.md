@@ -143,7 +143,7 @@ except asyncio.TimeoutError:
 
 ### UV Tool Install vs Source
 
-`uv tool install .` copies package to `~/.local/share/uv/tools/`. Editing source doesn't affect installed copy. Use `uv run pause-monitor` during development, or `uv tool install . --force && uv cache clean --force` to update.
+`uv tool install .` copies package to `~/.local/share/uv/tools/`. Editing source doesn't affect installed copy. Use `uv run rogue-hunter` during development, or `uv tool install . --force && uv cache clean --force` to update.
 
 ### Nix-Darwin Symlink Behavior
 

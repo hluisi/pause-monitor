@@ -6,7 +6,7 @@ def test_no_tier_imports():
     import ast
     from pathlib import Path
 
-    src_dir = Path("src/pause_monitor")
+    src_dir = Path("src/rogue_hunter")
     tier_names = {"Tier", "TierAction", "TierManager", "TiersConfig"}
 
     for py_file in src_dir.glob("**/*.py"):
@@ -26,6 +26,6 @@ def test_sentinel_module_deleted():
     """sentinel.py should be deleted (tier system replaced by ProcessTracker)."""
     from pathlib import Path
 
-    src_dir = Path("src/pause_monitor")
+    src_dir = Path("src/rogue_hunter")
     sentinel_path = src_dir / "sentinel.py"
     assert not sentinel_path.exists(), "sentinel.py should be deleted"

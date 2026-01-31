@@ -12,14 +12,14 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from pause_monitor.collector import (
+from rogue_hunter.collector import (
     LibprocCollector,
     MetricValue,
     MetricValueStr,
     ProcessSamples,
 )
-from pause_monitor.config import Config
-from pause_monitor.daemon import Daemon, DaemonState
+from rogue_hunter.config import Config
+from rogue_hunter.daemon import Daemon, DaemonState
 
 # Test constants
 TEST_TIMESTAMP = 1706000000.0  # 2024-01-23 UTC
@@ -173,7 +173,7 @@ async def test_daemon_start_initializes_database(patched_config_paths):
 
     with patch.object(daemon, "_start_caffeinate", new_callable=AsyncMock):
         # Mock socket server (path too long for Unix sockets in tmp_path)
-        with patch("pause_monitor.daemon.SocketServer") as mock_socket_class:
+        with patch("rogue_hunter.daemon.SocketServer") as mock_socket_class:
             mock_socket = AsyncMock()
             mock_socket_class.return_value = mock_socket
             # Start and immediately stop
@@ -316,7 +316,7 @@ async def test_daemon_start_writes_pid_file(patched_config_paths):
 
     with patch.object(daemon, "_start_caffeinate", new_callable=AsyncMock):
         # Mock socket server (path too long for Unix sockets in tmp_path)
-        with patch("pause_monitor.daemon.SocketServer") as mock_socket_class:
+        with patch("rogue_hunter.daemon.SocketServer") as mock_socket_class:
             mock_socket = AsyncMock()
             mock_socket_class.return_value = mock_socket
             daemon._shutdown_event.set()
@@ -347,7 +347,7 @@ async def test_daemon_stop_removes_pid_file(tmp_path: Path):
 @pytest.mark.asyncio
 async def test_auto_prune_runs_on_timeout(patched_config_paths):
     """Auto-prune runs prune_old_data when timeout expires."""
-    from pause_monitor.storage import init_database
+    from rogue_hunter.storage import init_database
 
     config = Config.load()
     daemon = Daemon(config)
@@ -357,7 +357,7 @@ async def test_auto_prune_runs_on_timeout(patched_config_paths):
 
     # Patch prune_old_data to track calls and signal shutdown after first call
     # Returns int (events_deleted) - system_samples table was removed
-    with patch("pause_monitor.daemon.prune_old_data", return_value=0) as mock_prune:
+    with patch("rogue_hunter.daemon.prune_old_data", return_value=0) as mock_prune:
 
         def prune_side_effect(*args, **kwargs):
             daemon._shutdown_event.set()
@@ -376,7 +376,7 @@ async def test_auto_prune_runs_on_timeout(patched_config_paths):
                 raise asyncio.TimeoutError()
             raise asyncio.CancelledError()
 
-        with patch("pause_monitor.daemon.asyncio.wait_for", side_effect=mock_wait_for_impl):
+        with patch("rogue_hunter.daemon.asyncio.wait_for", side_effect=mock_wait_for_impl):
             try:
                 await daemon._auto_prune()
             except asyncio.CancelledError:
@@ -398,7 +398,7 @@ async def test_auto_prune_exits_on_shutdown(patched_config_paths):
     daemon._shutdown_event.set()
 
     # Track that prune_old_data is NOT called
-    with patch("pause_monitor.daemon.prune_old_data") as mock_prune:
+    with patch("rogue_hunter.daemon.prune_old_data") as mock_prune:
         await daemon._auto_prune()
         mock_prune.assert_not_called()
 
@@ -410,7 +410,7 @@ async def test_auto_prune_skips_if_no_connection(patched_config_paths):
     daemon = Daemon(config)
     daemon._conn = None  # No connection
 
-    with patch("pause_monitor.daemon.prune_old_data") as mock_prune:
+    with patch("rogue_hunter.daemon.prune_old_data") as mock_prune:
         # Patch wait_for to timeout once, then we set shutdown
 
         async def mock_wait_for_impl(coro, timeout):
@@ -419,7 +419,7 @@ async def test_auto_prune_skips_if_no_connection(patched_config_paths):
             daemon._shutdown_event.set()
             raise asyncio.TimeoutError()
 
-        with patch("pause_monitor.daemon.asyncio.wait_for", side_effect=mock_wait_for_impl):
+        with patch("rogue_hunter.daemon.asyncio.wait_for", side_effect=mock_wait_for_impl):
             # Run actual _auto_prune - since _conn is None, prune should not be called
             await daemon._auto_prune()
 
@@ -429,8 +429,8 @@ async def test_auto_prune_skips_if_no_connection(patched_config_paths):
 @pytest.mark.asyncio
 async def test_auto_prune_uses_config_retention_days(patched_config_paths):
     """Auto-prune uses retention days from config."""
-    from pause_monitor.config import RetentionConfig
-    from pause_monitor.storage import init_database
+    from rogue_hunter.config import RetentionConfig
+    from rogue_hunter.storage import init_database
 
     # Save custom config and load it (exercises actual load path)
     config = Config(retention=RetentionConfig(events_days=14))
@@ -443,7 +443,7 @@ async def test_auto_prune_uses_config_retention_days(patched_config_paths):
 
     # Patch prune_old_data to track calls and signal shutdown after first call
     # Returns int (events_deleted) - system_samples table was removed
-    with patch("pause_monitor.daemon.prune_old_data", return_value=0) as mock_prune:
+    with patch("rogue_hunter.daemon.prune_old_data", return_value=0) as mock_prune:
 
         def prune_side_effect(*args, **kwargs):
             daemon._shutdown_event.set()
@@ -462,7 +462,7 @@ async def test_auto_prune_uses_config_retention_days(patched_config_paths):
                 raise asyncio.TimeoutError()
             raise asyncio.CancelledError()
 
-        with patch("pause_monitor.daemon.asyncio.wait_for", side_effect=mock_wait_for_impl):
+        with patch("rogue_hunter.daemon.asyncio.wait_for", side_effect=mock_wait_for_impl):
             try:
                 await daemon._auto_prune()
             except asyncio.CancelledError:
@@ -498,7 +498,7 @@ async def test_daemon_uses_main_loop(patched_config_paths):
     with patch.object(daemon, "_start_caffeinate", new_callable=AsyncMock):
         with patch.object(daemon, "_main_loop", side_effect=mock_main_loop):
             # Mock socket server (path too long for Unix sockets in tmp_path)
-            with patch("pause_monitor.daemon.SocketServer") as mock_socket_class:
+            with patch("rogue_hunter.daemon.SocketServer") as mock_socket_class:
                 mock_socket = AsyncMock()
                 mock_socket_class.return_value = mock_socket
                 # Start daemon - it should call _main_loop and return
@@ -565,7 +565,7 @@ async def test_daemon_main_loop_collects_samples(patched_config_paths, monkeypat
     so tracker remains None. The main loop should still work without tracker.update().
     Tracker integration is tested separately in test_daemon_main_loop_updates_tracker.
     """
-    from pause_monitor.storage import init_database
+    from rogue_hunter.storage import init_database
 
     config = Config.load()
     daemon = Daemon(config)
@@ -664,7 +664,7 @@ async def test_daemon_initializes_tracker(patched_config_paths, monkeypatch):
     """Daemon creates ProcessTracker on startup."""
     config = Config.load()
 
-    monkeypatch.setattr("pause_monitor.daemon.get_boot_time", lambda: int(TEST_TIMESTAMP))
+    monkeypatch.setattr("rogue_hunter.daemon.get_boot_time", lambda: int(TEST_TIMESTAMP))
 
     daemon = Daemon(config)
     # tracker is None until _init_database() is called
@@ -688,7 +688,7 @@ async def test_daemon_schema_mismatch_recovery(patched_config_paths, monkeypatch
     conn.execute("CREATE TABLE fake_table (id INTEGER)")
     conn.close()
 
-    monkeypatch.setattr("pause_monitor.daemon.get_boot_time", lambda: int(TEST_TIMESTAMP))
+    monkeypatch.setattr("rogue_hunter.daemon.get_boot_time", lambda: int(TEST_TIMESTAMP))
 
     # Daemon __init__ should catch the OperationalError and leave tracker as None
     daemon = Daemon(config)
@@ -707,7 +707,7 @@ async def test_daemon_main_loop_updates_tracker(patched_config_paths, monkeypatc
     """Main loop should call tracker.update() with rogues from samples."""
     config = Config.load()
 
-    monkeypatch.setattr("pause_monitor.daemon.get_boot_time", lambda: int(TEST_TIMESTAMP))
+    monkeypatch.setattr("rogue_hunter.daemon.get_boot_time", lambda: int(TEST_TIMESTAMP))
 
     daemon = Daemon(config)
     await daemon._init_database()  # Must init before accessing tracker

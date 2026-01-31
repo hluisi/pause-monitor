@@ -5,7 +5,7 @@ import time
 
 def test_get_boot_time_returns_int():
     """get_boot_time() returns boot timestamp as int."""
-    from pause_monitor.boottime import get_boot_time
+    from rogue_hunter.boottime import get_boot_time
 
     boot_time = get_boot_time()
     assert isinstance(boot_time, int)
@@ -14,7 +14,7 @@ def test_get_boot_time_returns_int():
 
 def test_get_boot_time_is_stable():
     """get_boot_time() returns same value on repeated calls."""
-    from pause_monitor.boottime import get_boot_time
+    from rogue_hunter.boottime import get_boot_time
 
     t1 = get_boot_time()
     t2 = get_boot_time()
@@ -23,7 +23,7 @@ def test_get_boot_time_is_stable():
 
 def test_get_boot_time_is_in_past():
     """Boot time should be before now."""
-    from pause_monitor.boottime import get_boot_time
+    from rogue_hunter.boottime import get_boot_time
 
     boot_time = get_boot_time()
     assert boot_time < time.time()

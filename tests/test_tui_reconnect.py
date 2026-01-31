@@ -26,7 +26,7 @@ class TestTUIReconnect:
 
     def test_reconnect_backoff_constants(self):
         """Verify reconnect backoff constants are correctly set."""
-        from pause_monitor.tui.app import PauseMonitorApp
+        from rogue_hunter.tui.app import PauseMonitorApp
 
         assert PauseMonitorApp._RECONNECT_INITIAL_DELAY == 1.0
         assert PauseMonitorApp._RECONNECT_MAX_DELAY == 30.0
@@ -34,7 +34,7 @@ class TestTUIReconnect:
 
     def test_backoff_calculation(self, mock_config):
         """Verify the backoff calculation logic."""
-        from pause_monitor.tui.app import PauseMonitorApp
+        from rogue_hunter.tui.app import PauseMonitorApp
 
         # Test the backoff calculation directly
         initial = PauseMonitorApp._RECONNECT_INITIAL_DELAY
@@ -59,7 +59,7 @@ class TestTUIReconnect:
 
     def test_max_delay_cap(self, mock_config):
         """Verify delay is capped at MAX_DELAY."""
-        from pause_monitor.tui.app import PauseMonitorApp
+        from rogue_hunter.tui.app import PauseMonitorApp
 
         max_delay = PauseMonitorApp._RECONNECT_MAX_DELAY
         multiplier = PauseMonitorApp._RECONNECT_MULTIPLIER
@@ -71,7 +71,7 @@ class TestTUIReconnect:
 
     def test_stopping_flag_prevents_reconnect(self, mock_config):
         """Verify _stopping flag is checked in reconnect logic."""
-        from pause_monitor.tui.app import PauseMonitorApp
+        from rogue_hunter.tui.app import PauseMonitorApp
 
         app = PauseMonitorApp(config=mock_config)
 
@@ -88,7 +88,7 @@ class TestTUIReconnect:
     @pytest.mark.asyncio
     async def test_set_disconnected_starts_reconnect(self, mock_config):
         """_set_disconnected should start reconnect loop when appropriate."""
-        from pause_monitor.tui.app import PauseMonitorApp
+        from rogue_hunter.tui.app import PauseMonitorApp
 
         app = PauseMonitorApp(config=mock_config)
         app._stopping = False
@@ -110,7 +110,7 @@ class TestTUIReconnect:
     @pytest.mark.asyncio
     async def test_set_disconnected_no_reconnect_when_stopping(self, mock_config):
         """_set_disconnected should not start reconnect when stopping."""
-        from pause_monitor.tui.app import PauseMonitorApp
+        from rogue_hunter.tui.app import PauseMonitorApp
 
         app = PauseMonitorApp(config=mock_config)
         app._stopping = True  # Shutting down
@@ -127,7 +127,7 @@ class TestTUIReconnect:
     @pytest.mark.asyncio
     async def test_try_socket_connect_returns_bool(self, mock_config, short_tmp_path):
         """_try_socket_connect should return True on success, False on failure."""
-        from pause_monitor.tui.app import PauseMonitorApp
+        from rogue_hunter.tui.app import PauseMonitorApp
 
         app = PauseMonitorApp(config=mock_config)
         app.query_one = MagicMock(side_effect=Exception("no widgets"))
@@ -140,7 +140,7 @@ class TestTUIReconnect:
     @pytest.mark.asyncio
     async def test_initial_connect_starts_reconnect_on_failure(self, mock_config):
         """_initial_connect should start reconnect loop if connection fails."""
-        from pause_monitor.tui.app import PauseMonitorApp
+        from rogue_hunter.tui.app import PauseMonitorApp
 
         app = PauseMonitorApp(config=mock_config)
         app.query_one = MagicMock(side_effect=Exception("no widgets"))

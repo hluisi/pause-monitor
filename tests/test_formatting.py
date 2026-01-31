@@ -4,7 +4,7 @@ import time
 
 import pytest
 
-from pause_monitor.formatting import (
+from rogue_hunter.formatting import (
     calculate_duration,
     format_duration,
     format_duration_verbose,

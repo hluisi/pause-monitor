@@ -3,7 +3,7 @@
 import ctypes
 import os
 
-from pause_monitor.libproc import (
+from rogue_hunter.libproc import (
     MachTimebaseInfo,
     ProcBSDInfo,
     ProcTaskInfo,
@@ -70,14 +70,14 @@ class TestTimebase:
 
     def test_abs_to_ns_identity(self):
         """With (1,1) timebase, abs_to_ns returns input."""
-        from pause_monitor.libproc import TimebaseInfo
+        from rogue_hunter.libproc import TimebaseInfo
 
         timebase = TimebaseInfo(numer=1, denom=1)
         assert abs_to_ns(1000, timebase) == 1000
 
     def test_abs_to_ns_apple_silicon(self):
         """With Apple Silicon timebase (125,3), conversion is correct."""
-        from pause_monitor.libproc import TimebaseInfo
+        from rogue_hunter.libproc import TimebaseInfo
 
         # Apple Silicon typical: 125/3 = ~41.67 ns per tick
         timebase = TimebaseInfo(numer=125, denom=3)

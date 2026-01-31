@@ -1,6 +1,6 @@
 """Tests for configuration system."""
 
-from pause_monitor.config import (
+from rogue_hunter.config import (
     BandsConfig,
     Config,
     NormalizationConfig,
@@ -28,8 +28,8 @@ def test_full_config_defaults():
 def test_config_paths():
     """Config provides correct data paths."""
     config = Config()
-    assert "pause-monitor" in str(config.config_dir)
-    assert "pause-monitor" in str(config.data_dir)
+    assert "rogue-hunter" in str(config.config_dir)
+    assert "rogue-hunter" in str(config.data_dir)
     assert config.db_path.name == "data.db"
     assert config.pid_path.name == "daemon.pid"
 

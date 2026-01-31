@@ -1,4 +1,4 @@
-# pause-monitor
+# rogue-hunter
 
 System health monitoring daemon that tracks down intermittent macOS system pauses.
 
@@ -20,12 +20,12 @@ uv run ruff check . && uv run ruff format .  # Lint + format
 uv run pytest                  # Run tests
 
 # Runtime
-uv run pause-monitor daemon    # Run sampler (foreground)
-uv run pause-monitor tui       # Interactive dashboard
-uv run pause-monitor status    # Quick health check
-uv run pause-monitor events    # List pause events (add <id> for details)
-uv run pause-monitor config    # Manage configuration
-uv run pause-monitor install   # Set up launchd service
+uv run rogue-hunter daemon    # Run sampler (foreground)
+uv run rogue-hunter tui       # Interactive dashboard
+uv run rogue-hunter status    # Quick health check
+uv run rogue-hunter events    # List pause events (add <id> for details)
+uv run rogue-hunter config    # Manage configuration
+uv run rogue-hunter install   # Set up launchd service
 ```
 
 ## Architecture
@@ -47,9 +47,9 @@ uv run pause-monitor install   # Set up launchd service
 
 | Purpose | Path |
 | --------- | ------ |
-| Config | `~/.config/pause-monitor/config.toml` |
-| Database | `~/.local/share/pause-monitor/data.db` |
-| Events | `~/.local/share/pause-monitor/events/` |
+| Config | `~/.config/rogue-hunter/config.toml` |
+| Database | `~/.local/share/rogue-hunter/data.db` |
+| Events | `~/.local/share/rogue-hunter/events/` |
 
 ## Agent Discipline
 

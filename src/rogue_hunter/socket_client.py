@@ -1,4 +1,4 @@
-# src/pause_monitor/socket_client.py
+# src/rogue_hunter/socket_client.py
 
 """Unix socket client for receiving ring buffer data from daemon."""
 

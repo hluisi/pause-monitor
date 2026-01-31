@@ -25,7 +25,7 @@ Each function follows the same boilerplate:
 ```python
 config = Config.load()
 if not config.db_path.exists():
-    click.echo("Database not found. Run 'pause-monitor daemon' first.")
+    click.echo("Database not found. Run 'rogue-hunter daemon' first.")
     return
 conn = get_connection(config.db_path)
 try:
@@ -66,7 +66,7 @@ def require_database(config: Config | None = None, exit_on_missing: bool = False
         if exit_on_missing:
             click.echo("Error: Database not found", err=True)
             raise SystemExit(1)
-        click.echo("Database not found. Run 'pause-monitor daemon' first.")
+        click.echo("Database not found. Run 'rogue-hunter daemon' first.")
         raise DatabaseNotAvailable()
     conn = get_connection(config.db_path)
     try:

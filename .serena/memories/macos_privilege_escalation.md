@@ -4,7 +4,7 @@ Research on best practices for running applications that need elevated permissio
 
 ## The Problem
 
-pause-monitor needs root privileges for:
+rogue-hunter needs root privileges for:
 - `tailspin save` — extracts kernel trace buffer (requires root)
 - `spindump` — samples all process callstacks (requires root)
 
@@ -26,7 +26,7 @@ But running the entire daemon as root causes issues:
 Add NOPASSWD rules for specific commands in `/etc/sudoers.d/`:
 
 ```bash
-# /etc/sudoers.d/pause-monitor
+# /etc/sudoers.d/rogue-hunter
 %admin ALL = (root) NOPASSWD: /usr/bin/tailspin save *
 %admin ALL = (root) NOPASSWD: /usr/sbin/spindump -notarget *
 ```
@@ -53,7 +53,7 @@ Run a minimal separate daemon as root that handles only privileged operations:
 ```
 User Session                          System
 ┌─────────────────────────┐          ┌─────────────────────────┐
-│ pause-monitor daemon    │   IPC    │ pause-monitor-helper    │
+│ rogue-hunter daemon    │   IPC    │ rogue-hunter-helper    │
 │ (user privileges)       │ ──────── │ (root via LaunchDaemon) │
 │ - metrics, storage      │  socket  │ - tailspin save         │
 │ - pause detection       │          │ - spindump              │
@@ -123,7 +123,7 @@ def get_real_home() -> Path:
     return Path.home()
 ```
 
-## Decision for pause-monitor
+## Decision for rogue-hunter
 
 **Approach:** Single sudoers rule for `tailspin save` only.
 
@@ -133,13 +133,13 @@ def get_real_home() -> Path:
 - Live spindump dropped (tailspin decode provides same data)
 - Narrow rule limits blast radius of accidents
 
-**Sudoers rule** (`/etc/sudoers.d/pause-monitor`):
+**Sudoers rule** (`/etc/sudoers.d/rogue-hunter`):
 ```bash
-<user> ALL = (root) NOPASSWD: /usr/bin/tailspin save -o /Users/<user>/.local/share/pause-monitor/events/*
+<user> ALL = (root) NOPASSWD: /usr/bin/tailspin save -o /Users/<user>/.local/share/rogue-hunter/events/*
 ```
 
 **Implementation:**
-1. `pause-monitor install` creates the sudoers file (requires one-time sudo)
+1. `rogue-hunter install` creates the sudoers file (requires one-time sudo)
 2. Forensics uses `sudo -n /usr/bin/tailspin save -o <path>`
 3. If `sudo -n` fails, forensics errors loudly (no silent fallback)
 

@@ -1,4 +1,4 @@
-"""SQLite storage layer for pause-monitor."""
+"""SQLite storage layer for rogue-hunter."""
 
 import json
 import sqlite3
@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Generator
 import structlog
 
 if TYPE_CHECKING:
-    from pause_monitor.collector import ProcessScore
+    from rogue_hunter.collector import ProcessScore
 
 log = structlog.get_logger()
 
@@ -350,7 +350,7 @@ def require_database(
         if exit_on_missing:
             click.echo("Error: Database not found", err=True)
             raise SystemExit(1)
-        click.echo("Database not found. Run 'pause-monitor daemon' first.")
+        click.echo("Database not found. Run 'rogue-hunter daemon' first.")
         raise DatabaseNotAvailable()
 
     conn = get_connection(db_path)

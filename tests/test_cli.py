@@ -7,13 +7,13 @@ from unittest.mock import MagicMock, patch
 import pytest
 from click.testing import CliRunner
 
-from pause_monitor.cli import main
-from pause_monitor.config import (
+from rogue_hunter.cli import main
+from rogue_hunter.config import (
     BandsConfig,
     Config,
     RetentionConfig,
 )
-from pause_monitor.storage import create_process_event, init_database
+from rogue_hunter.storage import create_process_event, init_database
 
 
 @pytest.fixture
@@ -30,7 +30,7 @@ class TestEventsCommand:
         # Point to a non-existent database
         mock_db_path = tmp_path / "nonexistent" / "data.db"
 
-        with patch("pause_monitor.config.Config.load") as mock_load:
+        with patch("rogue_hunter.config.Config.load") as mock_load:
             mock_config = MagicMock(spec=Config)
             mock_config.db_path = mock_db_path
             mock_load.return_value = mock_config
@@ -38,7 +38,7 @@ class TestEventsCommand:
 
         assert result.exit_code == 0
         assert "Database not found" in result.output
-        assert "pause-monitor daemon" in result.output
+        assert "rogue-hunter daemon" in result.output
 
     def test_events_empty_database(self, runner: CliRunner, tmp_path: Path) -> None:
         """events with empty database shows 'No events recorded'."""
@@ -46,8 +46,8 @@ class TestEventsCommand:
         init_database(db_path)
 
         with (
-            patch("pause_monitor.config.Config.load") as mock_load,
-            patch("pause_monitor.boottime.get_boot_time", return_value=1706000000),
+            patch("rogue_hunter.config.Config.load") as mock_load,
+            patch("rogue_hunter.boottime.get_boot_time", return_value=1706000000),
         ):
             mock_config = MagicMock(spec=Config)
             mock_config.db_path = db_path
@@ -79,8 +79,8 @@ class TestEventsCommand:
         conn.close()
 
         with (
-            patch("pause_monitor.config.Config.load") as mock_load,
-            patch("pause_monitor.boottime.get_boot_time", return_value=1706000000),
+            patch("rogue_hunter.config.Config.load") as mock_load,
+            patch("rogue_hunter.boottime.get_boot_time", return_value=1706000000),
         ):
             mock_config = MagicMock(spec=Config)
             mock_config.db_path = db_path
@@ -100,7 +100,7 @@ class TestEventsCommand:
         db_path = tmp_path / "data.db"
         init_database(db_path)
 
-        from pause_monitor.storage import insert_process_snapshot, update_process_event_peak
+        from rogue_hunter.storage import insert_process_snapshot, update_process_event_peak
         from tests.conftest import make_process_score
 
         conn = sqlite3.connect(db_path)
@@ -121,7 +121,7 @@ class TestEventsCommand:
         update_process_event_peak(conn, event_id, 75, "high", snap_id)
         conn.close()
 
-        with patch("pause_monitor.config.Config.load") as mock_load:
+        with patch("rogue_hunter.config.Config.load") as mock_load:
             mock_config = MagicMock(spec=Config)
             mock_config.db_path = db_path
             mock_load.return_value = mock_config
@@ -137,7 +137,7 @@ class TestEventsCommand:
         db_path = tmp_path / "data.db"
         init_database(db_path)
 
-        with patch("pause_monitor.config.Config.load") as mock_load:
+        with patch("rogue_hunter.config.Config.load") as mock_load:
             mock_config = MagicMock(spec=Config)
             mock_config.db_path = db_path
             mock_load.return_value = mock_config
@@ -169,8 +169,8 @@ class TestEventsCommand:
         conn.close()
 
         with (
-            patch("pause_monitor.config.Config.load") as mock_load,
-            patch("pause_monitor.boottime.get_boot_time", return_value=1706000000),
+            patch("rogue_hunter.config.Config.load") as mock_load,
+            patch("rogue_hunter.boottime.get_boot_time", return_value=1706000000),
         ):
             mock_config = MagicMock(spec=Config)
             mock_config.db_path = db_path
@@ -191,7 +191,7 @@ class TestHistoryCommand:
         """history with no database shows helpful message."""
         mock_db_path = tmp_path / "nonexistent" / "data.db"
 
-        with patch("pause_monitor.config.Config.load") as mock_load:
+        with patch("rogue_hunter.config.Config.load") as mock_load:
             mock_config = MagicMock(spec=Config)
             mock_config.db_path = mock_db_path
             mock_load.return_value = mock_config
@@ -199,14 +199,14 @@ class TestHistoryCommand:
 
         assert result.exit_code == 0
         assert "Database not found" in result.output
-        assert "pause-monitor daemon" in result.output
+        assert "rogue-hunter daemon" in result.output
 
     def test_history_empty_database(self, runner: CliRunner, tmp_path: Path) -> None:
         """history with empty database shows 'No events'."""
         db_path = tmp_path / "data.db"
         init_database(db_path)
 
-        with patch("pause_monitor.config.Config.load") as mock_load:
+        with patch("rogue_hunter.config.Config.load") as mock_load:
             mock_config = MagicMock(spec=Config)
             mock_config.db_path = db_path
             mock_load.return_value = mock_config
@@ -245,7 +245,7 @@ class TestHistoryCommand:
             conn.commit()
         conn.close()
 
-        with patch("pause_monitor.config.Config.load") as mock_load:
+        with patch("rogue_hunter.config.Config.load") as mock_load:
             mock_config = MagicMock(spec=Config)
             mock_config.db_path = db_path
             mock_load.return_value = mock_config
@@ -281,7 +281,7 @@ class TestHistoryCommand:
         conn.commit()
         conn.close()
 
-        with patch("pause_monitor.config.Config.load") as mock_load:
+        with patch("rogue_hunter.config.Config.load") as mock_load:
             mock_config = MagicMock(spec=Config)
             mock_config.db_path = db_path
             mock_load.return_value = mock_config
@@ -319,7 +319,7 @@ class TestHistoryCommand:
         conn.commit()
         conn.close()
 
-        with patch("pause_monitor.config.Config.load") as mock_load:
+        with patch("rogue_hunter.config.Config.load") as mock_load:
             mock_config = MagicMock(spec=Config)
             mock_config.db_path = db_path
             mock_load.return_value = mock_config
@@ -355,7 +355,7 @@ class TestHistoryCommand:
         )
         conn.close()
 
-        with patch("pause_monitor.config.Config.load") as mock_load:
+        with patch("rogue_hunter.config.Config.load") as mock_load:
             mock_config = MagicMock(spec=Config)
             mock_config.db_path = db_path
             mock_load.return_value = mock_config
@@ -372,7 +372,7 @@ class TestPruneCommand:
         """prune with no database shows message."""
         mock_db_path = tmp_path / "nonexistent" / "data.db"
 
-        with patch("pause_monitor.config.Config.load") as mock_load:
+        with patch("rogue_hunter.config.Config.load") as mock_load:
             mock_config = MagicMock(spec=Config)
             mock_config.db_path = mock_db_path
             mock_load.return_value = mock_config
@@ -386,7 +386,7 @@ class TestPruneCommand:
         db_path = tmp_path / "data.db"
         init_database(db_path)
 
-        with patch("pause_monitor.config.Config.load") as mock_load:
+        with patch("rogue_hunter.config.Config.load") as mock_load:
             mock_config = MagicMock()
             mock_config.db_path = db_path
             mock_config.retention.events_days = 90
@@ -401,7 +401,7 @@ class TestPruneCommand:
         db_path = tmp_path / "data.db"
         init_database(db_path)
 
-        with patch("pause_monitor.config.Config.load") as mock_load:
+        with patch("rogue_hunter.config.Config.load") as mock_load:
             mock_config = MagicMock()
             mock_config.db_path = db_path
             mock_config.retention.events_days = 90
@@ -416,7 +416,7 @@ class TestPruneCommand:
         db_path = tmp_path / "data.db"
         init_database(db_path)
 
-        with patch("pause_monitor.config.Config.load") as mock_load:
+        with patch("rogue_hunter.config.Config.load") as mock_load:
             mock_config = MagicMock()
             mock_config.db_path = db_path
             mock_config.retention.events_days = 90
@@ -432,7 +432,7 @@ class TestPruneCommand:
         db_path = tmp_path / "data.db"
         init_database(db_path)
 
-        with patch("pause_monitor.config.Config.load") as mock_load:
+        with patch("rogue_hunter.config.Config.load") as mock_load:
             mock_config = MagicMock()
             mock_config.db_path = db_path
             mock_config.retention.events_days = 90
@@ -608,7 +608,7 @@ class TestStatusCommand:
 
     def test_status_no_database(self, runner: CliRunner, tmp_path: Path) -> None:
         """status with no database shows message."""
-        with patch("pause_monitor.config.Config.load") as mock_load:
+        with patch("rogue_hunter.config.Config.load") as mock_load:
             mock_config = MagicMock(spec=Config)
             mock_config.db_path = tmp_path / "nonexistent" / "data.db"
             mock_config.socket_path = tmp_path / "daemon.sock"
@@ -625,8 +625,8 @@ class TestStatusCommand:
         init_database(db_path)
 
         with (
-            patch("pause_monitor.config.Config.load") as mock_load,
-            patch("pause_monitor.boottime.get_boot_time", return_value=1706000000),
+            patch("rogue_hunter.config.Config.load") as mock_load,
+            patch("rogue_hunter.boottime.get_boot_time", return_value=1706000000),
         ):
             mock_config = MagicMock(spec=Config)
             mock_config.db_path = db_path
@@ -658,8 +658,8 @@ class TestStatusCommand:
         conn.close()
 
         with (
-            patch("pause_monitor.config.Config.load") as mock_load,
-            patch("pause_monitor.boottime.get_boot_time", return_value=1706000000),
+            patch("rogue_hunter.config.Config.load") as mock_load,
+            patch("rogue_hunter.boottime.get_boot_time", return_value=1706000000),
         ):
             mock_config = MagicMock(spec=Config)
             mock_config.db_path = db_path

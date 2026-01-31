@@ -1,4 +1,4 @@
-# pause-monitor
+# rogue-hunter
 
 A system health monitoring daemon for macOS that tracks down intermittent system pauses.
 
@@ -8,7 +8,7 @@ Your Mac occasionally freezes for 10-90 seconds. When it recovers, Activity Moni
 
 ## The Solution
 
-`pause-monitor` runs in the background and:
+`rogue-hunter` runs in the background and:
 
 1. **Detects pauses** using precise timing - if the system was unresponsive, it knows
 2. **Captures forensics** immediately after recovery - process snapshots, spindump, system logs
@@ -27,12 +27,12 @@ Your Mac occasionally freezes for 10-90 seconds. When it recovers, Activity Moni
 curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
 
-**Install pause-monitor:**
+**Install rogue-hunter:**
 
 ```bash
 # From source (recommended)
-git clone https://github.com/hluisi/pause-monitor
-cd pause-monitor
+git clone https://github.com/hluisi/rogue-hunter
+cd rogue-hunter
 uv tool install .
 ```
 
@@ -40,23 +40,23 @@ uv tool install .
 
 ```bash
 # Start the daemon (runs in foreground, Ctrl+C to stop)
-pause-monitor daemon
+rogue-hunter daemon
 ```
 
 That's it! The daemon is now monitoring your system.
 
 ### Step 3: Set Up Auto-Start (Optional)
 
-To have pause-monitor start automatically when you log in:
+To have rogue-hunter start automatically when you log in:
 
 ```bash
-pause-monitor install
+rogue-hunter install
 ```
 
 To remove auto-start later:
 
 ```bash
-pause-monitor uninstall
+rogue-hunter uninstall
 ```
 
 ---
@@ -66,7 +66,7 @@ pause-monitor uninstall
 ### Check System Status
 
 ```bash
-pause-monitor status
+rogue-hunter status
 ```
 
 Shows a one-line health summary:
@@ -77,13 +77,13 @@ Healthy | Stress: 12% | Load: 3.4/16 | Mem: 73% | Last pause: 2h ago
 ### Interactive Dashboard
 
 ```bash
-pause-monitor tui
+rogue-hunter tui
 ```
 
 Opens a live-updating dashboard showing CPU, memory, I/O, and recent events:
 
 ```
-┌─ pause-monitor ──────────────────────────────────────────── 09:32:15 ─┐
+┌─ rogue-hunter ──────────────────────────────────────────── 09:32:15 ─┐
 │                                                                        │
 │  SYSTEM HEALTH          STRESS: ██░░░░░░░░ 12%        Mode: Normal 5s │
 │  ───────────────────────────────────────────────────────────────────── │
@@ -105,63 +105,63 @@ Press `q` to quit.
 
 ```bash
 # List all pause events
-pause-monitor events
+rogue-hunter events
 
 # View details of a specific event (e.g., event #3)
-pause-monitor events 3
+rogue-hunter events 3
 ```
 
 ### View Historical Data
 
 ```bash
 # Show samples from the last hour (default)
-pause-monitor history
+rogue-hunter history
 
 # Show samples from the last 24 hours
-pause-monitor history -H 24
+rogue-hunter history -H 24
 
 # Show only high-stress periods
-pause-monitor history --high-stress
+rogue-hunter history --high-stress
 
 # Export as JSON or CSV
-pause-monitor history --format json
-pause-monitor history --format csv
+rogue-hunter history --format json
+rogue-hunter history --format csv
 ```
 
 ### Manage Configuration
 
 ```bash
 # Show current settings
-pause-monitor config show
+rogue-hunter config show
 
 # Edit configuration file
-pause-monitor config edit
+rogue-hunter config edit
 
 # Reset to defaults
-pause-monitor config reset
+rogue-hunter config reset
 ```
 
 ### Clean Up Old Data
 
 ```bash
 # Preview what would be deleted
-pause-monitor prune --dry-run
+rogue-hunter prune --dry-run
 
 # Delete old data (confirms before deleting)
-pause-monitor prune
+rogue-hunter prune
 
 # Delete without confirmation
-pause-monitor prune --yes
+rogue-hunter prune --yes
 ```
 
 ---
 
 ## Configuration
 
-Configuration is stored at `~/.config/pause-monitor/config.toml`. Edit it with:
+Configuration is stored at `~/.config/rogue-hunter/config.toml`. Edit it with:
 
 ```bash
-pause-monitor config edit
+rogue-hunter config edit
 ```
 
 ### Example Configuration
@@ -194,7 +194,7 @@ patterns = ["codemeter", "bitdefender", "biomesyncd"]
 
 High CPU doesn't mean problems. A process using 200% on a 16-core machine is fine.
 
-Instead, `pause-monitor` calculates a **stress score** from actual contention signals:
+Instead, `rogue-hunter` calculates a **stress score** from actual contention signals:
 
 | Signal | What it means |
 |--------|---------------|
@@ -213,7 +213,7 @@ Instead, `pause-monitor` calculates a **stress score** from actual contention si
 
 Uses `time.monotonic()` to detect actual unresponsiveness. If a 5-second sleep takes 79 seconds, the system was frozen for 74 seconds.
 
-When a pause is detected, pause-monitor immediately captures:
+When a pause is detected, rogue-hunter immediately captures:
 - Full process snapshot
 - `spindump` (thread stacks)
 - `tailspin` (kernel traces, if available)
@@ -225,10 +225,10 @@ When a pause is detected, pause-monitor immediately captures:
 
 | Purpose | Location |
 |---------|----------|
-| Config | `~/.config/pause-monitor/config.toml` |
-| Database | `~/.local/share/pause-monitor/data.db` |
-| Event forensics | `~/.local/share/pause-monitor/events/` |
-| Daemon logs | `~/.local/share/pause-monitor/daemon.log` |
+| Config | `~/.config/rogue-hunter/config.toml` |
+| Database | `~/.local/share/rogue-hunter/data.db` |
+| Event forensics | `~/.local/share/rogue-hunter/events/` |
+| Daemon logs | `~/.local/share/rogue-hunter/daemon.log` |
 
 Data is automatically pruned: samples after 30 days, event forensics after 90 days.
 
@@ -241,7 +241,7 @@ Data is automatically pruned: samples after 30 days, event forensics after 90 da
 Runs when you log in:
 
 ```bash
-pause-monitor install
+rogue-hunter install
 ```
 
 ### Install (System-wide)
@@ -249,40 +249,40 @@ pause-monitor install
 Runs at boot, even before login (requires admin):
 
 ```bash
-sudo pause-monitor install --system
+sudo rogue-hunter install --system
 ```
 
 ### Check Service Status
 
 ```bash
 # User service
-launchctl list | grep pause-monitor
+launchctl list | grep rogue-hunter
 
 # System service
-sudo launchctl list | grep pause-monitor
+sudo launchctl list | grep rogue-hunter
 ```
 
 ### View Logs
 
 ```bash
 # Daemon output
-tail -f ~/.local/share/pause-monitor/daemon.log
+tail -f ~/.local/share/rogue-hunter/daemon.log
 
 # launchd stdout/stderr
-tail -f ~/Library/Logs/pause-monitor.log
+tail -f ~/Library/Logs/rogue-hunter.log
 ```
 
 ### Uninstall
 
 ```bash
 # User service
-pause-monitor uninstall
+rogue-hunter uninstall
 
 # System service
-sudo pause-monitor uninstall --system
+sudo rogue-hunter uninstall --system
 
 # Also delete all data
-pause-monitor uninstall --force
+rogue-hunter uninstall --force
 ```
 
 ---
@@ -292,8 +292,8 @@ pause-monitor uninstall --force
 ### Setup
 
 ```bash
-git clone https://github.com/hluisi/pause-monitor
-cd pause-monitor
+git clone https://github.com/hluisi/rogue-hunter
+cd rogue-hunter
 uv sync                  # Install dependencies
 ```
 
@@ -315,9 +315,9 @@ uv run ruff format .     # Auto-format code
 ### Run from Source
 
 ```bash
-uv run pause-monitor daemon
-uv run pause-monitor status
-uv run pause-monitor tui
+uv run rogue-hunter daemon
+uv run rogue-hunter status
+uv run rogue-hunter tui
 ```
 
 ---
@@ -329,28 +329,28 @@ uv run pause-monitor tui
 Forensic capture requires a sudoers rule for tailspin. Run the install command to set it up:
 
 ```bash
-sudo pause-monitor install
+sudo rogue-hunter install
 ```
 
-This creates `/etc/sudoers.d/pause-monitor` with a narrow rule allowing tailspin captures to `/tmp/pause-monitor/`. The daemon itself runs unprivileged.
+This creates `/etc/sudoers.d/rogue-hunter` with a narrow rule allowing tailspin captures to `/tmp/rogue-hunter/`. The daemon itself runs unprivileged.
 
 ### Daemon won't start
 
 Check if it's already running:
 
 ```bash
-pause-monitor status
+rogue-hunter status
 ```
 
 If it says "already running", stop the existing instance:
 
 ```bash
 # If running as a service
-pause-monitor uninstall
-pause-monitor install
+rogue-hunter uninstall
+rogue-hunter install
 
 # If stuck, find and kill the process
-ps aux | grep pause-monitor
+ps aux | grep rogue-hunter
 kill <pid>
 ```
 
@@ -360,18 +360,18 @@ The daemon needs to run for a while to collect data. Check:
 
 ```bash
 # Is the daemon running?
-pause-monitor status
+rogue-hunter status
 
 # Is the database being created?
-ls -la ~/.local/share/pause-monitor/
+ls -la ~/.local/share/rogue-hunter/
 ```
 
-### High CPU usage from pause-monitor itself
+### High CPU usage from rogue-hunter itself
 
 This shouldn't happen. If it does:
 
-1. Check your config: `pause-monitor config show`
-2. Reset to defaults: `pause-monitor config reset`
+1. Check your config: `rogue-hunter config show`
+2. Reset to defaults: `rogue-hunter config reset`
 3. File an issue with your system details
 
 ---

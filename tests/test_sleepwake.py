@@ -1,6 +1,6 @@
 """Tests for sleep/wake detection."""
 
-from pause_monitor.sleepwake import (
+from rogue_hunter.sleepwake import (
     SleepWakeType,
     parse_pmset_log,
 )
