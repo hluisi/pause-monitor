@@ -677,7 +677,7 @@ The `rogue-hunter install` command (requires sudo) sets up:
 | `DisplayTrackedProcess` | Tracked event for panel display |
 | `TrackedEventsPanel` | Active tracking events |
 | `ActivityLog` | Band transition log |
-| `PauseMonitorApp` | Main App class |
+| `RogueHunterApp` | Main App class |
 
 ### DisplayTrackedProcess Fields
 ```python
@@ -712,7 +712,7 @@ class DisplayTrackedProcess:
 - CLI is for investigation; TUI is for "what's happening now"
 - Single-screen dashboard (no page switching)
 
-### PauseMonitorApp Methods
+### RogueHunterApp Methods
 | Method | Purpose |
 |--------|---------|
 | `compose()` | Build widget layout |

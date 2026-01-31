@@ -880,7 +880,7 @@ class ActivityLog(Static):
         self._add_entry("Connected to daemon", "normal")
 
 
-class PauseMonitorApp(App):
+class RogueHunterApp(App):
     """Real-time monitoring dashboard for rogue-hunter."""
 
     CSS = """
@@ -1131,5 +1131,5 @@ class PauseMonitorApp(App):
 
 def run_tui(config: Config | None = None) -> None:
     """Run the TUI application."""
-    app = PauseMonitorApp(config)
+    app = RogueHunterApp(config)
     app.run()

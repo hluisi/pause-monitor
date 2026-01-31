@@ -34,7 +34,7 @@ def get_boot_time() -> int:
 | events() | cli.py:103 | CLI crashes with traceback |
 | Daemon.__init__() | daemon.py:65 | Daemon fails to start |
 | EventsScreen._refresh_events() | tui/app.py:381 | TUI crashes |
-| PauseMonitorApp._refresh_events() | tui/app.py:681 | TUI crashes |
+| RogueHunterApp._refresh_events() | tui/app.py:681 | TUI crashes |
 
 ### Unhandled Exceptions
 

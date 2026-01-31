@@ -6,8 +6,8 @@ from rogue_hunter.config import Config
 
 def test_tui_app_starts_without_crash(tmp_path):
     """TUI app initializes without errors."""
-    from rogue_hunter.tui.app import PauseMonitorApp
+    from rogue_hunter.tui.app import RogueHunterApp
 
     # Just verify it can be instantiated
-    app = PauseMonitorApp(config=Config())
+    app = RogueHunterApp(config=Config())
     assert app is not None

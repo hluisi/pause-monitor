@@ -42,7 +42,7 @@
 ## Component Hierarchy
 
 ```
-PauseMonitorApp
+RogueHunterApp
 ├── HeaderBar (id="header")
 │   ├── Horizontal
 │   │   ├── Label (id="gauge-left")   # Stress gauge + tier + timestamp
