@@ -537,31 +537,27 @@ class TestConfigCommand:
         assert reset_config.bands.medium == 20
 
 
-class TestInstallCommand:
-    """Tests for the install command."""
+class TestPermsCommand:
+    """Tests for the perms command group."""
 
-    def test_install_requires_root(self, runner: CliRunner, tmp_path: Path) -> None:
-        """install fails without root privileges."""
+    def test_perms_install_requires_root(self, runner: CliRunner, tmp_path: Path) -> None:
+        """perms install fails without root privileges."""
         with patch("os.getuid", return_value=501):  # Non-root user
-            result = runner.invoke(main, ["install"])
+            result = runner.invoke(main, ["perms", "install"])
 
         assert result.exit_code == 1
         assert "requires root privileges" in result.output
 
-    def test_install_requires_sudo_user(self, runner: CliRunner, tmp_path: Path) -> None:
-        """install fails when run as root directly (not via sudo)."""
-        with (
-            patch("os.getuid", return_value=0),  # Root user
-            patch.dict("os.environ", {"SUDO_USER": ""}, clear=False),
-        ):
-            # Clear SUDO_USER to simulate running as root directly
+    def test_perms_install_requires_sudo_user(self, runner: CliRunner, tmp_path: Path) -> None:
+        """perms install fails when run as root directly (not via sudo)."""
+        with patch("os.getuid", return_value=0):  # Root user
             import os
 
             original = os.environ.get("SUDO_USER")
             if "SUDO_USER" in os.environ:
                 del os.environ["SUDO_USER"]
             try:
-                result = runner.invoke(main, ["install"])
+                result = runner.invoke(main, ["perms", "install"])
             finally:
                 if original is not None:
                     os.environ["SUDO_USER"] = original
@@ -569,38 +565,53 @@ class TestInstallCommand:
         assert result.exit_code == 1
         assert "Could not determine user" in result.output
 
-
-class TestUninstallCommand:
-    """Tests for the uninstall command."""
-
-    def test_uninstall_requires_root(self, runner: CliRunner, tmp_path: Path) -> None:
-        """uninstall fails without root privileges."""
+    def test_perms_uninstall_requires_root(self, runner: CliRunner, tmp_path: Path) -> None:
+        """perms uninstall fails without root privileges."""
         with patch("os.getuid", return_value=501):  # Non-root user
-            result = runner.invoke(main, ["uninstall"])
+            result = runner.invoke(main, ["perms", "uninstall"])
 
         assert result.exit_code == 1
         assert "requires root privileges" in result.output
 
-    def test_uninstall_requires_sudo_user(self, runner: CliRunner, tmp_path: Path) -> None:
-        """uninstall fails when run as root directly (not via sudo)."""
-        with (
-            patch("os.getuid", return_value=0),  # Root user
-            patch.dict("os.environ", {"SUDO_USER": ""}, clear=False),
-        ):
-            # Clear SUDO_USER to simulate running as root directly
-            import os
+    def test_perms_status_works_without_root(self, runner: CliRunner) -> None:
+        """perms status works without root."""
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(stdout="oncore is enabled", returncode=0)
+            result = runner.invoke(main, ["perms", "status"])
 
-            original = os.environ.get("SUDO_USER")
-            if "SUDO_USER" in os.environ:
-                del os.environ["SUDO_USER"]
-            try:
-                result = runner.invoke(main, ["uninstall"])
-            finally:
-                if original is not None:
-                    os.environ["SUDO_USER"] = original
+        assert result.exit_code == 0
+        assert "Sudoers rule:" in result.output
+        assert "Tailspin:" in result.output
+
+
+class TestServiceCommand:
+    """Tests for the service command group."""
+
+    def test_service_install_system_requires_root(self, runner: CliRunner) -> None:
+        """service install --system fails without root privileges."""
+        with patch("os.getuid", return_value=501):  # Non-root user
+            result = runner.invoke(main, ["service", "install", "--system"])
 
         assert result.exit_code == 1
-        assert "Could not determine user" in result.output
+        assert "requires root" in result.output
+
+    def test_service_uninstall_system_requires_root(self, runner: CliRunner) -> None:
+        """service uninstall --system fails without root privileges."""
+        with patch("os.getuid", return_value=501):  # Non-root user
+            result = runner.invoke(main, ["service", "uninstall", "--system"])
+
+        assert result.exit_code == 1
+        assert "requires root" in result.output
+
+    def test_service_status_works_without_root(self, runner: CliRunner) -> None:
+        """service status works without root."""
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(stdout="state = running\npid = 1234", returncode=0)
+            result = runner.invoke(main, ["service", "status"])
+
+        assert result.exit_code == 0
+        assert "Plist:" in result.output
+        assert "Service:" in result.output
 
 
 class TestStatusCommand:

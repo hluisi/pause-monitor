@@ -508,69 +508,181 @@ def _setup_sudoers(username: str) -> None:
         raise RuntimeError(f"Invalid sudoers syntax: {result.stderr.decode()}")
 
 
-@main.command()
-@click.option("--system", "system_wide", is_flag=True, help="Install system-wide (requires root)")
-@click.option("--force", is_flag=True, help="Overwrite existing plist without prompting")
-def install(system_wide: bool, force: bool) -> None:
-    """Set up launchd service and sudoers for forensics.
+# =============================================================================
+# perms command group - Permissions for forensics (sudoers + tailspin)
+# =============================================================================
 
-    Must be run with sudo to configure sudoers rule for tailspin.
+
+@main.group()
+def perms() -> None:
+    """Manage permissions for forensics capture."""
+    pass
+
+
+@perms.command("install")
+def perms_install() -> None:
+    """Set up sudoers rule and enable tailspin.
+
+    Must be run with sudo. This allows the daemon to capture
+    forensic data without requiring the daemon itself to run as root.
     """
     import os
     import subprocess
-    import sys
-    from pathlib import Path
 
-    label = "com.rogue-hunter.daemon"
-
-    # Require root for sudoers setup
     if os.getuid() != 0:
-        click.echo("Error: install requires root privileges. Use sudo.", err=True)
+        click.echo("Error: requires root privileges. Use sudo.", err=True)
         raise SystemExit(1)
 
-    # Get the actual user (not root)
     username = os.environ.get("SUDO_USER")
     if not username:
         click.echo("Error: Could not determine user. Run with sudo, not as root.", err=True)
         raise SystemExit(1)
 
-    # 1. Set up sudoers for tailspin
+    # Set up sudoers for tailspin
     click.echo("Setting up sudoers rule for tailspin...")
     _setup_sudoers(username)
     click.echo("  Created /etc/sudoers.d/rogue-hunter")
 
-    # 2. Enable tailspin (requires root, which we have)
+    # Enable tailspin
     click.echo("Enabling tailspin...")
     subprocess.run(["/usr/bin/tailspin", "enable"], check=True)
     click.echo("  tailspin enabled")
 
-    # 3. Determine launchd paths
+    click.echo("\nPermissions configured. Forensics capture is now available.")
+
+
+@perms.command("uninstall")
+def perms_uninstall() -> None:
+    """Remove sudoers rule and disable tailspin.
+
+    Must be run with sudo.
+    """
+    import os
+    import subprocess
+    from pathlib import Path
+
+    if os.getuid() != 0:
+        click.echo("Error: requires root privileges. Use sudo.", err=True)
+        raise SystemExit(1)
+
+    # Remove sudoers rule
+    sudoers_path = Path("/etc/sudoers.d/rogue-hunter")
+    if sudoers_path.exists():
+        sudoers_path.unlink()
+        click.echo("Removed /etc/sudoers.d/rogue-hunter")
+    else:
+        click.echo("Sudoers rule was not installed")
+
+    # Disable tailspin
+    click.echo("Disabling tailspin...")
+    subprocess.run(["/usr/bin/tailspin", "disable"], check=True)
+    click.echo("  tailspin disabled")
+
+    click.echo("\nPermissions removed.")
+
+
+@perms.command("status")
+def perms_status() -> None:
+    """Check if permissions are configured."""
+    import subprocess
+    from pathlib import Path
+
+    sudoers_path = Path("/etc/sudoers.d/rogue-hunter")
+    sudoers_ok = sudoers_path.exists()
+
+    # Check tailspin status
+    result = subprocess.run(
+        ["/usr/bin/tailspin", "stat"],
+        capture_output=True,
+        text=True,
+    )
+    tailspin_enabled = "oncore is enabled" in result.stdout.lower()
+
+    click.echo(f"Sudoers rule: {'installed' if sudoers_ok else 'not installed'}")
+    click.echo(f"Tailspin:     {'enabled' if tailspin_enabled else 'disabled'}")
+
+    if sudoers_ok and tailspin_enabled:
+        click.echo("\nForensics capture is available.")
+    else:
+        click.echo("\nRun 'sudo rogue-hunter perms install' to enable forensics.")
+
+
+# =============================================================================
+# service command group - LaunchAgent/LaunchDaemon management
+# =============================================================================
+
+
+@main.group()
+def service() -> None:
+    """Manage the background daemon service."""
+    pass
+
+
+def _get_service_paths(system_wide: bool, username: str) -> tuple:
+    """Get launchd paths for service management.
+
+    Returns (plist_dir, plist_path, service_target, label)
+    """
+    import pwd
+    from pathlib import Path
+
+    label = "com.rogue-hunter.daemon"
+
     if system_wide:
         plist_dir = Path("/Library/LaunchDaemons")
         service_target = "system"
     else:
-        # Get UID of actual user, not root
-        import pwd
-
         user_uid = pwd.getpwnam(username).pw_uid
         plist_dir = Path(f"/Users/{username}/Library/LaunchAgents")
         service_target = f"gui/{user_uid}"
 
     plist_path = plist_dir / f"{label}.plist"
+    return plist_dir, plist_path, service_target, label
+
+
+@service.command("install")
+@click.option("--system", "system_wide", is_flag=True, help="Install system-wide (requires root)")
+@click.option("--force", is_flag=True, help="Overwrite existing plist without prompting")
+def service_install(system_wide: bool, force: bool) -> None:
+    """Install the daemon as a launchd service.
+
+    Creates a LaunchAgent (user) or LaunchDaemon (system) that
+    starts automatically and restarts if it crashes.
+    """
+    import os
+    import pwd
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    # System-wide requires root
+    if system_wide and os.getuid() != 0:
+        click.echo("Error: system-wide install requires root. Use sudo.", err=True)
+        raise SystemExit(1)
+
+    # Determine username
+    if os.getuid() == 0:
+        username = os.environ.get("SUDO_USER")
+        if not username:
+            click.echo("Error: Could not determine user. Run with sudo, not as root.", err=True)
+            raise SystemExit(1)
+    else:
+        username = os.environ.get("USER")
+
+    plist_dir, plist_path, service_target, label = _get_service_paths(system_wide, username)
 
     # Check for existing plist
     if plist_path.exists() and not force:
         if not click.confirm(f"Plist already exists at {plist_path}. Overwrite?"):
-            click.echo("\nSudoers and tailspin configured. Service not modified.")
+            click.echo("Aborted.")
             return
 
-    # Create log directory if needed (owned by actual user)
-    import pwd
-
+    # Create log directory if needed
     user_info = pwd.getpwnam(username)
     log_dir = Path(f"/Users/{username}/.local/share/rogue-hunter")
     log_dir.mkdir(parents=True, exist_ok=True)
-    os.chown(log_dir, user_info.pw_uid, user_info.pw_gid)
+    if os.getuid() == 0:
+        os.chown(log_dir, user_info.pw_uid, user_info.pw_gid)
 
     # Get Python path
     python_path = sys.executable
@@ -612,7 +724,7 @@ def install(system_wide: bool, force: bool) -> None:
     plist_path.write_text(plist_content)
     click.echo(f"Created {plist_path}")
 
-    # Bootstrap the service (modern launchctl syntax)
+    # Bootstrap the service
     try:
         subprocess.run(
             ["launchctl", "bootstrap", service_target, str(plist_path)],
@@ -621,7 +733,6 @@ def install(system_wide: bool, force: bool) -> None:
         )
         click.echo("Service installed and started")
     except subprocess.CalledProcessError as e:
-        # May already be loaded - check stderr for known messages
         stderr_text = e.stderr.decode()
         stderr_lower = stderr_text.lower()
         if "already loaded" in stderr_lower or "service already loaded" in stderr_lower:
@@ -629,59 +740,40 @@ def install(system_wide: bool, force: bool) -> None:
         else:
             click.echo(f"Warning: Could not start service: {stderr_text}")
 
-    click.echo(f"\nTo check status: launchctl print {service_target}/{label}")
+    click.echo("\nTo check status: rogue-hunter service status")
     click.echo(f"To view logs: tail -f /Users/{username}/.local/share/rogue-hunter/daemon.log")
 
 
-@main.command()
+@service.command("uninstall")
 @click.option("--system", "system_wide", is_flag=True, help="Uninstall system-wide service")
 @click.option("--keep-data", is_flag=True, help="Keep database and config files")
 @click.option("--force", is_flag=True, help="Skip confirmation prompts")
-def uninstall(system_wide: bool, keep_data: bool, force: bool) -> None:
-    """Remove launchd service and sudoers rule.
+def service_uninstall(system_wide: bool, keep_data: bool, force: bool) -> None:
+    """Remove the launchd service.
 
-    Must be run with sudo to remove sudoers configuration.
+    Stops the daemon and removes the LaunchAgent/LaunchDaemon plist.
     """
     import os
     import shutil
     import subprocess
-    from pathlib import Path
 
-    label = "com.rogue-hunter.daemon"
-
-    # Require root for sudoers removal
-    if os.getuid() != 0:
-        click.echo("Error: uninstall requires root privileges. Use sudo.", err=True)
+    # System-wide requires root
+    if system_wide and os.getuid() != 0:
+        click.echo("Error: system-wide uninstall requires root. Use sudo.", err=True)
         raise SystemExit(1)
 
-    # Get the actual user (not root)
-    username = os.environ.get("SUDO_USER")
-    if not username:
-        click.echo("Error: Could not determine user. Run with sudo, not as root.", err=True)
-        raise SystemExit(1)
-
-    # 1. Remove sudoers rule
-    sudoers_path = Path("/etc/sudoers.d/rogue-hunter")
-    if sudoers_path.exists():
-        sudoers_path.unlink()
-        click.echo("Removed /etc/sudoers.d/rogue-hunter")
+    # Determine username
+    if os.getuid() == 0:
+        username = os.environ.get("SUDO_USER")
+        if not username:
+            click.echo("Error: Could not determine user. Run with sudo, not as root.", err=True)
+            raise SystemExit(1)
     else:
-        click.echo("Sudoers rule was not installed")
+        username = os.environ.get("USER")
 
-    # 2. Determine launchd paths
-    if system_wide:
-        plist_dir = Path("/Library/LaunchDaemons")
-        service_target = "system"
-    else:
-        import pwd
+    plist_dir, plist_path, service_target, label = _get_service_paths(system_wide, username)
 
-        user_uid = pwd.getpwnam(username).pw_uid
-        plist_dir = Path(f"/Users/{username}/Library/LaunchAgents")
-        service_target = f"gui/{user_uid}"
-
-    plist_path = plist_dir / f"{label}.plist"
-
-    # 3. Bootout the service (modern launchctl syntax)
+    # Bootout the service
     if plist_path.exists():
         try:
             subprocess.run(
@@ -691,7 +783,6 @@ def uninstall(system_wide: bool, keep_data: bool, force: bool) -> None:
             )
             click.echo("Service stopped")
         except subprocess.CalledProcessError as e:
-            # "No such process" is fine - service may not be running
             if b"No such process" not in e.stderr:
                 click.echo(f"Warning: Could not stop service: {e.stderr.decode()}")
 
@@ -701,7 +792,7 @@ def uninstall(system_wide: bool, keep_data: bool, force: bool) -> None:
     else:
         click.echo("Service was not installed")
 
-    # 4. Optionally remove data
+    # Optionally remove data
     if not keep_data:
         from rogue_hunter.config import Config
 
@@ -717,7 +808,51 @@ def uninstall(system_wide: bool, keep_data: bool, force: bool) -> None:
                 shutil.rmtree(config.config_dir)
                 click.echo(f"Removed {config.config_dir}")
 
-    click.echo("Uninstall complete")
+    click.echo("\nService uninstalled.")
+
+
+@service.command("status")
+@click.option("--system", "system_wide", is_flag=True, help="Check system-wide service")
+def service_status(system_wide: bool) -> None:
+    """Check if the launchd service is installed and running."""
+    import os
+    import subprocess
+
+    # Determine username
+    username = os.environ.get("USER")
+    if os.getuid() == 0:
+        username = os.environ.get("SUDO_USER", username)
+
+    plist_dir, plist_path, service_target, label = _get_service_paths(system_wide, username)
+
+    plist_exists = plist_path.exists()
+    click.echo(f"Plist: {'installed' if plist_exists else 'not installed'}")
+    if plist_exists:
+        click.echo(f"  Path: {plist_path}")
+
+    # Check if service is loaded/running
+    result = subprocess.run(
+        ["launchctl", "print", f"{service_target}/{label}"],
+        capture_output=True,
+        text=True,
+    )
+
+    if result.returncode == 0:
+        # Parse state from output
+        state = "unknown"
+        pid = None
+        for line in result.stdout.splitlines():
+            line = line.strip()
+            if line.startswith("state ="):
+                state = line.split("=")[1].strip()
+            elif line.startswith("pid ="):
+                pid = line.split("=")[1].strip()
+
+        click.echo(f"Service: {state}")
+        if pid:
+            click.echo(f"  PID: {pid}")
+    else:
+        click.echo("Service: not loaded")
 
 
 if __name__ == "__main__":
