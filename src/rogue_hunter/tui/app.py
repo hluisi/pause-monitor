@@ -946,12 +946,16 @@ class RogueHunterApp(App):
     def on_unmount(self) -> None:
         """Cleanup on shutdown."""
         self._stopping = True
+
+        # Close socket first to unblock any pending readline()
+        if self._socket_client:
+            self._socket_client.close()
+
+        # Now cancel tasks (they should exit quickly since socket is closed)
         if self._reconnect_task and not self._reconnect_task.done():
             self._reconnect_task.cancel()
         if self._socket_read_task and not self._socket_read_task.done():
             self._socket_read_task.cancel()
-        if self._socket_client:
-            asyncio.create_task(self._socket_client.disconnect())
 
     async def _try_socket_connect(self, show_notification: bool = True) -> bool:
         """Try to connect to daemon via socket.
@@ -1023,10 +1027,14 @@ class RogueHunterApp(App):
         while not self._stopping:
             self.sub_title = f"Real-time Dashboard (reconnecting in {delay:.0f}s...)"
 
-            try:
-                await asyncio.sleep(delay)
-            except asyncio.CancelledError:
-                return
+            # Sleep in 1-second chunks to stay responsive to shutdown
+            remaining = delay
+            while remaining > 0 and not self._stopping:
+                try:
+                    await asyncio.sleep(min(1.0, remaining))
+                except asyncio.CancelledError:
+                    return
+                remaining -= 1.0
 
             if self._stopping:
                 return
@@ -1053,9 +1061,12 @@ class RogueHunterApp(App):
     async def _read_socket_loop(self) -> None:
         """Read messages from socket and update UI."""
         try:
-            while self._use_socket and self._socket_client:
-                data = await self._socket_client.read_message()
-                self._handle_socket_data(data)
+            while self._use_socket and self._socket_client and not self._stopping:
+                try:
+                    data = await self._socket_client.read_message(timeout=1.0)
+                    self._handle_socket_data(data)
+                except TimeoutError:
+                    continue  # Check loop conditions and retry
         except ConnectionError as e:
             self._set_disconnected(f"connection lost: {e}")
             self.notify("Lost connection to daemon", severity="warning")

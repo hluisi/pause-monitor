@@ -49,20 +49,32 @@ class SocketClient:
             self._writer = None
             self._reader = None
 
-    async def read_message(self) -> dict[str, Any]:
-        """Read next message from socket.
+    def close(self) -> None:
+        """Close the socket synchronously (doesn't wait for clean shutdown).
+
+        Use this to interrupt blocking reads before cancelling tasks.
+        """
+        if self._writer:
+            self._writer.close()
+
+    async def read_message(self, timeout: float = 1.0) -> dict[str, Any]:
+        """Read next message from socket with timeout.
+
+        Args:
+            timeout: Max seconds to wait for data (default 1.0)
 
         Returns:
             Parsed JSON message from daemon
 
         Raises:
             ConnectionError: If connection is lost
+            TimeoutError: If no data received within timeout
             json.JSONDecodeError: If message is invalid JSON
         """
         if not self._reader:
             raise ConnectionError("Not connected")
 
-        line = await self._reader.readline()
+        line = await asyncio.wait_for(self._reader.readline(), timeout=timeout)
         if not line:
             raise ConnectionError("Connection closed by server")
 
