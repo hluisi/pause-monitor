@@ -11,6 +11,7 @@ from rogue_hunter.config import (
     ProcessStateColors,
     RetentionConfig,
     RogueSelectionConfig,
+    SparklineConfig,
     StateMultipliers,
     StatusColors,
     SystemConfig,
@@ -617,3 +618,85 @@ def test_tui_colors_roundtrip(tmp_path):
     assert loaded.tui.colors.categories.blocking == "#FF0000"
     assert loaded.tui.colors.status.active == "bright_green"
     assert loaded.tui.colors.borders.disconnected == "dim red"
+
+
+# =============================================================================
+# SparklineConfig Tests
+# =============================================================================
+
+
+def test_sparkline_config_defaults():
+    """SparklineConfig has correct defaults."""
+    config = SparklineConfig()
+    assert config.height == 2
+    assert config.mode == "blocks"
+    assert config.inverted is False
+
+
+def test_tui_config_has_sparkline():
+    """TUIConfig contains sparkline configuration."""
+    tui = TUIConfig()
+    assert isinstance(tui.sparkline, SparklineConfig)
+
+
+def test_config_save_includes_sparkline(tmp_path):
+    """Config.save() writes tui.sparkline section."""
+    config_path = tmp_path / "config.toml"
+    config = Config()
+    config.tui.sparkline.height = 3
+    config.tui.sparkline.mode = "braille"
+    config.tui.sparkline.inverted = True
+    config.save(config_path)
+
+    content = config_path.read_text()
+    assert "[tui.sparkline]" in content
+    assert "height = 3" in content
+    assert 'mode = "braille"' in content
+    assert "inverted = true" in content
+
+
+def test_config_loads_sparkline(tmp_path):
+    """Config.load() reads tui.sparkline section from TOML."""
+    config_file = tmp_path / "config.toml"
+    config_file.write_text("""
+[tui.sparkline]
+height = 3
+mode = "braille"
+inverted = true
+""")
+
+    config = Config.load(config_file)
+    assert config.tui.sparkline.height == 3
+    assert config.tui.sparkline.mode == "braille"
+    assert config.tui.sparkline.inverted is True
+
+
+def test_config_loads_partial_sparkline(tmp_path):
+    """Config.load() uses defaults for missing sparkline fields."""
+    config_file = tmp_path / "config.toml"
+    config_file.write_text("""
+[tui.sparkline]
+mode = "braille"
+""")
+
+    config = Config.load(config_file)
+    defaults = SparklineConfig()
+    assert config.tui.sparkline.mode == "braille"
+    assert config.tui.sparkline.height == defaults.height
+    assert config.tui.sparkline.inverted == defaults.inverted
+
+
+def test_sparkline_config_roundtrip(tmp_path):
+    """Config save/load preserves sparkline values."""
+    config_path = tmp_path / "config.toml"
+
+    config = Config()
+    config.tui.sparkline.height = 4
+    config.tui.sparkline.mode = "braille"
+    config.tui.sparkline.inverted = True
+    config.save(config_path)
+
+    loaded = Config.load(config_path)
+    assert loaded.tui.sparkline.height == 4
+    assert loaded.tui.sparkline.mode == "braille"
+    assert loaded.tui.sparkline.inverted is True

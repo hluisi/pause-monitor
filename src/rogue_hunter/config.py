@@ -289,10 +289,23 @@ class TUIColorsConfig:
 
 
 @dataclass
+class SparklineConfig:
+    """Configuration for the sparkline widget in the header.
+
+    The sparkline shows stress history as a mini chart using Unicode characters.
+    """
+
+    height: int = 2  # Number of character rows (1-4). Each row adds 8 vertical levels.
+    mode: str = "blocks"  # "blocks" (▁▂▃▄▅▆▇█) or "braille" (⡀⣀⣄⣤⣦⣶⣷⣿)
+    inverted: bool = False  # If True, bars grow downward from top (for "badness")
+
+
+@dataclass
 class TUIConfig:
     """TUI-specific configuration."""
 
     colors: TUIColorsConfig = field(default_factory=TUIColorsConfig)
+    sparkline: SparklineConfig = field(default_factory=SparklineConfig)
 
 
 def _dataclass_to_table(obj: object) -> tomlkit.items.Table:
@@ -512,7 +525,7 @@ def _load_rogue_selection_config(data: dict) -> RogueSelectionConfig:
 def _load_tui_config(data: dict) -> TUIConfig:
     """Load TUI config from TOML data.
 
-    Handles nested [tui.colors.*] sections with defaults for missing values.
+    Handles nested [tui.colors.*] and [tui.sparkline] sections with defaults.
     """
     colors_data = data.get("colors", {})
     bands_data = colors_data.get("bands", {})
@@ -522,6 +535,7 @@ def _load_tui_config(data: dict) -> TUIConfig:
     borders_data = colors_data.get("borders", {})
     pid_data = colors_data.get("pid", {})
     process_state_data = colors_data.get("process_state", {})
+    sparkline_data = data.get("sparkline", {})
 
     # Use dataclass instances as single source of truth for defaults
     b = BandColors()
@@ -531,6 +545,7 @@ def _load_tui_config(data: dict) -> TUIConfig:
     br = BorderColors()
     p = PidColors()
     ps = ProcessStateColors()
+    sp = SparklineConfig()
 
     return TUIConfig(
         colors=TUIColorsConfig(
@@ -575,5 +590,10 @@ def _load_tui_config(data: dict) -> TUIConfig:
                 stuck=process_state_data.get("stuck", ps.stuck),
                 unknown=process_state_data.get("unknown", ps.unknown),
             ),
-        )
+        ),
+        sparkline=SparklineConfig(
+            height=sparkline_data.get("height", sp.height),
+            mode=sparkline_data.get("mode", sp.mode),
+            inverted=sparkline_data.get("inverted", sp.inverted),
+        ),
     )

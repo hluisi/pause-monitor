@@ -21,6 +21,7 @@ from textual.widgets import DataTable, Footer, Label, RichLog, Static
 
 from rogue_hunter.config import Config
 from rogue_hunter.socket_client import SocketClient
+from rogue_hunter.tui.sparkline import GradientColor, Sparkline, SparklineMode
 
 
 def get_tier_name(score: int, elevated: int, critical: int) -> str:
@@ -119,7 +120,7 @@ class HeaderBar(Static):
 
     DEFAULT_CSS = """
     HeaderBar {
-        height: 4;
+        height: 5;
         padding: 0 1;
         border: solid green;
         border-title-align: left;
@@ -139,17 +140,11 @@ class HeaderBar(Static):
         text-align: right;
     }
 
-    HeaderBar #sparkline {
+    HeaderBar Sparkline {
         width: 1fr;
-        height: 1;
-        text-align: right;
+        height: 2;
     }
     """
-
-    # Default buffer size, will be resized to match actual width
-    DEFAULT_SPARKLINE_SIZE = 60
-    # Unicode block characters for sparkline (8 levels)
-    BARS = " ▁▂▃▄▅▆▇█"
 
     score: reactive[int] = reactive(0)
     connected: reactive[bool] = reactive(False)
@@ -159,9 +154,8 @@ class HeaderBar(Static):
         self._timestamp = ""
         self._process_count = 0
         self._sample_count = 0
-        self._sparkline_data: list[int] = []
-        self._sparkline_size = self.DEFAULT_SPARKLINE_SIZE
         self._start_time = time.time()
+        self._gradient: GradientColor | None = None
 
     def compose(self) -> ComposeResult:
         """Create header layout."""
@@ -169,38 +163,48 @@ class HeaderBar(Static):
             Label("", id="gauge-left"),
             Label("", id="gauge-right"),
         )
-        yield Label("", id="sparkline")
+        # Sparkline is created in on_mount where we have access to config
 
     def on_mount(self) -> None:
-        """Set border title."""
+        """Set border title and create sparkline with config values."""
         self.border_title = "STRESS"
 
-    def on_resize(self) -> None:
-        """Resize sparkline buffer to fill available width."""
-        try:
-            label = self.query_one("#sparkline", Label)
-            new_width = label.size.width
-            if new_width > 0 and new_width != self._sparkline_size:
-                self._sparkline_size = new_width
-                # Trim data if buffer shrunk
-                if len(self._sparkline_data) > new_width:
-                    self._sparkline_data = self._sparkline_data[-new_width:]
-        except NoMatches:
-            pass
+        # Create sparkline with config values
+        sp_config = self.app.config.tui.sparkline
+        mode = SparklineMode.BRAILLE if sp_config.mode == "braille" else SparklineMode.BLOCKS
+        sparkline = Sparkline(
+            height=sp_config.height,
+            max_value=100,
+            mode=mode,
+            inverted=sp_config.inverted,
+            color_func=self._get_sparkline_color,
+            id="sparkline",
+        )
+        self.mount(sparkline)
 
-    def _render_sparkline(self) -> str:
-        """Render sparkline as Unicode block characters."""
-        if not self._sparkline_data:
-            return ""
+    def _get_sparkline_color(self, value: float) -> str:
+        """Map score to color using smooth gradient between band colors.
 
-        # Scale values 0-100 to bar indices 0-8
-        chars = []
-        for val in self._sparkline_data:
-            bar_idx = int(val / 100 * 8)
-            bar_idx = max(0, min(8, bar_idx))
-            chars.append(self.BARS[bar_idx])
+        Args:
+            value: The stress score (0-100).
 
-        return "".join(chars)
+        Returns:
+            Hex color string interpolated between band colors.
+        """
+        # Lazy initialization of gradient (needs self.app which isn't available in __init__)
+        if self._gradient is None:
+            bands = self.app.config.bands
+            colors = self.app.config.tui.colors.bands
+            self._gradient = GradientColor(
+                [
+                    (0, colors.low),
+                    (bands.medium, colors.medium),
+                    (bands.elevated, colors.elevated),
+                    (bands.high, colors.high),
+                    (bands.critical, colors.critical),
+                ]
+            )
+        return self._gradient(value)
 
     def watch_score(self, score: int) -> None:
         """Update gauge when score changes."""
@@ -264,15 +268,9 @@ class HeaderBar(Static):
         self._sample_count = sample_count
         self.connected = True
 
-        # Append to sparkline buffer and trim to current width
-        self._sparkline_data.append(score)
-        if len(self._sparkline_data) > self._sparkline_size:
-            self._sparkline_data = self._sparkline_data[-self._sparkline_size :]
-
-        # Update sparkline label with our own rendering
+        # Append to sparkline - it handles buffer management internally
         try:
-            sparkline_label = self.query_one("#sparkline", Label)
-            sparkline_label.update(self._render_sparkline())
+            self.query_one("#sparkline", Sparkline).append(score)
         except NoMatches:
             pass
 
@@ -851,7 +849,7 @@ class RogueHunterApp(App):
     }
 
     #header {
-        height: 4;
+        height: 5;
     }
 
     #main-area {
@@ -879,6 +877,9 @@ class RogueHunterApp(App):
     def __init__(self, config: Config | None = None):
         super().__init__()
         self.config = config or Config.load()
+        # Create config file with defaults if it doesn't exist
+        if not self.config.config_path.exists():
+            self.config.save()
         self._socket_client: SocketClient | None = None
         self._use_socket: bool = False
         self._socket_read_task: asyncio.Task | None = None
