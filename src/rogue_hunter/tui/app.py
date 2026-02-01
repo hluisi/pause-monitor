@@ -362,20 +362,36 @@ class ProcessTable(Static):
 
         return f"{style} dim" if decayed else style
 
-    def _get_trend_style(self, trend: str, row_style: str, decayed: bool) -> str:
+    def _get_trend_style(self, trend: str, decayed: bool) -> str:
         """Get style for trend indicator based on config colors."""
         if decayed:
             return self.app.config.tui.colors.trends.decayed
 
         trends = self.app.config.tui.colors.trends
-        # Empty string means "inherit row color"
         trend_colors = {
-            "▲": trends.worsening or row_style,
-            "▽": trends.improving or row_style,
-            "●": trends.stable or row_style,
-            "○": trends.decayed or row_style,
+            "▲": trends.worsening,
+            "▽": trends.improving,
+            "●": trends.stable,
+            "○": trends.decayed,
         }
-        return trend_colors.get(trend, row_style)
+        return trend_colors.get(trend, "")
+
+    def _get_state_style(self, state: str, decayed: bool) -> str:
+        """Get style for process state based on config colors."""
+        if decayed:
+            return "dim"
+
+        state_colors = self.app.config.tui.colors.process_state
+        state_map = {
+            "running": state_colors.running,
+            "sleeping": state_colors.sleeping,
+            "idle": state_colors.idle,
+            "stopped": state_colors.stopped,
+            "zombie": state_colors.zombie,
+            "stuck": state_colors.stuck,
+            "unknown": state_colors.unknown,
+        }
+        return state_map.get(state, state_colors.unknown)
 
     def _format_cat_score(self, score: float) -> str:
         """Format a category score (0-100) compactly."""
@@ -399,41 +415,55 @@ class ProcessTable(Static):
         dominant_metrics: list[str],
         decayed: bool = False,
     ) -> list[Text]:
-        """Build styled row cells using Rich Text objects."""
-        row_style = self._get_band_style(score_val, decayed)
-        trend_style = self._get_trend_style(trend, row_style, decayed)
-        cat_colors = self.app.config.tui.colors.categories
+        """Build styled row cells using Rich Text objects.
+
+        Color scheme:
+        - Trend: Own colors based on direction (▲=red, ▽=green, ●=purple)
+        - PID: Muted color (not competing with process name)
+        - Process name: Band color based on score severity
+        - Score: Bold band color
+        - Categories: Own distinct colors per category type
+        - State: Own colors based on process state severity
+        - Dominant: Inherits band color (same as process name)
+        """
+        colors = self.app.config.tui.colors
+        cat_colors = colors.categories
+
+        # Get styles for each element type
+        band_style = self._get_band_style(score_val, decayed)
+        trend_style = self._get_trend_style(trend, decayed)
+        state_style = self._get_state_style(state, decayed)
+        pid_style = "dim" if decayed else colors.pid.default
 
         # Build dominant display with icon
         icon = self.CATEGORY_ICONS.get(dominant_cat, "")
         metrics_str = " ".join(dominant_metrics[:2])  # Show top 2 metrics
         dominant_display = f"{icon} {metrics_str}" if metrics_str else icon
 
-        # Category columns: use config color if set, otherwise inherit row color
-        # Zero values are always dim
+        # Category columns: use config color if value > 0, else dim
         def cat_style(value: float, color: str) -> str:
             if decayed or not value:
                 return "dim"
-            return color if color else row_style
+            return color
 
         # Format category scores with their colors
         blk_style = cat_style(blocking, cat_colors.blocking)
         ctn_style = cat_style(contention, cat_colors.contention)
         prs_style = cat_style(pressure, cat_colors.pressure)
         eff_style = cat_style(efficiency, cat_colors.efficiency)
-        score_style = f"bold {row_style}" if row_style else "bold"
+        score_style = f"bold {band_style}" if band_style else "bold"
 
         return [
             Text(trend, style=trend_style),
-            Text(pid, style=row_style),
-            Text(command, style=row_style),
+            Text(pid, style=pid_style),
+            Text(command, style=band_style),
             Text(str(score_val), style=score_style),
             Text(self._format_cat_score(blocking), style=blk_style),
             Text(self._format_cat_score(contention), style=ctn_style),
             Text(self._format_cat_score(pressure), style=prs_style),
             Text(self._format_cat_score(efficiency), style=eff_style),
-            Text(state, style=row_style),
-            Text(dominant_display, style=row_style),
+            Text(state, style=state_style),
+            Text(dominant_display, style=band_style),
         ]
 
     def update_rogues(self, rogues: list[dict], now: float) -> None:

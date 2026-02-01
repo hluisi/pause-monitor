@@ -194,18 +194,45 @@ class TrendColors:
 
     - worsening: Score increasing (bad) - ▲
     - improving: Score decreasing (good) - ▽
-    - stable: No change - ● (inherits row color if empty)
+    - stable: No change - ●
     - decayed: Left rogues list - ○
 
     Default palette: Dracula theme.
-    Worsening inherits row color (severity already visible).
-    Improving gets green for positive feedback.
+    Each trend gets its own distinct color for immediate recognition.
     """
 
-    worsening: str = ""  # Inherit row color - severity already shown
-    improving: str = "#50fa7b"  # Dracula green - positive feedback
-    stable: str = ""  # Inherit row color
-    decayed: str = "dim"
+    worsening: str = "#ff5555"  # Dracula red - getting worse
+    improving: str = "#50fa7b"  # Dracula green - getting better
+    stable: str = "#bd93f9"  # Dracula purple - steady state
+    decayed: str = "dim"  # Faded - no longer tracked
+
+
+@dataclass
+class PidColors:
+    """Colors for PID column.
+
+    PIDs should be visible but not compete with more important data.
+    Default palette: Dracula theme.
+    """
+
+    default: str = "#6272a4"  # Dracula comment - muted purple-gray
+
+
+@dataclass
+class ProcessStateColors:
+    """Colors for process state column (running, sleeping, zombie, etc.).
+
+    Colors indicate state severity/concern level.
+    Default palette: Dracula theme.
+    """
+
+    running: str = "#50fa7b"  # Dracula green - active, healthy
+    sleeping: str = "#8be9fd"  # Dracula cyan - normal, waiting for I/O
+    idle: str = "dim"  # Not significant
+    stopped: str = "#f1fa8c"  # Dracula yellow - frozen (SIGSTOP/debugger)
+    zombie: str = "#ff5555"  # Dracula red - dead, parent not reaping
+    stuck: str = "#ff5555"  # Dracula red - uninterruptible, likely I/O issue
+    unknown: str = "dim"
 
 
 @dataclass
@@ -257,6 +284,8 @@ class TUIColorsConfig:
     categories: CategoryColors = field(default_factory=CategoryColors)
     status: StatusColors = field(default_factory=StatusColors)
     borders: BorderColors = field(default_factory=BorderColors)
+    pid: PidColors = field(default_factory=PidColors)
+    process_state: ProcessStateColors = field(default_factory=ProcessStateColors)
 
 
 @dataclass
@@ -491,6 +520,8 @@ def _load_tui_config(data: dict) -> TUIConfig:
     categories_data = colors_data.get("categories", {})
     status_data = colors_data.get("status", {})
     borders_data = colors_data.get("borders", {})
+    pid_data = colors_data.get("pid", {})
+    process_state_data = colors_data.get("process_state", {})
 
     # Use dataclass instances as single source of truth for defaults
     b = BandColors()
@@ -498,6 +529,8 @@ def _load_tui_config(data: dict) -> TUIConfig:
     c = CategoryColors()
     s = StatusColors()
     br = BorderColors()
+    p = PidColors()
+    ps = ProcessStateColors()
 
     return TUIConfig(
         colors=TUIColorsConfig(
@@ -529,6 +562,18 @@ def _load_tui_config(data: dict) -> TUIConfig:
                 elevated=borders_data.get("elevated", br.elevated),
                 critical=borders_data.get("critical", br.critical),
                 disconnected=borders_data.get("disconnected", br.disconnected),
+            ),
+            pid=PidColors(
+                default=pid_data.get("default", p.default),
+            ),
+            process_state=ProcessStateColors(
+                running=process_state_data.get("running", ps.running),
+                sleeping=process_state_data.get("sleeping", ps.sleeping),
+                idle=process_state_data.get("idle", ps.idle),
+                stopped=process_state_data.get("stopped", ps.stopped),
+                zombie=process_state_data.get("zombie", ps.zombie),
+                stuck=process_state_data.get("stuck", ps.stuck),
+                unknown=process_state_data.get("unknown", ps.unknown),
             ),
         )
     )

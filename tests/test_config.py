@@ -7,6 +7,8 @@ from rogue_hunter.config import (
     CategoryColors,
     Config,
     NormalizationConfig,
+    PidColors,
+    ProcessStateColors,
     RetentionConfig,
     RogueSelectionConfig,
     StateMultipliers,
@@ -420,23 +422,22 @@ def test_state_multipliers_defaults():
 def test_band_colors_defaults():
     """BandColors has sensible defaults for score visualization."""
     colors = BandColors()
-    # Low/medium use default text (empty string) - healthy processes don't need color
-    assert colors.low == ""
-    assert colors.medium == ""
-    # Severity colors use Dracula palette
-    assert colors.elevated == "#f1fa8c"  # Dracula yellow
-    assert colors.high == "#ffb86c"  # Dracula orange
-    assert colors.critical == "#ff5555"  # Dracula red
+    # Severity gradient: green -> cyan -> yellow -> orange -> red
+    assert colors.low == "#50fa7b"  # Dracula green - healthy
+    assert colors.medium == "#8be9fd"  # Dracula cyan - normal
+    assert colors.elevated == "#f1fa8c"  # Dracula yellow - attention
+    assert colors.high == "#ffb86c"  # Dracula orange - warning
+    assert colors.critical == "#ff5555"  # Dracula red - urgent
 
 
 def test_trend_colors_defaults():
-    """TrendColors has sensible defaults for trend indicators."""
+    """TrendColors has distinct colors for each trend direction."""
     colors = TrendColors()
-    # Most trends inherit row color - severity is already shown by row color
-    assert colors.worsening == ""  # Inherit row color
-    assert colors.improving == "#50fa7b"  # Dracula green - positive feedback
-    assert colors.stable == ""  # Inherit row color
-    assert colors.decayed == "dim"
+    # Each trend gets its own color for immediate recognition
+    assert colors.worsening == "#ff5555"  # Dracula red - getting worse
+    assert colors.improving == "#50fa7b"  # Dracula green - getting better
+    assert colors.stable == "#bd93f9"  # Dracula purple - steady state
+    assert colors.decayed == "dim"  # Faded - no longer tracked
 
 
 def test_category_colors_defaults():
@@ -466,6 +467,26 @@ def test_border_colors_defaults():
     assert colors.disconnected == "#ff5555"  # Same as critical
 
 
+def test_pid_colors_defaults():
+    """PidColors has muted color for PIDs."""
+    colors = PidColors()
+    assert colors.default == "#6272a4"  # Dracula comment - muted purple-gray
+
+
+def test_process_state_colors_defaults():
+    """ProcessStateColors has colors by severity."""
+    colors = ProcessStateColors()
+    # Healthy states
+    assert colors.running == "#50fa7b"  # Dracula green - active
+    assert colors.sleeping == "#8be9fd"  # Dracula cyan - normal
+    assert colors.idle == "dim"  # Not significant
+    # Problem states
+    assert colors.stopped == "#f1fa8c"  # Dracula yellow - attention
+    assert colors.zombie == "#ff5555"  # Dracula red - problem
+    assert colors.stuck == "#ff5555"  # Dracula red - problem
+    assert colors.unknown == "dim"
+
+
 def test_tui_colors_config_has_all_sections():
     """TUIColorsConfig groups all color configurations."""
     colors = TUIColorsConfig()
@@ -474,6 +495,8 @@ def test_tui_colors_config_has_all_sections():
     assert isinstance(colors.categories, CategoryColors)
     assert isinstance(colors.status, StatusColors)
     assert isinstance(colors.borders, BorderColors)
+    assert isinstance(colors.pid, PidColors)
+    assert isinstance(colors.process_state, ProcessStateColors)
 
 
 def test_tui_config_has_colors():
