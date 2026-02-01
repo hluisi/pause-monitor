@@ -60,15 +60,6 @@ class RingBuffer:
         """Add a sample to the buffer."""
         self._samples.append(RingSample(samples=samples))
 
-    def update_latest(self, samples: ProcessSamples) -> None:
-        """Replace the most recent sample with an enriched version.
-
-        Used after pushing unenriched data, then computing low/high values
-        from ring buffer history.
-        """
-        if self._samples:
-            self._samples[-1] = RingSample(samples=samples)
-
     def clear(self) -> None:
         """Empty the buffer."""
         self._samples.clear()

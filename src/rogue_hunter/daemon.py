@@ -476,10 +476,11 @@ class Daemon:
 
         Each iteration:
         1. Collect samples via LibprocCollector
-        2. Update per-process tracking with rogue processes (triggers forensics on band entry)
-        3. Push to ring buffer
-        4. Broadcast to socket for TUI
-        5. Sleep for remaining interval to maintain sample rate
+        2. Enrich with low/high from ring buffer history
+        3. Push enriched sample to ring buffer
+        4. Update per-process tracking (triggers forensics on band entry)
+        5. Broadcast to TUI via socket
+        6. Sleep for remaining interval to maintain sample rate
 
         Sample rate is controlled by config.system.sample_interval (default 0.2s = 5Hz).
         The loop runs until shutdown event is set.
@@ -532,14 +533,11 @@ class Daemon:
 
                 previous_rogues = current_rogues
 
-                # Push unenriched to ring buffer first (needed for history lookup)
-                self.ring_buffer.push(samples)
-
-                # Enrich with low/high from ring buffer history
+                # Enrich with low/high from existing ring buffer history
                 samples = self._compute_pid_low_high(samples)
 
-                # Update ring buffer with enriched version (so storage gets full data)
-                self.ring_buffer.update_latest(samples)
+                # Push enriched sample to ring buffer
+                self.ring_buffer.push(samples)
 
                 # Update per-process tracking with enriched data
                 # (tracker persists to storage, needs full MetricValue)
