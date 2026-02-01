@@ -1,20 +1,6 @@
-# Session Context
+# Start Here
 
 Read this memory at the start of every session.
-
-## What Is Rogue Hunter?
-
-**Rogue Hunter** is a real-time process surveillance tool for macOS that identifies processes negatively affecting system performance.
-
-It continuously monitors all running processes, scoring each on four dimensions of "rogue behavior":
-- **Blocking (40%)**: Causing I/O bottlenecks or memory thrashing
-- **Contention (30%)**: Aggressively fighting for CPU time
-- **Pressure (20%)**: Stressing system memory and kernel resources
-- **Efficiency (10%)**: Wasting resources through poor execution patterns
-
-The dashboard shows the top potential rogues in real-time, tracking their scores over time. When a process crosses configurable thresholds, forensic data is captured automatically — giving you the "before and during" context needed to diagnose what went wrong.
-
-Think of it as a security camera for your system's performance: always watching, capturing evidence when something goes rogue.
 
 ## Philosophy
 
@@ -28,17 +14,43 @@ This is a **personal project** — one developer + AI assistants. No external us
 | **No fallbacks** | Fail visibly. Don't swallow errors or degrade silently |
 | **Breaking changes are free** | Change anything. No versioning, no `_v2` suffixes |
 
-## Where to Find Information
+## What This Project Is
 
-| Question | Memory |
-|----------|--------|
-| What should exist? | `design_spec` |
-| What does exist and how? | `implementation_guide` |
-| What's missing or incomplete? | `unimplemented_features` |
-| Patterns, gotchas, decisions? | `insights` |
-| Full list of all memories? | `memory_index` |
-| Pending improvements to evaluate? | `refactoring_discussion_2026-01-31` |
+**Rogue Hunter** is a real-time process surveillance tool for macOS that identifies processes negatively affecting system performance. It continuously monitors all running processes, scoring each on four dimensions of "rogue behavior" (Blocking 40%, Contention 30%, Pressure 20%, Efficiency 10%). When processes cross thresholds, forensic data is captured automatically.
 
-## Keeping Memories Current
+## Quick Reference
 
-Run `/memory audit` or `/memory update` to refresh memories against the codebase.
+| To understand... | Read |
+|------------------|------|
+| What this project does | `project_overview` |
+| Directory structure | `project_structure` |
+| Code style and patterns | `style_and_conventions` |
+| Useful commands | `suggested_commands` |
+| How to complete tasks | `task_completion` |
+| Architectural systems | `systems` |
+
+## Domain Knowledge
+
+| To understand... | Read |
+|------------------|------|
+| What SHOULD exist (spec) | `design_spec` |
+| What DOES exist (implementation) | `implementation_guide` |
+| What's MISSING | `unimplemented_features` |
+| Database schema | `data_schema` |
+| Patterns and decisions | `insights` |
+| All memories | `memory_index` |
+
+## Key Systems
+
+- **Configuration** (`config.py`): Hierarchical TOML config, XDG paths
+- **Storage** (`storage.py`): SQLite with WAL, schema v16
+- **Collector** (`collector.py`): libproc-based metrics, `ProcessScore` schema
+- **Tracker** (`tracker.py`): Event lifecycle (entry/checkpoint/exit snapshots)
+- **Socket IPC** (`socket_server.py`): Real-time streaming to TUI
+
+## First Steps
+
+1. Read this file
+2. Check `task_completion` before finishing any work
+3. Follow patterns in `style_and_conventions`
+4. Run `uv run ruff check . && uv run ruff format .` before claiming done
