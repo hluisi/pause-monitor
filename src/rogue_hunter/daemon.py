@@ -493,6 +493,8 @@ class Daemon:
 
         # Track rogue selection churn (PIDs entering/leaving selection)
         previous_rogues: dict[int, str] = {}  # pid -> command
+        logged_rogues: set[int] = set()  # PIDs we logged as "entered" (above threshold)
+        log_threshold = 10  # Only log enter/exit for scores above this
 
         sample_interval = self.config.system.sample_interval
 
@@ -511,25 +513,29 @@ class Daemon:
                 current_pids = set(current_rogues.keys())
                 previous_pids = set(previous_rogues.keys())
 
-                # New processes entering rogue selection (debug - use -v to see)
+                # New processes entering rogue selection (only log if above threshold)
                 for pid in current_pids - previous_pids:
                     rogue = next(r for r in samples.rogues if r.pid == pid)
-                    log.debug(
-                        "rogue_entered",
-                        command=rogue.command,
-                        score=rogue.score.current,
-                        pid=pid,
-                        dominant_category=rogue.dominant_category,
-                        dominant_metrics=rogue.dominant_metrics,
-                    )
+                    if rogue.score.current > log_threshold:
+                        log.info(
+                            "rogue_entered",
+                            command=rogue.command,
+                            score=rogue.score.current,
+                            pid=pid,
+                            dominant_category=rogue.dominant_category,
+                            dominant_metrics=rogue.dominant_metrics,
+                        )
+                        logged_rogues.add(pid)
 
-                # Processes exiting rogue selection (debug - use -v to see)
+                # Processes exiting rogue selection (only log if we logged their entry)
                 for pid in previous_pids - current_pids:
-                    log.debug(
-                        "rogue_exited",
-                        command=previous_rogues[pid],
-                        pid=pid,
-                    )
+                    if pid in logged_rogues:
+                        log.info(
+                            "rogue_exited",
+                            command=previous_rogues[pid],
+                            pid=pid,
+                        )
+                        logged_rogues.discard(pid)
 
                 previous_rogues = current_rogues
 
