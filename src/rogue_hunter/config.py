@@ -205,6 +205,15 @@ class Config:
         return Path.home() / ".local" / "state" / "rogue-hunter"
 
     @property
+    def runtime_dir(self) -> Path:
+        """Runtime directory for ephemeral files (PID, socket, tailspin captures).
+
+        Stored in /tmp/ so it's cleared on reboot, avoiding stale file issues.
+        This path is also used in the sudoers rule for tailspin permissions.
+        """
+        return Path("/tmp/rogue-hunter")
+
+    @property
     def db_path(self) -> Path:
         """Database path."""
         return self.data_dir / "data.db"
@@ -219,19 +228,13 @@ class Config:
 
     @property
     def pid_path(self) -> Path:
-        """PID file path.
-
-        Stored in /tmp/ so it's cleared on reboot, avoiding stale PID issues.
-        """
-        return Path("/tmp/rogue-hunter/daemon.pid")
+        """PID file path."""
+        return self.runtime_dir / "daemon.pid"
 
     @property
     def socket_path(self) -> Path:
-        """Unix socket path for daemon IPC.
-
-        Stored in /tmp/ so it's cleared on reboot, avoiding stale socket issues.
-        """
-        return Path("/tmp/rogue-hunter/daemon.sock")
+        """Unix socket path for daemon IPC."""
+        return self.runtime_dir / "daemon.sock"
 
     def save(self, path: Path | None = None) -> None:
         """Save config to TOML file."""

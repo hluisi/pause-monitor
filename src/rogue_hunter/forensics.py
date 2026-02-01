@@ -31,9 +31,6 @@ if TYPE_CHECKING:
 
 log = structlog.get_logger()
 
-# Tailspin captures are written here (sudoers rule restricts to this path)
-TAILSPIN_DIR = Path("/tmp/rogue-hunter")
-
 
 # --- Parsing Data Structures ---
 
@@ -306,15 +303,17 @@ class ForensicsCapture:
     Temp files are cleaned up after processing.
     """
 
-    def __init__(self, conn: sqlite3.Connection, event_id: int):
+    def __init__(self, conn: sqlite3.Connection, event_id: int, runtime_dir: Path):
         """Initialize forensics capture.
 
         Args:
             conn: Database connection
             event_id: The process event ID this capture is associated with
+            runtime_dir: Directory for tailspin captures (must match sudoers rule)
         """
         self.conn = conn
         self.event_id = event_id
+        self._runtime_dir = runtime_dir
         self._temp_dir: Path | None = None
 
     async def capture_and_store(
@@ -344,7 +343,7 @@ class ForensicsCapture:
             capture_id = create_forensic_capture(self.conn, self.event_id, trigger)
 
             # Run captures in parallel (no timeouts - let them complete)
-            # Note: tailspin writes to TAILSPIN_DIR, logs to _temp_dir
+            # Note: tailspin writes to runtime_dir, logs to _temp_dir
             tailspin_result, logs_result = await asyncio.gather(
                 self._capture_tailspin(),
                 self._capture_logs(),
@@ -385,10 +384,10 @@ class ForensicsCapture:
                 log.debug("forensics_temp_cleanup", path=str(self._temp_dir))
 
     async def _capture_tailspin(self) -> Path:
-        """Capture tailspin to temp directory. Requires sudo.
+        """Capture tailspin to runtime directory. Requires sudo.
 
-        Writes to TAILSPIN_DIR (/tmp/rogue-hunter/) which is allowed by
-        the sudoers rule installed during `rogue-hunter install`.
+        Writes to runtime_dir (from config) which must match the path
+        in the sudoers rule installed during `rogue-hunter install`.
 
         Returns:
             Path to the tailspin file
@@ -397,8 +396,8 @@ class ForensicsCapture:
             PermissionError: If sudo -n fails (sudoers not configured)
             FileNotFoundError: If tailspin doesn't create output
         """
-        TAILSPIN_DIR.mkdir(parents=True, exist_ok=True)
-        output_path = TAILSPIN_DIR / f"capture_{self.event_id}.tailspin"
+        self._runtime_dir.mkdir(parents=True, exist_ok=True)
+        output_path = self._runtime_dir / f"capture_{self.event_id}.tailspin"
 
         process = await asyncio.create_subprocess_exec(
             "/usr/bin/sudo",

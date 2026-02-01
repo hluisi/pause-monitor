@@ -1,5 +1,7 @@
 """CLI commands for rogue-hunter."""
 
+from pathlib import Path
+
 import click
 
 
@@ -471,26 +473,26 @@ def config_reset() -> None:
     click.echo(f"Config reset to defaults at {cfg.config_path}")
 
 
-def _setup_sudoers(username: str) -> None:
+def _setup_sudoers(username: str, runtime_dir: Path) -> None:
     """Create sudoers rule for tailspin save.
 
     Creates /etc/sudoers.d/rogue-hunter with a narrow rule allowing
-    tailspin to write only to /tmp/rogue-hunter/.
+    tailspin to write only to the configured runtime directory.
 
     Args:
         username: The user to grant sudo access to
+        runtime_dir: Directory for tailspin captures (from config.runtime_dir)
 
     Raises:
         RuntimeError: If the sudoers rule is invalid
     """
     import os
     import subprocess
-    from pathlib import Path
 
     sudoers_path = Path("/etc/sudoers.d/rogue-hunter")
 
-    # Narrow rule: only allow tailspin save to /tmp/rogue-hunter/
-    rule = f"{username} ALL = (root) NOPASSWD: /usr/bin/tailspin save -o /tmp/rogue-hunter/*\n"
+    # Narrow rule: only allow tailspin save to the runtime directory
+    rule = f"{username} ALL = (root) NOPASSWD: /usr/bin/tailspin save -o {runtime_dir}/*\n"
 
     # Write with correct permissions (must be done atomically)
     sudoers_path.write_text(rule)
@@ -529,6 +531,8 @@ def perms_install() -> None:
     import os
     import subprocess
 
+    from rogue_hunter.config import Config
+
     if os.getuid() != 0:
         click.echo("Error: requires root privileges. Use sudo.", err=True)
         raise SystemExit(1)
@@ -538,10 +542,13 @@ def perms_install() -> None:
         click.echo("Error: Could not determine user. Run with sudo, not as root.", err=True)
         raise SystemExit(1)
 
+    # Load config to get runtime_dir
+    cfg = Config.load()
+
     # Set up sudoers for tailspin
     click.echo("Setting up sudoers rule for tailspin...")
-    _setup_sudoers(username)
-    click.echo("  Created /etc/sudoers.d/rogue-hunter")
+    _setup_sudoers(username, cfg.runtime_dir)
+    click.echo(f"  Created /etc/sudoers.d/rogue-hunter (allows writes to {cfg.runtime_dir})")
 
     # Enable tailspin
     click.echo("Enabling tailspin...")
@@ -559,7 +566,6 @@ def perms_uninstall() -> None:
     """
     import os
     import subprocess
-    from pathlib import Path
 
     if os.getuid() != 0:
         click.echo("Error: requires root privileges. Use sudo.", err=True)

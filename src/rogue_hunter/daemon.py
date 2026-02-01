@@ -143,7 +143,7 @@ class Daemon:
 
         try:
             contents = self.ring_buffer.freeze()
-            capture = ForensicsCapture(self._conn, event_id)
+            capture = ForensicsCapture(self._conn, event_id, self.config.runtime_dir)
             capture_id = await capture.capture_and_store(contents, trigger)
             log.info(
                 "forensics_triggered",
