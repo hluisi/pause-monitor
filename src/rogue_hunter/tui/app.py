@@ -21,15 +21,12 @@ from textual.widgets import DataTable, Footer, Label, Static
 from rogue_hunter.config import Config
 from rogue_hunter.socket_client import SocketClient
 
-# Score band thresholds (matches daemon's tracking threshold)
-TRACKING_THRESHOLD = 40
 
-
-def get_tier_name(score: int) -> str:
-    """Convert score to tier name."""
-    if score >= 80:
+def get_tier_name(score: int, elevated: int, critical: int) -> str:
+    """Convert score to tier name using config thresholds."""
+    if score >= critical:
         return "CRITICAL"
-    elif score >= TRACKING_THRESHOLD:
+    elif score >= elevated:
         return "ELEVATED"
     return "NORMAL"
 
@@ -229,11 +226,12 @@ class HeaderBar(Static):
     def _update_border_class(self) -> None:
         """Update border color based on score."""
         self.remove_class("elevated", "critical", "disconnected")
+        bands = self.app.config.bands
         if not self.connected:
             self.add_class("disconnected")
-        elif self.score >= 80:
+        elif self.score >= bands.critical:
             self.add_class("critical")
-        elif self.score >= TRACKING_THRESHOLD:
+        elif self.score >= bands.elevated:
             self.add_class("elevated")
 
     def _update_gauge(self) -> None:
@@ -251,7 +249,8 @@ class HeaderBar(Static):
 
         filled = self.score // 5
         bar = "█" * filled + "░" * (20 - filled)
-        tier = get_tier_name(self.score)
+        bands = self.app.config.bands
+        tier = get_tier_name(self.score, bands.elevated, bands.critical)
         uptime = format_duration(time.time() - self._start_time)
         gauge_left.update(
             f"STRESS {bar} {self.score:3d}/100   {tier}   {self._timestamp} ({uptime})"
@@ -433,13 +432,14 @@ class ProcessTable(Static):
 
     def _get_score_class(self, score: int) -> str:
         """Get CSS class based on score band (5 bands)."""
-        if score >= 80:
+        bands = self.app.config.bands
+        if score >= bands.critical:
             return "critical"
-        elif score >= 60:
+        elif score >= bands.high:
             return "high"
-        elif score >= 40:
+        elif score >= bands.elevated:
             return "elevated"
-        elif score >= 20:
+        elif score >= bands.medium:
             return "medium"
         return "low"
 
@@ -677,10 +677,11 @@ class TrackedEventsPanel(Static):
         # Build current state: command -> best rogue for processes above threshold
         current_above: dict[str, dict] = {}
         current_pids: set[int] = set()
+        tracking_threshold = self.app.config.bands.elevated
 
         for r in rogues:
             score = self._extract_score(r)
-            if score >= TRACKING_THRESHOLD:
+            if score >= tracking_threshold:
                 cmd = r.get("command", "?")
                 current_pids.add(r.get("pid", 0))
                 # Keep the highest scoring entry per command
@@ -865,7 +866,8 @@ class ActivityLog(Static):
 
     def check_transitions(self, score: int) -> None:
         """Check for tier transitions."""
-        current_tier = get_tier_name(score)
+        bands = self.app.config.bands
+        current_tier = get_tier_name(score, bands.elevated, bands.critical)
         if current_tier != self._prev_tier:
             if current_tier == "CRITICAL":
                 self._add_entry(f"● System → CRITICAL (score: {score})", "high")
