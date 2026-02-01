@@ -162,6 +162,110 @@ class RogueSelectionConfig:
     max_count: int = 20  # Maximum rogues to track
 
 
+# =============================================================================
+# TUI Color Configuration
+# =============================================================================
+
+
+@dataclass
+class BandColors:
+    """Colors for score band visualization.
+
+    Colors can be:
+    - Named colors: "red", "green", "yellow", "dim"
+    - Hex colors: "#FFA500" (orange)
+    - Rich styles: "bold red", "dim green"
+    - Empty string "" for default text color
+
+    Default palette: Dracula theme - provides visual hierarchy through
+    severity progression while maintaining harmony.
+    """
+
+    low: str = "#50fa7b"  # Dracula green - healthy, all good
+    medium: str = "#8be9fd"  # Dracula cyan - normal operation
+    elevated: str = "#f1fa8c"  # Dracula yellow - attention needed
+    high: str = "#ffb86c"  # Dracula orange - warning
+    critical: str = "#ff5555"  # Dracula red - urgent
+
+
+@dataclass
+class TrendColors:
+    """Colors for trend indicators (▲▽●○).
+
+    - worsening: Score increasing (bad) - ▲
+    - improving: Score decreasing (good) - ▽
+    - stable: No change - ● (inherits row color if empty)
+    - decayed: Left rogues list - ○
+
+    Default palette: Dracula theme.
+    Worsening inherits row color (severity already visible).
+    Improving gets green for positive feedback.
+    """
+
+    worsening: str = ""  # Inherit row color - severity already shown
+    improving: str = "#50fa7b"  # Dracula green - positive feedback
+    stable: str = ""  # Inherit row color
+    decayed: str = "dim"
+
+
+@dataclass
+class CategoryColors:
+    """Colors for category columns (Blk/Ctn/Prs/Eff).
+
+    Default palette: Dracula theme - each category gets a distinct color
+    from the same palette for visual separation while maintaining harmony.
+    Empty string "" means inherit row color.
+    """
+
+    blocking: str = "#ff5555"  # Dracula red - most severe category
+    contention: str = "#ffb86c"  # Dracula orange - resource competition
+    pressure: str = "#f1fa8c"  # Dracula yellow - system pressure
+    efficiency: str = "#bd93f9"  # Dracula purple - efficiency issues
+
+
+@dataclass
+class StatusColors:
+    """Colors for tracked panel status column.
+
+    Default palette: Dracula theme.
+    """
+
+    active: str = "#50fa7b"  # Dracula green - active/alive
+    ended: str = "dim"
+
+
+@dataclass
+class BorderColors:
+    """Colors for panel borders by state.
+
+    Used for HeaderBar border coloring based on system stress level.
+    Default palette: Dracula theme.
+    """
+
+    normal: str = "#50fa7b"  # Dracula green - system healthy
+    elevated: str = "#f1fa8c"  # Dracula yellow - attention
+    critical: str = "#ff5555"  # Dracula red - urgent
+    disconnected: str = "#ff5555"  # Same as critical
+
+
+@dataclass
+class TUIColorsConfig:
+    """All TUI color configurations grouped together."""
+
+    bands: BandColors = field(default_factory=BandColors)
+    trends: TrendColors = field(default_factory=TrendColors)
+    categories: CategoryColors = field(default_factory=CategoryColors)
+    status: StatusColors = field(default_factory=StatusColors)
+    borders: BorderColors = field(default_factory=BorderColors)
+
+
+@dataclass
+class TUIConfig:
+    """TUI-specific configuration."""
+
+    colors: TUIColorsConfig = field(default_factory=TUIColorsConfig)
+
+
 def _dataclass_to_table(obj: object) -> tomlkit.items.Table:
     """Convert a dataclass instance to a tomlkit Table recursively."""
     table = tomlkit.table()
@@ -183,6 +287,7 @@ class Config:
     bands: BandsConfig = field(default_factory=BandsConfig)
     scoring: ScoringConfig = field(default_factory=ScoringConfig)
     rogue_selection: RogueSelectionConfig = field(default_factory=RogueSelectionConfig)
+    tui: TUIConfig = field(default_factory=TUIConfig)
 
     @property
     def config_dir(self) -> Path:
@@ -248,6 +353,7 @@ class Config:
             "bands",
             "scoring",
             "rogue_selection",
+            "tui",
         ]
         for name in sections:
             doc.add(name, _dataclass_to_table(getattr(self, name)))
@@ -278,6 +384,7 @@ class Config:
         bands_data = data.get("bands", {})
         scoring_data = data.get("scoring", {})
         rogue_data = data.get("rogue_selection", {})
+        tui_data = data.get("tui", {})
 
         # Use dataclass defaults for any missing values
         ret_defaults = defaults.retention
@@ -297,6 +404,7 @@ class Config:
             bands=_load_bands_config(bands_data),
             scoring=_load_scoring_config(scoring_data),
             rogue_selection=_load_rogue_selection_config(rogue_data),
+            tui=_load_tui_config(tui_data),
         )
 
 
@@ -369,4 +477,58 @@ def _load_rogue_selection_config(data: dict) -> RogueSelectionConfig:
     return RogueSelectionConfig(
         score_threshold=data.get("score_threshold", d.score_threshold),
         max_count=data.get("max_count", d.max_count),
+    )
+
+
+def _load_tui_config(data: dict) -> TUIConfig:
+    """Load TUI config from TOML data.
+
+    Handles nested [tui.colors.*] sections with defaults for missing values.
+    """
+    colors_data = data.get("colors", {})
+    bands_data = colors_data.get("bands", {})
+    trends_data = colors_data.get("trends", {})
+    categories_data = colors_data.get("categories", {})
+    status_data = colors_data.get("status", {})
+    borders_data = colors_data.get("borders", {})
+
+    # Use dataclass instances as single source of truth for defaults
+    b = BandColors()
+    t = TrendColors()
+    c = CategoryColors()
+    s = StatusColors()
+    br = BorderColors()
+
+    return TUIConfig(
+        colors=TUIColorsConfig(
+            bands=BandColors(
+                low=bands_data.get("low", b.low),
+                medium=bands_data.get("medium", b.medium),
+                elevated=bands_data.get("elevated", b.elevated),
+                high=bands_data.get("high", b.high),
+                critical=bands_data.get("critical", b.critical),
+            ),
+            trends=TrendColors(
+                worsening=trends_data.get("worsening", t.worsening),
+                improving=trends_data.get("improving", t.improving),
+                stable=trends_data.get("stable", t.stable),
+                decayed=trends_data.get("decayed", t.decayed),
+            ),
+            categories=CategoryColors(
+                blocking=categories_data.get("blocking", c.blocking),
+                contention=categories_data.get("contention", c.contention),
+                pressure=categories_data.get("pressure", c.pressure),
+                efficiency=categories_data.get("efficiency", c.efficiency),
+            ),
+            status=StatusColors(
+                active=status_data.get("active", s.active),
+                ended=status_data.get("ended", s.ended),
+            ),
+            borders=BorderColors(
+                normal=borders_data.get("normal", br.normal),
+                elevated=borders_data.get("elevated", br.elevated),
+                critical=borders_data.get("critical", br.critical),
+                disconnected=borders_data.get("disconnected", br.disconnected),
+            ),
+        )
     )

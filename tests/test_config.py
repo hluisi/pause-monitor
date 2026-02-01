@@ -1,13 +1,20 @@
 """Tests for configuration system."""
 
 from rogue_hunter.config import (
+    BandColors,
     BandsConfig,
+    BorderColors,
+    CategoryColors,
     Config,
     NormalizationConfig,
     RetentionConfig,
     RogueSelectionConfig,
     StateMultipliers,
+    StatusColors,
     SystemConfig,
+    TrendColors,
+    TUIColorsConfig,
+    TUIConfig,
 )
 
 
@@ -403,3 +410,187 @@ def test_state_multipliers_defaults():
     assert mult.stopped < mult.running
     # Zombie = 0.0 (dead, metrics are stale)
     assert mult.zombie == 0.0
+
+
+# =============================================================================
+# TUI Color Configuration Tests
+# =============================================================================
+
+
+def test_band_colors_defaults():
+    """BandColors has sensible defaults for score visualization."""
+    colors = BandColors()
+    # Low/medium use default text (empty string) - healthy processes don't need color
+    assert colors.low == ""
+    assert colors.medium == ""
+    # Severity colors use Dracula palette
+    assert colors.elevated == "#f1fa8c"  # Dracula yellow
+    assert colors.high == "#ffb86c"  # Dracula orange
+    assert colors.critical == "#ff5555"  # Dracula red
+
+
+def test_trend_colors_defaults():
+    """TrendColors has sensible defaults for trend indicators."""
+    colors = TrendColors()
+    # Most trends inherit row color - severity is already shown by row color
+    assert colors.worsening == ""  # Inherit row color
+    assert colors.improving == "#50fa7b"  # Dracula green - positive feedback
+    assert colors.stable == ""  # Inherit row color
+    assert colors.decayed == "dim"
+
+
+def test_category_colors_defaults():
+    """CategoryColors uses Dracula palette for visual separation."""
+    colors = CategoryColors()
+    # Each category gets a distinct color from Dracula palette
+    assert colors.blocking == "#ff5555"  # Dracula red
+    assert colors.contention == "#ffb86c"  # Dracula orange
+    assert colors.pressure == "#f1fa8c"  # Dracula yellow
+    assert colors.efficiency == "#bd93f9"  # Dracula purple
+
+
+def test_status_colors_defaults():
+    """StatusColors has sensible defaults for tracked panel."""
+    colors = StatusColors()
+    assert colors.active == "#50fa7b"  # Dracula green
+    assert colors.ended == "dim"
+
+
+def test_border_colors_defaults():
+    """BorderColors has sensible defaults for header borders."""
+    colors = BorderColors()
+    # Uses Dracula palette
+    assert colors.normal == "#50fa7b"  # Dracula green
+    assert colors.elevated == "#f1fa8c"  # Dracula yellow
+    assert colors.critical == "#ff5555"  # Dracula red
+    assert colors.disconnected == "#ff5555"  # Same as critical
+
+
+def test_tui_colors_config_has_all_sections():
+    """TUIColorsConfig groups all color configurations."""
+    colors = TUIColorsConfig()
+    assert isinstance(colors.bands, BandColors)
+    assert isinstance(colors.trends, TrendColors)
+    assert isinstance(colors.categories, CategoryColors)
+    assert isinstance(colors.status, StatusColors)
+    assert isinstance(colors.borders, BorderColors)
+
+
+def test_tui_config_has_colors():
+    """TUIConfig contains colors configuration."""
+    tui = TUIConfig()
+    assert isinstance(tui.colors, TUIColorsConfig)
+
+
+def test_config_has_tui():
+    """Config includes TUI configuration."""
+    config = Config()
+    assert hasattr(config, "tui")
+    assert isinstance(config.tui, TUIConfig)
+
+
+def test_config_save_includes_tui_colors(tmp_path):
+    """Config.save() writes tui.colors sections."""
+    config_path = tmp_path / "config.toml"
+    config = Config()
+    config.tui.colors.bands.critical = "magenta"
+    config.tui.colors.trends.worsening = "bold red"
+    config.save(config_path)
+
+    content = config_path.read_text()
+    assert "[tui.colors.bands]" in content
+    assert 'critical = "magenta"' in content
+    assert "[tui.colors.trends]" in content
+    assert 'worsening = "bold red"' in content
+
+
+def test_config_loads_tui_colors(tmp_path):
+    """Config.load() reads tui.colors sections from TOML."""
+    config_file = tmp_path / "config.toml"
+    config_file.write_text("""
+[tui.colors.bands]
+critical = "magenta"
+high = "#FF00FF"
+
+[tui.colors.trends]
+worsening = "bold red"
+improving = "bold green"
+
+[tui.colors.categories]
+blocking = "bold red"
+
+[tui.colors.status]
+active = "green"
+
+[tui.colors.borders]
+normal = "blue"
+""")
+
+    config = Config.load(config_file)
+    assert config.tui.colors.bands.critical == "magenta"
+    assert config.tui.colors.bands.high == "#FF00FF"
+    assert config.tui.colors.trends.worsening == "bold red"
+    assert config.tui.colors.trends.improving == "bold green"
+    assert config.tui.colors.categories.blocking == "bold red"
+    assert config.tui.colors.status.active == "green"
+    assert config.tui.colors.borders.normal == "blue"
+
+
+def test_config_loads_partial_tui_colors(tmp_path):
+    """Config.load() uses defaults for missing TUI color fields."""
+    config_file = tmp_path / "config.toml"
+    config_file.write_text("""
+[tui.colors.bands]
+critical = "magenta"
+""")
+
+    config = Config.load(config_file)
+    defaults = TUIConfig()
+    # Specified value
+    assert config.tui.colors.bands.critical == "magenta"
+    # Defaults for unspecified
+    assert config.tui.colors.bands.low == defaults.colors.bands.low
+    assert config.tui.colors.bands.elevated == defaults.colors.bands.elevated
+    assert config.tui.colors.trends.worsening == defaults.colors.trends.worsening
+    assert config.tui.colors.categories.blocking == defaults.colors.categories.blocking
+    assert config.tui.colors.status.active == defaults.colors.status.active
+    assert config.tui.colors.borders.normal == defaults.colors.borders.normal
+
+
+def test_config_loads_missing_tui_section_returns_defaults(tmp_path):
+    """Config.load() returns TUI defaults when [tui] section is missing."""
+    config_file = tmp_path / "config.toml"
+    config_file.write_text("""
+[retention]
+events_days = 60
+""")
+
+    config = Config.load(config_file)
+    defaults = TUIConfig()
+    assert config.tui.colors.bands.low == defaults.colors.bands.low
+    assert config.tui.colors.bands.critical == defaults.colors.bands.critical
+    assert config.tui.colors.trends.worsening == defaults.colors.trends.worsening
+
+
+def test_tui_colors_roundtrip(tmp_path):
+    """Config save/load preserves TUI color values."""
+    config_path = tmp_path / "config.toml"
+
+    # Create config with custom colors
+    config = Config()
+    config.tui.colors.bands.critical = "purple"
+    config.tui.colors.bands.low = "cyan"
+    config.tui.colors.trends.worsening = "bold magenta"
+    config.tui.colors.categories.blocking = "#FF0000"
+    config.tui.colors.status.active = "bright_green"
+    config.tui.colors.borders.disconnected = "dim red"
+    config.save(config_path)
+
+    # Load and verify
+    loaded = Config.load(config_path)
+    assert loaded.tui.colors.bands.critical == "purple"
+    assert loaded.tui.colors.bands.low == "cyan"
+    assert loaded.tui.colors.trends.worsening == "bold magenta"
+    assert loaded.tui.colors.categories.blocking == "#FF0000"
+    assert loaded.tui.colors.status.active == "bright_green"
+    assert loaded.tui.colors.borders.disconnected == "dim red"

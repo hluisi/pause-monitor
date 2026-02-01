@@ -12,11 +12,12 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
+from rich.text import Text
 from textual.app import App, ComposeResult
-from textual.containers import Container, Grid, Horizontal, ScrollableContainer
+from textual.containers import Horizontal
 from textual.css.query import NoMatches
 from textual.reactive import reactive
-from textual.widgets import DataTable, Footer, Label, Static
+from textual.widgets import DataTable, Footer, Label, RichLog, Static
 
 from rogue_hunter.config import Config
 from rogue_hunter.socket_client import SocketClient
@@ -121,18 +122,7 @@ class HeaderBar(Static):
         height: 4;
         padding: 0 1;
         border: solid green;
-    }
-
-    HeaderBar.elevated {
-        border: solid yellow;
-    }
-
-    HeaderBar.critical {
-        border: solid red;
-    }
-
-    HeaderBar.disconnected {
-        border: solid $error;
+        border-title-align: left;
     }
 
     HeaderBar Horizontal {
@@ -181,6 +171,10 @@ class HeaderBar(Static):
         )
         yield Label("", id="sparkline")
 
+    def on_mount(self) -> None:
+        """Set border title."""
+        self.border_title = "STRESS"
+
     def on_resize(self) -> None:
         """Resize sparkline buffer to fill available width."""
         try:
@@ -211,28 +205,28 @@ class HeaderBar(Static):
     def watch_score(self, score: int) -> None:
         """Update gauge when score changes."""
         self._update_gauge()
-        self._update_border_class()
+        self._update_border_color()
 
     def watch_connected(self, connected: bool) -> None:
         """Update display when connection state changes."""
-        if not connected:
-            self.add_class("disconnected")
-            self.remove_class("elevated", "critical")
-        else:
-            self.remove_class("disconnected")
-            self._update_border_class()
+        self._update_border_color()
         self._update_gauge()
 
-    def _update_border_class(self) -> None:
-        """Update border color based on score."""
-        self.remove_class("elevated", "critical", "disconnected")
+    def _update_border_color(self) -> None:
+        """Update border color based on score using config colors."""
         bands = self.app.config.bands
+        borders = self.app.config.tui.colors.borders
+
         if not self.connected:
-            self.add_class("disconnected")
+            color = borders.disconnected
         elif self.score >= bands.critical:
-            self.add_class("critical")
+            color = borders.critical
         elif self.score >= bands.elevated:
-            self.add_class("elevated")
+            color = borders.elevated
+        else:
+            color = borders.normal
+
+        self.styles.border = ("solid", color)
 
     def _update_gauge(self) -> None:
         """Update the gauge line display."""
@@ -294,7 +288,7 @@ class HeaderBar(Static):
 class ProcessTable(Static):
     """Table showing rogue processes with 4-category scoring.
 
-    Uses CSS Grid layout for proper proportional column widths.
+    Uses DataTable with Rich Text objects for row-level styling.
     Shows category breakdown: 🔴 blocking, 🟠 contention, 🟡 pressure, ⚪ efficiency.
     Includes decay: processes stay visible (dimmed) for 10s after leaving rogues.
     """
@@ -303,84 +297,16 @@ class ProcessTable(Static):
     ProcessTable {
         height: 1fr;
         border: solid $primary;
+        border-title-align: left;
     }
 
     ProcessTable.disconnected {
         border: solid $error;
     }
 
-    ProcessTable ScrollableContainer {
+    ProcessTable DataTable {
         width: 100%;
         height: 100%;
-    }
-
-    ProcessTable #process-grid {
-        width: 100%;
-        height: auto;
-        layout: grid;
-        grid-size: 10;
-        grid-gutter: 0 1;
-        /* Columns: trend, pid, proc, score, B, C, P, E, state, detail */
-        /* Process column: 32 chars matches macOS pbi_name limit (2*MAXCOMLEN) */
-        grid-columns: 3 6 32 5 5 5 5 5 8 1fr;
-    }
-
-    ProcessTable .header {
-        text-style: bold;
-        background: $surface;
-        height: 1;
-        width: 100%;
-    }
-
-    ProcessTable .cell {
-        height: 1;
-        width: 100%;
-    }
-
-    ProcessTable .center {
-        text-align: center;
-    }
-
-    ProcessTable .decayed {
-        text-style: dim;
-    }
-
-    /* Score-based row colors (5 bands) */
-    ProcessTable .critical {
-        color: $error;
-    }
-
-    ProcessTable .high {
-        color: orange;
-    }
-
-    ProcessTable .elevated {
-        color: $warning;
-    }
-
-    ProcessTable .medium {
-        color: $text;
-    }
-
-    ProcessTable .low {
-        color: $success;
-    }
-
-    /* Category colors */
-    ProcessTable .cat-blocking {
-        color: $error;
-    }
-
-    ProcessTable .cat-contention {
-        color: orange;
-    }
-
-    ProcessTable .cat-pressure {
-        color: $warning;
-    }
-
-    ProcessTable .cat-efficiency {
-        color: $text-muted;
     }
     """
 
@@ -396,52 +322,60 @@ class ProcessTable(Static):
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
-        self._grid: Grid | None = None
+        self._table: DataTable | None = None
         self._prev_scores: dict[int, int] = {}
         self._cached_rogues: dict[int, dict] = {}
         self._last_seen: dict[int, float] = {}
 
     def compose(self) -> ComposeResult:
-        """Create the process table using CSS Grid."""
-        with ScrollableContainer():
-            with Grid(id="process-grid"):
-                # Header row - B/C/P/E are category score columns
-                yield Label("", classes="header")
-                yield Label("PID", classes="header")
-                yield Label("Process", classes="header")
-                yield Label("Score", classes="header center")
-                yield Label("Blk", classes="header center")  # Blocking
-                yield Label("Ctn", classes="header center")  # Contention
-                yield Label("Prs", classes="header center")  # Pressure
-                yield Label("Eff", classes="header center")  # Efficiency
-                yield Label("State", classes="header")
-                yield Label("Dominant", classes="header")
+        """Create the process table using DataTable."""
+        yield DataTable(id="process-table", zebra_stripes=True, cursor_type="none")
 
     def on_mount(self) -> None:
-        """Get grid reference."""
-        self._grid = self.query_one("#process-grid", Grid)
+        """Set up table columns."""
+        self.border_title = "TOP PROCESSES"
+        self._table = self.query_one("#process-table", DataTable)
+        self._table.add_columns(
+            "", "PID", "Process", "Score", "Blk", "Ctn", "Prs", "Eff", "State", "Dominant"
+        )
         self.set_disconnected()
 
-    def _clear_data_rows(self) -> None:
-        """Remove all data rows, keeping header."""
-        if not self._grid:
-            return
-        children = list(self._grid.children)
-        for child in children[10:]:  # 10 columns now
-            child.remove()
-
-    def _get_score_class(self, score: int) -> str:
-        """Get CSS class based on score band (5 bands)."""
+    def _get_band_style(self, score: int, decayed: bool) -> str:
+        """Map score to Rich style string using config colors."""
         bands = self.app.config.bands
+        colors = self.app.config.tui.colors.bands
+
         if score >= bands.critical:
-            return "critical"
+            style = colors.critical
         elif score >= bands.high:
-            return "high"
+            style = colors.high
         elif score >= bands.elevated:
-            return "elevated"
+            style = colors.elevated
         elif score >= bands.medium:
-            return "medium"
-        return "low"
+            style = colors.medium
+        else:
+            style = colors.low
+
+        # Add bold for high-severity bands
+        if score >= bands.elevated and style:
+            style = f"bold {style}"
+
+        return f"{style} dim" if decayed else style
+
+    def _get_trend_style(self, trend: str, row_style: str, decayed: bool) -> str:
+        """Get style for trend indicator based on config colors."""
+        if decayed:
+            return self.app.config.tui.colors.trends.decayed
+
+        trends = self.app.config.tui.colors.trends
+        # Empty string means "inherit row color"
+        trend_colors = {
+            "▲": trends.worsening or row_style,
+            "▽": trends.improving or row_style,
+            "●": trends.stable or row_style,
+            "○": trends.decayed or row_style,
+        }
+        return trend_colors.get(trend, row_style)
 
     def _format_cat_score(self, score: float) -> str:
         """Format a category score (0-100) compactly."""
@@ -450,7 +384,7 @@ class ProcessTable(Static):
             return "·"
         return str(s)
 
-    def _add_row(
+    def _make_row(
         self,
         trend: str,
         pid: str,
@@ -464,31 +398,43 @@ class ProcessTable(Static):
         dominant_cat: str,
         dominant_metrics: list[str],
         decayed: bool = False,
-    ) -> None:
-        """Add a data row to the grid."""
-        if not self._grid:
-            return
-
-        score_class = self._get_score_class(score_val)
-        base_class = f"cell {score_class}"
-        if decayed:
-            base_class += " decayed"
+    ) -> list[Text]:
+        """Build styled row cells using Rich Text objects."""
+        row_style = self._get_band_style(score_val, decayed)
+        trend_style = self._get_trend_style(trend, row_style, decayed)
+        cat_colors = self.app.config.tui.colors.categories
 
         # Build dominant display with icon
         icon = self.CATEGORY_ICONS.get(dominant_cat, "")
         metrics_str = " ".join(dominant_metrics[:2])  # Show top 2 metrics
         dominant_display = f"{icon} {metrics_str}" if metrics_str else icon
 
-        self._grid.mount(Label(trend, classes=base_class))
-        self._grid.mount(Label(pid, classes=base_class))
-        self._grid.mount(Label(command, classes=base_class))
-        self._grid.mount(Label(str(score_val), classes=f"{base_class} center"))
-        self._grid.mount(Label(self._format_cat_score(blocking), classes=f"{base_class} center"))
-        self._grid.mount(Label(self._format_cat_score(contention), classes=f"{base_class} center"))
-        self._grid.mount(Label(self._format_cat_score(pressure), classes=f"{base_class} center"))
-        self._grid.mount(Label(self._format_cat_score(efficiency), classes=f"{base_class} center"))
-        self._grid.mount(Label(state, classes=base_class))
-        self._grid.mount(Label(dominant_display, classes=base_class))
+        # Category columns: use config color if set, otherwise inherit row color
+        # Zero values are always dim
+        def cat_style(value: float, color: str) -> str:
+            if decayed or not value:
+                return "dim"
+            return color if color else row_style
+
+        # Format category scores with their colors
+        blk_style = cat_style(blocking, cat_colors.blocking)
+        ctn_style = cat_style(contention, cat_colors.contention)
+        prs_style = cat_style(pressure, cat_colors.pressure)
+        eff_style = cat_style(efficiency, cat_colors.efficiency)
+        score_style = f"bold {row_style}" if row_style else "bold"
+
+        return [
+            Text(trend, style=trend_style),
+            Text(pid, style=row_style),
+            Text(command, style=row_style),
+            Text(str(score_val), style=score_style),
+            Text(self._format_cat_score(blocking), style=blk_style),
+            Text(self._format_cat_score(contention), style=ctn_style),
+            Text(self._format_cat_score(pressure), style=prs_style),
+            Text(self._format_cat_score(efficiency), style=eff_style),
+            Text(state, style=row_style),
+            Text(dominant_display, style=row_style),
+        ]
 
     def update_rogues(self, rogues: list[dict], now: float) -> None:
         """Update with rogue process list.
@@ -497,7 +443,7 @@ class ProcessTable(Static):
         fields (each has current/low/high).
         """
         self.remove_class("disconnected")
-        if not self._grid:
+        if not self._table:
             return
 
         # Update cache with current rogues
@@ -530,7 +476,7 @@ class ProcessTable(Static):
             reverse=True,
         )
 
-        self._clear_data_rows()
+        self._table.clear()
 
         for rogue, is_decayed in display_list:
             pid = rogue.get("pid", 0)
@@ -559,26 +505,32 @@ class ProcessTable(Static):
 
             state = rogue["state"]["current"]
 
-            self._add_row(
-                trend,
-                str(pid),
-                str(rogue.get("command", "?")),
-                score,
-                blocking,
-                contention,
-                pressure,
-                efficiency,
-                str(state),
-                dominant_cat,
-                dominant_metrics,
-                decayed=is_decayed,
+            self._table.add_row(
+                *self._make_row(
+                    trend,
+                    str(pid),
+                    str(rogue.get("command", "?")),
+                    score,
+                    blocking,
+                    contention,
+                    pressure,
+                    efficiency,
+                    str(state),
+                    dominant_cat,
+                    dominant_metrics,
+                    decayed=is_decayed,
+                )
             )
 
     def set_disconnected(self) -> None:
         """Show disconnected state."""
         self.add_class("disconnected")
-        self._clear_data_rows()
-        self._add_row("", "", "(not connected)", 0, 0, 0, 0, 0, "---", "", [], decayed=False)
+        if self._table:
+            self._table.clear()
+            row = self._make_row(
+                "", "", "(not connected)", 0, 0, 0, 0, 0, "---", "", [], decayed=False
+            )
+            self._table.add_row(*row)
 
 
 @dataclass
@@ -619,17 +571,12 @@ class TrackedEventsPanel(Static):
     TrackedEventsPanel {
         height: 100%;
         border: solid $primary;
-        padding: 0 1;
+        border-title-align: left;
     }
 
     TrackedEventsPanel DataTable {
         width: 100%;
-        height: 1fr;
-    }
-
-    TrackedEventsPanel #tracked-title {
-        height: 1;
-        background: $surface;
+        height: 100%;
     }
     """
 
@@ -647,11 +594,11 @@ class TrackedEventsPanel(Static):
 
     def compose(self) -> ComposeResult:
         """Create the panel."""
-        yield Static("TRACKED PROCESSES", id="tracked-title")
-        yield DataTable(id="tracked-table")
+        yield DataTable(id="tracked-table", zebra_stripes=True, cursor_type="none")
 
     def on_mount(self) -> None:
         """Set up table."""
+        self.border_title = "TRACKED"
         self._table = self.query_one("#tracked-table", DataTable)
         self._table.add_column("Time", width=8)
         self._table.add_column("Process")
@@ -660,7 +607,6 @@ class TrackedEventsPanel(Static):
         self._table.add_column("Cat", width=5)  # Category icon
         self._table.add_column("Status", width=8)
         self._table.show_header = True
-        self._table.cursor_type = "none"
 
     def _extract_score(self, rogue: dict) -> int:
         """Extract current score value from rogue dict.
@@ -751,6 +697,9 @@ class TrackedEventsPanel(Static):
             "efficiency": "⚪",
         }
 
+        # Get status colors from config
+        status_colors = self.app.config.tui.colors.status
+
         # Show active tracking first (sorted by peak score desc)
         active_sorted = sorted(
             self._active.values(),
@@ -768,7 +717,7 @@ class TrackedEventsPanel(Static):
                 str(tracked.peak_score),
                 duration,
                 cat_icon,
-                "[green]active[/]",
+                f"[{status_colors.active}]active[/]",
             )
 
         # Show history (sorted by peak score desc)
@@ -788,43 +737,23 @@ class TrackedEventsPanel(Static):
                 str(tracked.peak_score),
                 duration,
                 cat_icon,
-                "[dim]ended[/]",
+                f"[{status_colors.ended}]ended[/]",
             )
 
 
 class ActivityLog(Static):
-    """Activity log showing tier transitions."""
+    """Activity log showing tier transitions using RichLog for auto-scroll."""
 
     DEFAULT_CSS = """
     ActivityLog {
         height: 100%;
         border: solid $primary;
-        padding: 0 1;
+        border-title-align: left;
     }
 
-    ActivityLog #activity-title {
-        height: 1;
-        background: $surface;
-    }
-
-    ActivityLog #log-container {
-        height: 1fr;
-    }
-
-    ActivityLog .entry {
-        height: 1;
-    }
-
-    ActivityLog .entry-high {
-        color: red;
-    }
-
-    ActivityLog .entry-elevated {
-        color: yellow;
-    }
-
-    ActivityLog .entry-normal {
-        color: green;
+    ActivityLog RichLog {
+        width: 100%;
+        height: 100%;
     }
     """
 
@@ -832,37 +761,33 @@ class ActivityLog(Static):
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
-        self._entries: list[tuple[str, str, str]] = []
         self._prev_tier = "NORMAL"
 
     def compose(self) -> ComposeResult:
-        """Create log container."""
-        yield Static("SYSTEM ACTIVITY", id="activity-title")
-        yield Container(id="log-container")
+        """Create log using RichLog for auto-scroll and auto-prune."""
+        yield RichLog(id="activity-log", markup=True, max_lines=self.MAX_ENTRIES)
 
     def on_mount(self) -> None:
-        """Initial state."""
+        """Set border title and initial state."""
+        self.border_title = "ACTIVITY"
         self._add_entry("Waiting for connection...", "normal")
 
     def _add_entry(self, message: str, level: str = "normal") -> None:
-        """Add a log entry."""
+        """Add a log entry with colored timestamp using config colors."""
         timestamp = datetime.now().strftime("%H:%M:%S")
-        self._entries.append((timestamp, message, level))
-        if len(self._entries) > self.MAX_ENTRIES:
-            self._entries = self._entries[-self.MAX_ENTRIES :]
-        self._refresh_display()
-
-    def _refresh_display(self) -> None:
-        """Refresh the log display."""
+        colors = self.app.config.tui.colors
+        # Use band colors for severity, but border "normal" color for healthy state
+        # (band "low" may be empty since healthy processes don't need color)
+        color = {
+            "high": colors.bands.critical,
+            "elevated": colors.bands.elevated,
+            "normal": colors.borders.normal,  # Use border green for healthy
+        }.get(level, "white")
         try:
-            container = self.query_one("#log-container", Container)
+            log = self.query_one("#activity-log", RichLog)
+            log.write(f"[{color}]{timestamp}  {message}[/{color}]")
         except NoMatches:
-            return
-
-        container.remove_children()
-        for timestamp, message, level in self._entries:
-            label = Label(f"{timestamp}  {message}", classes=f"entry entry-{level}")
-            container.mount(label)
+            pass
 
     def check_transitions(self, score: int) -> None:
         """Check for tier transitions."""
@@ -879,7 +804,11 @@ class ActivityLog(Static):
 
     def connected(self) -> None:
         """Called when daemon connects."""
-        self._entries.clear()
+        try:
+            log = self.query_one("#activity-log", RichLog)
+            log.clear()
+        except NoMatches:
+            pass
         self._add_entry("Connected to daemon", "normal")
 
 
