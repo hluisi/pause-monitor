@@ -2,8 +2,6 @@
 
 import asyncio
 import ctypes
-import logging
-import logging.handlers
 import os
 import resource
 import signal
@@ -13,8 +11,8 @@ from dataclasses import dataclass
 from datetime import datetime
 
 import psutil
-import structlog
 
+from rogue_hunter import logging as rlog
 from rogue_hunter.boottime import get_boot_time
 from rogue_hunter.collector import (
     BAND_SEVERITY,
@@ -32,7 +30,8 @@ from rogue_hunter.socket_server import SocketServer
 from rogue_hunter.storage import init_database, prune_old_data
 from rogue_hunter.tracker import ProcessTracker
 
-log = structlog.get_logger()
+log = rlog.get_structlog()
+
 
 # macOS QoS class constants (from pthread/qos.h)
 QOS_CLASS_USER_INTERACTIVE = 0x21
@@ -127,30 +126,20 @@ class Daemon:
         now = time.monotonic()
         elapsed = now - self._last_forensics_time
         if elapsed < self.config.system.forensics_debounce:
-            log.info(
-                "forensics_debounced",
-                event_id=event_id,
-                trigger=trigger,
-                elapsed=round(elapsed, 2),
-                debounce=self.config.system.forensics_debounce,
-            )
+            cooldown = self.config.system.forensics_debounce
+            rlog.forensics_debounced(elapsed, cooldown)
             return
         self._last_forensics_time = now
 
         if self._conn is None:
-            log.warning("forensics_skipped_no_db", event_id=event_id, trigger=trigger)
+            rlog.forensics_skipped("no database")
             return
 
         try:
             contents = self.ring_buffer.freeze()
             capture = ForensicsCapture(self._conn, event_id, self.config.runtime_dir)
             capture_id = await capture.capture_and_store(contents, trigger)
-            log.info(
-                "forensics_triggered",
-                event_id=event_id,
-                capture_id=capture_id,
-                trigger=trigger,
-            )
+            rlog.forensics_captured(event_id, capture_id)
         except Exception as e:
             log.exception(
                 "forensics_callback_failed",
@@ -168,7 +157,7 @@ class Daemon:
         # Create config file with defaults if it doesn't exist
         if not self.config.config_path.exists():
             self.config.save()
-            log.info("config_created", path=str(self.config.config_path))
+            rlog.config_created(str(self.config.config_path))
 
         self.config.data_dir.mkdir(parents=True, exist_ok=True)
         db_existed = self.config.db_path.exists()
@@ -185,41 +174,34 @@ class Daemon:
 
         # Log database state
         restored_count = len(self.tracker.tracked) if self.tracker else 0
-        log.info(
-            "database_ready",
-            existed=db_existed,
-            restored_tracking=restored_count,
-        )
+        status = "restored" if db_existed else "initialized"
+        rlog.database_status(status, restored_count)
 
     async def start(self) -> None:
         """Start the daemon."""
         from importlib.metadata import version
 
-        log.info("daemon_starting", version=version("rogue-hunter"))
+        ver = version("rogue-hunter")
+        rlog.version_info("rogue-hunter", ver)
 
         # Log configuration for visibility
         bands = self.config.bands
-        log.info(
-            "daemon_config",
-            ring_buffer_size=self.config.system.ring_buffer_size,
-            tracking_threshold=bands.tracking_threshold,
-            tracking_band=bands.tracking_band,
-            band_thresholds=f"med={bands.medium}/elev={bands.elevated}/high={bands.high}/crit={bands.critical}",
-        )
-        log.info("daemon_boot_time", boot_time=self.boot_time)
+        buf = self.config.system.ring_buffer_size
+        rlog.config_summary(buf, bands.tracking_threshold)
+        rlog.bands_summary(bands.medium, bands.elevated, bands.high, bands.critical)
 
         # Set QoS to USER_INITIATED for reliable sampling under load
         # This affects CPU scheduling, I/O priority, and timer coalescing
         # Ensures we get timely wakeups even when system is busy
         if _set_qos_class(QOS_CLASS_USER_INITIATED):
-            log.info("qos_class_set", qos="USER_INITIATED")
+            rlog.qos_set("USER_INITIATED")
         else:
             # Fall back to nice (requires root, will likely fail)
             try:
                 os.setpriority(os.PRIO_PROCESS, 0, -10)
-                log.info("daemon_priority_set", nice=-10)
+                rlog.priority_set("nice -10")
             except PermissionError:
-                log.info("priority_default", msg="Running at default priority")
+                rlog.priority_default()
 
         # Setup signal handlers
         loop = asyncio.get_running_loop()
@@ -228,7 +210,7 @@ class Daemon:
 
         # Check for existing instance
         if self._check_already_running():
-            log.error("daemon_already_running")
+            rlog.already_running()
             raise RuntimeError("Daemon is already running")
 
         self._write_pid_file()
@@ -250,7 +232,7 @@ class Daemon:
         await self._socket_server.start()
 
         self.state.running = True
-        log.info("daemon_started")
+        rlog.daemon_started()
 
         # Start auto-prune task
         self._auto_prune_task = asyncio.create_task(self._auto_prune())
@@ -260,7 +242,7 @@ class Daemon:
 
     async def stop(self) -> None:
         """Stop the daemon gracefully."""
-        log.info("daemon_stopping")
+        rlog.daemon_stopping()
         self.state.running = False
 
         # Stop socket server
@@ -291,11 +273,11 @@ class Daemon:
 
         self._remove_pid_file()
 
-        log.info("daemon_stopped")
+        rlog.daemon_stopped()
 
     def _handle_signal(self, sig: signal.Signals) -> None:
         """Handle shutdown signals."""
-        log.info("signal_received", signal=sig.name)
+        rlog.signal_received(sig.name)
         self._shutdown_event.set()
 
     async def _start_caffeinate(self) -> None:
@@ -307,9 +289,9 @@ class Daemon:
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL,
             )
-            log.debug("caffeinate_started")
+            pass  # Silent success
         except FileNotFoundError:
-            log.warning("caffeinate_not_found")
+            rlog.caffeinate_not_found()
 
     async def _stop_caffeinate(self) -> None:
         """Stop caffeinate subprocess."""
@@ -322,7 +304,7 @@ class Daemon:
             except asyncio.TimeoutError:
                 self._caffeinate_proc.kill()
             self._caffeinate_proc = None
-            log.debug("caffeinate_stopped")
+            log.debug("Caffeinate stopped")
 
     async def _ensure_tailspin_enabled(self) -> None:
         """Ensure tailspin tracing is enabled for forensics capture.
@@ -354,14 +336,14 @@ class Daemon:
                     stdin=asyncio.subprocess.DEVNULL,
                 )
                 await enable_proc.wait()
-                log.info("tailspin_enabled", reason="was_disabled")
+                rlog.tailspin_enabled()
             else:
-                log.debug("tailspin_already_enabled")
+                pass  # Silent - already enabled
 
         except FileNotFoundError:
-            log.warning("tailspin_not_found", msg="forensics captures will fail")
+            rlog.tailspin_not_found()
         except OSError as e:
-            log.warning("tailspin_check_failed", error=str(e))
+            rlog.tailspin_check_failed(str(e))
 
     async def _disable_tailspin(self) -> None:
         """Disable tailspin tracing on shutdown.
@@ -379,23 +361,21 @@ class Daemon:
                 stdin=asyncio.subprocess.DEVNULL,
             )
             await proc.wait()
-            log.info("tailspin_disabled")
+            rlog.tailspin_disabled()
         except FileNotFoundError:
             pass  # Already logged during startup
         except OSError as e:
-            log.warning("tailspin_disable_failed", error=str(e))
+            rlog.tailspin_disable_failed(str(e))
 
     def _write_pid_file(self) -> None:
         """Write PID file."""
         self.config.pid_path.parent.mkdir(parents=True, exist_ok=True)
         self.config.pid_path.write_text(str(os.getpid()))
-        log.debug("pid_file_written", path=str(self.config.pid_path))
 
     def _remove_pid_file(self) -> None:
         """Remove PID file."""
         if self.config.pid_path.exists():
             self.config.pid_path.unlink()
-            log.debug("pid_file_removed")
 
     def _check_already_running(self) -> bool:
         """Check if daemon is already running.
@@ -410,7 +390,7 @@ class Daemon:
         try:
             pid = int(self.config.pid_path.read_text().strip())
         except ValueError:
-            log.warning("pid_file_invalid", reason="not a number")
+            rlog.pid_file_invalid()
             self._remove_pid_file()
             return False
 
@@ -422,30 +402,21 @@ class Daemon:
             # Check if this is actually rogue-hunter
             cmdline_str = " ".join(cmdline).lower()
             if "rogue-hunter" in cmdline_str or "rogue_hunter" in cmdline_str:
-                log.info(
-                    "daemon_already_running_verified",
-                    pid=pid,
-                    cmdline=" ".join(cmdline[:3]),
-                )
+                rlog.daemon_already_running(pid)
                 return True
             else:
                 # Process exists but it's not the daemon - stale PID file
-                log.warning(
-                    "pid_file_stale",
-                    reason="different process",
-                    pid=pid,
-                    actual_process=proc.name(),
-                )
+                rlog.stale_pid_file(pid, proc.name())
                 self._remove_pid_file()
                 return False
 
         except psutil.NoSuchProcess:
-            log.warning("pid_file_stale", reason="process not found", pid=pid)
+            rlog.stale_pid_not_found(pid)
             self._remove_pid_file()
             return False
         except psutil.AccessDenied:
             # Can't inspect process - assume it's running to be safe
-            log.warning("pid_check_access_denied", pid=pid)
+            rlog.pid_verify_failed(pid)
             return True
 
     async def _auto_prune(self) -> None:
@@ -461,15 +432,12 @@ class Daemon:
             except asyncio.TimeoutError:
                 # Run prune
                 if self._conn:
-                    log.info("auto_prune_starting")
+                    rlog.auto_prune_started()
                     events_deleted = prune_old_data(
                         self._conn,
                         events_days=self.config.retention.events_days,
                     )
-                    log.info(
-                        "auto_prune_completed",
-                        events_deleted=events_deleted,
-                    )
+                    rlog.auto_prune_complete(events_deleted)
 
     async def _main_loop(self) -> None:
         """Main loop collecting process samples at configured interval.
@@ -517,24 +485,14 @@ class Daemon:
                 for pid in current_pids - previous_pids:
                     rogue = next(r for r in samples.rogues if r.pid == pid)
                     if rogue.score.current > log_threshold:
-                        log.info(
-                            "rogue_entered",
-                            command=rogue.command,
-                            score=rogue.score.current,
-                            pid=pid,
-                            dominant_category=rogue.dominant_category,
-                            dominant_metrics=rogue.dominant_metrics,
-                        )
+                        metrics = ", ".join(rogue.dominant_metrics)
+                        rlog.rogue_enter(rogue.command, pid, rogue.score.current, metrics)
                         logged_rogues.add(pid)
 
                 # Processes exiting rogue selection (only log if we logged their entry)
                 for pid in previous_pids - current_pids:
                     if pid in logged_rogues:
-                        log.info(
-                            "rogue_exited",
-                            command=previous_rogues[pid],
-                            pid=pid,
-                        )
+                        rlog.rogue_exit(previous_rogues[pid], pid)
                         logged_rogues.discard(pid)
 
                 previous_rogues = current_rogues
@@ -576,16 +534,16 @@ class Daemon:
                         else 0
                     )
 
-                    log.info(
-                        "daemon_heartbeat",
-                        samples=heartbeat_count,
+                    avg_score = round(heartbeat_score_sum / heartbeat_count)
+                    rlog.heartbeat(
+                        avg_score=avg_score,
                         max_score=heartbeat_max_score,
-                        avg_score=round(heartbeat_score_sum / heartbeat_count),
-                        tracked=tracked_count,
-                        buffer=f"{buffer_size}/{self.ring_buffer.capacity}",
-                        clients=client_count,
-                        rss_mb=round(rss_mb, 1),
-                        db_mb=round(db_size_mb, 1),
+                        tracked_count=tracked_count,
+                        buffer_size=buffer_size,
+                        buffer_capacity=self.ring_buffer.capacity,
+                        client_count=client_count,
+                        rss_mb=rss_mb,
+                        db_size_mb=db_size_mb,
                     )
 
                     # Reset heartbeat counters
@@ -604,10 +562,10 @@ class Daemon:
                         pass  # Normal timeout, continue to next sample
 
             except asyncio.CancelledError:
-                log.info("main_loop_cancelled")
+                rlog.main_loop_cancelled()
                 break
             except Exception as e:
-                log.error("sample_failed", error=str(e))
+                rlog.sample_failed(str(e))
                 # Wait briefly before retry, but exit immediately if shutdown
                 try:
                     await asyncio.wait_for(self._shutdown_event.wait(), timeout=1.0)
@@ -753,99 +711,6 @@ class Daemon:
         )
 
 
-def _add_source(source: str) -> structlog.types.Processor:
-    """Create a processor that adds a source field to log events."""
-
-    def processor(
-        logger: structlog.types.WrappedLogger,
-        method_name: str,
-        event_dict: structlog.types.EventDict,
-    ) -> structlog.types.EventDict:
-        event_dict["source"] = source
-        return event_dict
-
-    return processor
-
-
-def _setup_logging(config: "Config") -> None:
-    """Configure structlog with dual output: console + JSON file.
-
-    Console output uses human-readable format with colors.
-    File output uses JSON Lines format for machine parsing.
-    Both use local time to match sample timestamps.
-    """
-    # Ensure state directory exists for log file
-    config.state_dir.mkdir(parents=True, exist_ok=True)
-
-    # Set up rotating file handler for JSON output
-    # 5MB max size, keep 3 backup files
-    file_handler = logging.handlers.RotatingFileHandler(
-        config.log_path,
-        maxBytes=5 * 1024 * 1024,  # 5MB
-        backupCount=3,
-        encoding="utf-8",
-    )
-    file_handler.setLevel(logging.INFO)
-
-    # Configure stdlib logging for file output
-    # structlog will use this for JSON output via ProcessorFormatter
-    stdlib_root = logging.getLogger()
-    stdlib_root.setLevel(logging.INFO)
-
-    # Clear any existing handlers
-    stdlib_root.handlers.clear()
-
-    # Add file handler with JSON formatter
-    file_handler.setFormatter(
-        structlog.stdlib.ProcessorFormatter(
-            processor=structlog.processors.JSONRenderer(),
-            foreign_pre_chain=[
-                structlog.contextvars.merge_contextvars,
-                structlog.processors.TimeStamper(fmt="iso", utc=False, key="ts"),
-                structlog.processors.add_log_level,
-                _add_source("daemon"),
-                structlog.processors.format_exc_info,
-            ],
-        )
-    )
-    stdlib_root.addHandler(file_handler)
-
-    # Configure structlog with console output (primary) and stdlib passthrough (for file)
-    structlog.configure(
-        processors=[
-            structlog.contextvars.merge_contextvars,
-            structlog.stdlib.filter_by_level,
-            structlog.processors.TimeStamper(fmt="%H:%M:%S", utc=False),
-            structlog.processors.add_log_level,
-            structlog.stdlib.PositionalArgumentsFormatter(),
-            structlog.processors.StackInfoRenderer(),
-            structlog.processors.format_exc_info,
-            structlog.stdlib.ProcessorFormatter.wrap_for_formatter,
-        ],
-        wrapper_class=structlog.stdlib.BoundLogger,
-        context_class=dict,
-        logger_factory=structlog.stdlib.LoggerFactory(),
-        cache_logger_on_first_use=True,
-    )
-
-    # Also add a console handler for human-readable output
-    console_handler = logging.StreamHandler()
-    console_handler.setLevel(logging.INFO)
-    console_handler.setFormatter(
-        structlog.stdlib.ProcessorFormatter(
-            processor=structlog.dev.ConsoleRenderer(),
-            foreign_pre_chain=[
-                structlog.contextvars.merge_contextvars,
-                structlog.processors.TimeStamper(fmt="%H:%M:%S", utc=False),
-                structlog.processors.add_log_level,
-                structlog.processors.StackInfoRenderer(),
-                structlog.processors.format_exc_info,
-            ],
-        )
-    )
-    stdlib_root.addHandler(console_handler)
-
-
 async def run_daemon(config: Config | None = None) -> None:
     """Run the daemon until shutdown.
 
@@ -856,7 +721,7 @@ async def run_daemon(config: Config | None = None) -> None:
         config = Config.load()
 
     # Setup dual logging: console (human-readable) + file (JSON Lines)
-    _setup_logging(config)
+    rlog.configure(config)
 
     daemon = Daemon(config)
 

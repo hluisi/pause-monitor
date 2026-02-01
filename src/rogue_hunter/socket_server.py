@@ -14,13 +14,13 @@ import json
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-import structlog
+from rogue_hunter import logging as rlog
 
 if TYPE_CHECKING:
     from rogue_hunter.collector import ProcessSamples
     from rogue_hunter.ringbuffer import RingBuffer
 
-log = structlog.get_logger()
+log = rlog.get_structlog()
 
 
 class SocketServer:
@@ -70,7 +70,7 @@ class SocketServer:
         os.chmod(self.socket_path, stat.S_IRWXU | stat.S_IRWXG | stat.S_IRWXO)
 
         self._running = True
-        log.info("socket_server_started", path=str(self.socket_path))
+        rlog.socket_listening(str(self.socket_path))
 
     async def stop(self) -> None:
         """Stop the socket server."""
@@ -94,7 +94,7 @@ class SocketServer:
         if self.socket_path.exists():
             self.socket_path.unlink()
 
-        log.info("socket_server_stopped", path=str(self.socket_path))
+        rlog.socket_stopped()
 
     async def broadcast(self, samples: ProcessSamples) -> None:
         """Broadcast sample to all connected TUI clients.
@@ -171,7 +171,7 @@ class SocketServer:
         - TUI → Daemon: receives JSON messages (type: "log", etc.)
         """
         self._clients.add(writer)
-        log.info("tui_connected", clients=len(self._clients))
+        rlog.client_connected(len(self._clients))
 
         try:
             # Send initial state with ring buffer history for sparkline
@@ -197,7 +197,7 @@ class SocketServer:
                         msg = json.loads(line.decode())
                         self._handle_client_message(msg)
                     except json.JSONDecodeError:
-                        log.warning("invalid_client_message", raw=line[:100])
+                        rlog.invalid_client_message()
 
                 except TimeoutError:
                     continue  # No message, check running flag and loop
@@ -210,4 +210,4 @@ class SocketServer:
                 await writer.wait_closed()
             except Exception:
                 pass
-            log.info("tui_disconnected", clients=len(self._clients))
+            rlog.client_disconnected(len(self._clients))
