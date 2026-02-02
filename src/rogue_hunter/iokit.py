@@ -85,6 +85,16 @@ if _IOKIT_AVAILABLE and _iokit and _cf:
     ]
     _iokit.IORegistryEntryCreateCFProperty.restype = CFTypeRef
 
+    _iokit.IORegistryEntryGetChildIterator.argtypes = [
+        io_registry_entry_t,
+        ctypes.c_char_p,  # plane name
+        POINTER(io_iterator_t),
+    ]
+    _iokit.IORegistryEntryGetChildIterator.restype = c_int
+
+    _iokit.IOObjectGetClass.argtypes = [io_object_t, ctypes.c_char_p]
+    _iokit.IOObjectGetClass.restype = c_int
+
     # CoreFoundation functions
     _cf.CFStringCreateWithCString.argtypes = [c_void_p, ctypes.c_char_p, c_uint32]
     _cf.CFStringCreateWithCString.restype = CFStringRef
@@ -199,10 +209,13 @@ _PID_PATTERN = re.compile(r"pid\s+(\d+)")
 def get_gpu_usage() -> dict[int, int]:
     """Get per-process GPU time from IORegistry.
 
-    Scans AGXDeviceUserClient entries to find GPU usage per process.
-    Each GPU-using process has an entry with:
+    Finds AGXAccelerator service and iterates its AGXDeviceUserClient children
+    to find GPU usage per process. Each GPU-using process has an entry with:
     - IOUserClientCreator: "pid 410, WindowServer"
     - AppUsage: [{accumulatedGPUTime: nanoseconds, ...}]
+
+    Note: AGXDeviceUserClient entries are not registered services, so we must
+    find them via the AGXAccelerator parent rather than IOServiceMatching.
 
     Returns:
         Dictionary mapping PID to cumulative GPU time in nanoseconds.
@@ -218,8 +231,8 @@ def get_gpu_usage() -> dict[int, int]:
 
     result: dict[int, int] = {}
 
-    # Get matching services for AGXDeviceUserClient
-    matching = _iokit.IOServiceMatching(b"AGXDeviceUserClient")
+    # Find AGXAccelerator (the GPU device) - this IS a registered service
+    matching = _iokit.IOServiceMatching(b"AGXAccelerator")
     if not matching:
         return {}
 
@@ -236,73 +249,100 @@ def get_gpu_usage() -> dict[int, int]:
         gpu_time_key = _cfstr("accumulatedGPUTime")
 
         try:
-            # Iterate through all AGXDeviceUserClient entries
+            # Iterate through all AGXAccelerator entries (usually just one)
             while True:
-                service = _iokit.IOIteratorNext(iterator)
-                if not service:
+                accelerator = _iokit.IOIteratorNext(iterator)
+                if not accelerator:
                     break
 
                 try:
-                    # Get IOUserClientCreator property (e.g., "pid 410, WindowServer")
-                    creator_ref = _iokit.IORegistryEntryCreateCFProperty(
-                        service, creator_key, None, 0
+                    # Get child iterator for the IOService plane
+                    child_iterator = io_iterator_t()
+                    kr = _iokit.IORegistryEntryGetChildIterator(
+                        accelerator, b"IOService", byref(child_iterator)
                     )
-                    if not creator_ref:
+                    if kr != 0 or not child_iterator.value:
                         continue
 
                     try:
-                        if not _is_cf_string(creator_ref):
-                            continue
-                        creator_str = _cfstr_to_str(creator_ref)
-                        if not creator_str:
-                            continue
+                        # Iterate through children looking for AGXDeviceUserClient
+                        while True:
+                            child = _iokit.IOIteratorNext(child_iterator)
+                            if not child:
+                                break
 
-                        # Extract PID from creator string
-                        match = _PID_PATTERN.search(creator_str)
-                        if not match:
-                            continue
-                        pid = int(match.group(1))
-
-                        # Get AppUsage array
-                        usage_ref = _iokit.IORegistryEntryCreateCFProperty(
-                            service, usage_key, None, 0
-                        )
-                        if not usage_ref:
-                            continue
-
-                        try:
-                            if not _is_cf_array(usage_ref):
-                                continue
-
-                            # Get first element of AppUsage array (there's usually just one)
-                            count = _cf.CFArrayGetCount(usage_ref)
-                            if count == 0:
-                                continue
-
-                            # Sum up all GPU times in the array (usually just one entry)
-                            total_gpu_time = 0
-                            for i in range(count):
-                                usage_dict = _cf.CFArrayGetValueAtIndex(usage_ref, i)
-                                if not usage_dict or not _is_cf_dict(usage_dict):
+                            try:
+                                # Check if this child is AGXDeviceUserClient
+                                classname = ctypes.create_string_buffer(128)
+                                _iokit.IOObjectGetClass(child, classname)
+                                if classname.value != b"AGXDeviceUserClient":
                                     continue
 
-                                gpu_time_ref = _cf.CFDictionaryGetValue(usage_dict, gpu_time_key)
-                                if gpu_time_ref and _is_cf_number(gpu_time_ref):
-                                    gpu_time = _get_cf_number_int64(gpu_time_ref)
-                                    if gpu_time is not None:
-                                        total_gpu_time += gpu_time
+                                # Get IOUserClientCreator property
+                                creator_ref = _iokit.IORegistryEntryCreateCFProperty(
+                                    child, creator_key, None, 0
+                                )
+                                if not creator_ref:
+                                    continue
 
-                            if total_gpu_time > 0:
-                                # A process might have multiple AGXDeviceUserClient entries
-                                # (e.g., multiple GPU contexts), so accumulate
-                                result[pid] = result.get(pid, 0) + total_gpu_time
+                                try:
+                                    if not _is_cf_string(creator_ref):
+                                        continue
+                                    creator_str = _cfstr_to_str(creator_ref)
+                                    if not creator_str:
+                                        continue
 
-                        finally:
-                            _cf.CFRelease(usage_ref)
+                                    # Extract PID from creator string
+                                    match = _PID_PATTERN.search(creator_str)
+                                    if not match:
+                                        continue
+                                    pid = int(match.group(1))
+
+                                    # Get AppUsage array
+                                    usage_ref = _iokit.IORegistryEntryCreateCFProperty(
+                                        child, usage_key, None, 0
+                                    )
+                                    if not usage_ref:
+                                        continue
+
+                                    try:
+                                        if not _is_cf_array(usage_ref):
+                                            continue
+
+                                        count = _cf.CFArrayGetCount(usage_ref)
+                                        if count == 0:
+                                            continue
+
+                                        # Sum up all GPU times in the array
+                                        total_gpu_time = 0
+                                        for i in range(count):
+                                            usage_dict = _cf.CFArrayGetValueAtIndex(usage_ref, i)
+                                            if not usage_dict or not _is_cf_dict(usage_dict):
+                                                continue
+
+                                            gpu_time_ref = _cf.CFDictionaryGetValue(
+                                                usage_dict, gpu_time_key
+                                            )
+                                            if gpu_time_ref and _is_cf_number(gpu_time_ref):
+                                                gpu_time = _get_cf_number_int64(gpu_time_ref)
+                                                if gpu_time is not None:
+                                                    total_gpu_time += gpu_time
+
+                                        if total_gpu_time > 0:
+                                            # A process might have multiple entries
+                                            # (multiple GPU contexts), so accumulate
+                                            result[pid] = result.get(pid, 0) + total_gpu_time
+
+                                    finally:
+                                        _cf.CFRelease(usage_ref)
+                                finally:
+                                    _cf.CFRelease(creator_ref)
+                            finally:
+                                _iokit.IOObjectRelease(child)
                     finally:
-                        _cf.CFRelease(creator_ref)
+                        _iokit.IOObjectRelease(child_iterator)
                 finally:
-                    _iokit.IOObjectRelease(service)
+                    _iokit.IOObjectRelease(accelerator)
 
         finally:
             _cf.CFRelease(creator_key)
