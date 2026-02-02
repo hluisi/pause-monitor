@@ -534,8 +534,8 @@ class ForensicsCapture:
             log.info("tailspin_parsed", process_count=len(processes))
             return "success"
 
-        except Exception as e:
-            log.warning("tailspin_decode_failed", error=str(e))
+        except Exception:
+            log.warning("tailspin_decode_failed", exc_info=True)
             return "failed"
 
     def _process_logs(
@@ -576,8 +576,8 @@ class ForensicsCapture:
             log.info("logs_parsed", entry_count=len(entries))
             return "success"
 
-        except Exception as e:
-            log.warning("logs_parse_failed", error=str(e))
+        except Exception:
+            log.warning("logs_parse_failed", exc_info=True)
             return "failed"
 
     def _store_buffer_context(

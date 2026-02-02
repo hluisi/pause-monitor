@@ -140,12 +140,11 @@ class Daemon:
             )
             capture_id = await capture.capture_and_store(contents, trigger)
             rlog.forensics_captured(event_id, capture_id)
-        except Exception as e:
+        except Exception:
             log.exception(
                 "forensics_callback_failed",
                 event_id=event_id,
                 trigger=trigger,
-                error=str(e),
             )
 
     async def _init_database(self) -> None:
@@ -604,6 +603,7 @@ class Daemon:
                 rlog.main_loop_cancelled()
                 break
             except Exception as e:
+                log.warning("sample_failed", exc_info=True)
                 rlog.sample_failed(str(e))
                 # Wait briefly before retry, but exit immediately if shutdown
                 try:
@@ -629,8 +629,8 @@ async def run_daemon(config: Config | None = None) -> None:
 
     try:
         await daemon.start()
-    except Exception as e:
-        log.exception("daemon_crashed", error=str(e))
+    except Exception:
+        log.exception("daemon_crashed")
         raise
     finally:
         await daemon.stop()
