@@ -59,7 +59,7 @@ class ProcessTracker:
             boot_time: System boot time for identifying this boot session
             on_forensics_trigger: Optional async callback for forensics capture.
                                   Called with (event_id, trigger_reason) when a process
-                                  enters high/critical band or escalates into it.
+                                  enters or escalates into the configured forensics_band.
         """
         self.conn = conn
         self.bands = bands
@@ -100,6 +100,13 @@ class ProcessTracker:
             return self.bands.medium_checkpoint_samples
         # low band
         return 0
+
+    def _should_trigger_forensics(self, band: str) -> bool:
+        """Check if band should trigger forensics capture."""
+        forensics_band = self.bands.forensics_band
+        forensics_threshold = self.bands.get_threshold(forensics_band)
+        band_threshold = self.bands.get_threshold(band)
+        return band_threshold >= forensics_threshold
 
     def update(self, scores: list[ProcessScore]) -> None:
         """Update tracking with new scores."""
@@ -194,8 +201,8 @@ class ProcessTracker:
             band=band,
         )
 
-        # Trigger forensics if entering high or critical band
-        if band in ("high", "critical") and self._on_forensics_trigger:
+        # Trigger forensics if entering forensics band (default: critical)
+        if self._should_trigger_forensics(band) and self._on_forensics_trigger:
             asyncio.create_task(self._on_forensics_trigger(event_id, f"band_entry_{band}"))
 
     def _close_event(
@@ -259,8 +266,10 @@ class ProcessTracker:
                 new_band=band,
             )
 
-            # Trigger forensics on escalation INTO high/critical (from lower band)
-            if band in ("high", "critical") and old_band not in ("high", "critical"):
+            # Trigger forensics on escalation INTO forensics band (from lower band)
+            should_trigger = self._should_trigger_forensics(band)
+            was_already_forensics = self._should_trigger_forensics(old_band)
+            if should_trigger and not was_already_forensics:
                 if self._on_forensics_trigger:
                     asyncio.create_task(
                         self._on_forensics_trigger(tracked.event_id, f"peak_escalation_{band}")

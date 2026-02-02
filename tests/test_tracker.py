@@ -713,3 +713,112 @@ def test_critical_band_checkpoints_every_sample(tmp_path):
     assert tracker.tracked[123].samples_since_checkpoint == 0
 
     conn.close()
+
+
+async def test_forensics_only_at_configured_band(tmp_path):
+    """Forensics triggers only at forensics_band from config."""
+    import asyncio
+
+    from rogue_hunter.config import BandsConfig
+    from rogue_hunter.storage import get_connection, init_database
+    from rogue_hunter.tracker import ProcessTracker
+
+    db_path = tmp_path / "test.db"
+    init_database(db_path)
+    conn = get_connection(db_path)
+
+    # Track forensics trigger calls
+    forensics_calls = []
+
+    async def on_forensics_trigger(event_id: int, reason: str) -> None:
+        forensics_calls.append((event_id, reason))
+
+    # Default forensics_band="critical" (threshold=70)
+    bands = BandsConfig()
+    tracker = ProcessTracker(
+        conn, bands, boot_time=1706000000, on_forensics_trigger=on_forensics_trigger
+    )
+
+    # High band (score=55, threshold=50) should NOT trigger forensics
+    tracker.update([make_score(pid=123, score=55, band="high", captured_at=1706000100.0)])
+    await asyncio.sleep(0)  # Let tasks run
+    assert len(forensics_calls) == 0, "High band should not trigger forensics"
+
+    # Critical band (score=75, threshold=70) SHOULD trigger forensics
+    tracker.update([make_score(pid=456, score=75, band="critical", captured_at=1706000101.0)])
+    await asyncio.sleep(0)  # Let tasks run
+    assert len(forensics_calls) == 1, "Critical band should trigger forensics"
+    assert "band_entry_critical" in forensics_calls[0][1]
+
+    conn.close()
+
+
+async def test_forensics_on_escalation_to_configured_band(tmp_path):
+    """Forensics triggers when escalating INTO forensics_band."""
+    import asyncio
+
+    from rogue_hunter.config import BandsConfig
+    from rogue_hunter.storage import get_connection, init_database
+    from rogue_hunter.tracker import ProcessTracker
+
+    db_path = tmp_path / "test.db"
+    init_database(db_path)
+    conn = get_connection(db_path)
+
+    # Track forensics trigger calls
+    forensics_calls = []
+
+    async def on_forensics_trigger(event_id: int, reason: str) -> None:
+        forensics_calls.append((event_id, reason))
+
+    # Default forensics_band="critical"
+    bands = BandsConfig()
+    tracker = ProcessTracker(
+        conn, bands, boot_time=1706000000, on_forensics_trigger=on_forensics_trigger
+    )
+
+    # Start at high band (score=55) - no forensics
+    tracker.update([make_score(pid=123, score=55, band="high", captured_at=1706000100.0)])
+    await asyncio.sleep(0)
+    assert len(forensics_calls) == 0, "Starting at high band should not trigger forensics"
+
+    # Escalate to critical (score=75) - forensics triggered
+    tracker.update([make_score(pid=123, score=75, band="critical", captured_at=1706000101.0)])
+    await asyncio.sleep(0)
+    assert len(forensics_calls) == 1, "Escalation to critical should trigger forensics"
+    assert "peak_escalation_critical" in forensics_calls[0][1]
+
+    conn.close()
+
+
+async def test_forensics_configurable_to_high(tmp_path):
+    """Forensics can be configured to trigger at high band."""
+    import asyncio
+
+    from rogue_hunter.config import BandsConfig
+    from rogue_hunter.storage import get_connection, init_database
+    from rogue_hunter.tracker import ProcessTracker
+
+    db_path = tmp_path / "test.db"
+    init_database(db_path)
+    conn = get_connection(db_path)
+
+    # Track forensics trigger calls
+    forensics_calls = []
+
+    async def on_forensics_trigger(event_id: int, reason: str) -> None:
+        forensics_calls.append((event_id, reason))
+
+    # Configure forensics_band="high" (threshold=50)
+    bands = BandsConfig(forensics_band="high")
+    tracker = ProcessTracker(
+        conn, bands, boot_time=1706000000, on_forensics_trigger=on_forensics_trigger
+    )
+
+    # High band (score=55) SHOULD now trigger forensics
+    tracker.update([make_score(pid=123, score=55, band="high", captured_at=1706000100.0)])
+    await asyncio.sleep(0)
+    assert len(forensics_calls) == 1, "High band should trigger forensics with forensics_band=high"
+    assert "band_entry_high" in forensics_calls[0][1]
+
+    conn.close()
