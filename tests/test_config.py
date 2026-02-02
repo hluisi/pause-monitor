@@ -9,8 +9,10 @@ from rogue_hunter.config import (
     NormalizationConfig,
     PidColors,
     ProcessStateColors,
+    ResourceWeights,
     RetentionConfig,
     RogueSelectionConfig,
+    ScoringConfig,
     SparklineConfig,
     StateMultipliers,
     StatusColors,
@@ -413,6 +415,101 @@ def test_state_multipliers_defaults():
     assert mult.stopped < mult.running
     # Zombie = 0.0 (dead, metrics are stale)
     assert mult.zombie == 0.0
+
+
+# =============================================================================
+# Resource Weights Configuration Tests
+# =============================================================================
+
+
+def test_resource_weights_defaults():
+    """Resource weights have sensible Apple-style defaults."""
+    weights = ResourceWeights()
+
+    # GPU weighted higher than CPU (Apple model)
+    assert weights.gpu > weights.cpu
+    # Wakeups penalized
+    assert weights.wakeups > 0
+    # All weights are positive
+    assert all(
+        w > 0 for w in [weights.cpu, weights.gpu, weights.memory, weights.disk_io, weights.wakeups]
+    )
+
+
+def test_resource_weights_in_scoring_config():
+    """ResourceWeights accessible via ScoringConfig."""
+    scoring = ScoringConfig()
+
+    assert hasattr(scoring, "resource_weights")
+    assert scoring.resource_weights.cpu > 0
+
+
+def test_active_process_thresholds_defaults():
+    """Active process thresholds have defaults."""
+    scoring = ScoringConfig()
+
+    assert hasattr(scoring, "active_min_cpu")
+    assert hasattr(scoring, "active_min_memory_mb")
+    assert hasattr(scoring, "active_min_disk_io")
+    # Defaults should be small but non-zero
+    assert scoring.active_min_cpu >= 0
+    assert scoring.active_min_memory_mb >= 0
+    assert scoring.active_min_disk_io >= 0
+
+
+def test_config_load_resource_weights(tmp_path):
+    """Resource weights load from TOML."""
+    toml_content = """
+[scoring.resource_weights]
+cpu = 1.5
+gpu = 4.0
+memory = 1.0
+disk_io = 1.0
+wakeups = 2.0
+"""
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(toml_content)
+
+    config = Config.load(config_file)
+
+    assert config.scoring.resource_weights.cpu == 1.5
+    assert config.scoring.resource_weights.gpu == 4.0
+
+
+def test_config_load_active_thresholds(tmp_path):
+    """Active process thresholds load from TOML."""
+    toml_content = """
+[scoring]
+active_min_cpu = 0.5
+active_min_memory_mb = 20.0
+active_min_disk_io = 1000.0
+"""
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(toml_content)
+
+    config = Config.load(config_file)
+
+    assert config.scoring.active_min_cpu == 0.5
+    assert config.scoring.active_min_memory_mb == 20.0
+    assert config.scoring.active_min_disk_io == 1000.0
+
+
+def test_config_load_partial_resource_weights(tmp_path):
+    """Config.load() uses defaults for missing resource weight fields."""
+    config_file = tmp_path / "config.toml"
+    config_file.write_text("""
+[scoring.resource_weights]
+gpu = 5.0
+""")
+
+    config = Config.load(config_file)
+    defaults = ResourceWeights()
+    # Specified value
+    assert config.scoring.resource_weights.gpu == 5.0
+    # Defaults for unspecified
+    assert config.scoring.resource_weights.cpu == defaults.cpu
+    assert config.scoring.resource_weights.memory == defaults.memory
+    assert config.scoring.resource_weights.wakeups == defaults.wakeups
 
 
 # =============================================================================

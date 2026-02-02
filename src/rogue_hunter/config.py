@@ -99,6 +99,22 @@ class StateMultipliers:
 
 
 @dataclass
+class ResourceWeights:
+    """Weights for each resource type in scoring (Apple-style model).
+
+    Higher weight = more impact on score.
+    GPU weighted higher because GPU work is intensive.
+    Wakeups penalized because they cause system-wide disruption.
+    """
+
+    cpu: float = 1.0
+    gpu: float = 3.0  # GPU work is intensive
+    memory: float = 1.0
+    disk_io: float = 1.0
+    wakeups: float = 2.0  # Penalized for system disruption
+
+
+@dataclass
 class NormalizationConfig:
     """Maximum values for normalizing metrics to 0-1 scale.
 
@@ -140,12 +156,17 @@ class NormalizationConfig:
 class ScoringConfig:
     """Scoring configuration.
 
-    Uses 4-category scoring (blocking, contention, pressure, efficiency).
-    Weights are hardcoded: 40%, 30%, 20%, 10%.
+    Contains resource weights, normalization thresholds, state multipliers,
+    and active process detection thresholds.
     """
 
+    resource_weights: ResourceWeights = field(default_factory=ResourceWeights)
     state_multipliers: StateMultipliers = field(default_factory=StateMultipliers)
     normalization: NormalizationConfig = field(default_factory=NormalizationConfig)
+    # Thresholds for counting a process as "active" for fair share calculation
+    active_min_cpu: float = 0.1  # Minimum CPU % to be considered active
+    active_min_memory_mb: float = 10.0  # Minimum memory MB to be considered active
+    active_min_disk_io: float = 0.0  # Minimum disk I/O bytes/sec (0 = any disk activity counts)
 
 
 @dataclass
@@ -477,14 +498,24 @@ def _load_bands_config(data: dict) -> BandsConfig:
 
 def _load_scoring_config(data: dict) -> ScoringConfig:
     """Load scoring config from TOML data."""
+    weights_data = data.get("resource_weights", {})
     state_mult_data = data.get("state_multipliers", {})
     norm_data = data.get("normalization", {})
 
     # Use dataclass instances as single source of truth for defaults
-    m = StateMultipliers()
-    n = NormalizationConfig()
+    defaults = ScoringConfig()
+    w = defaults.resource_weights
+    m = defaults.state_multipliers
+    n = defaults.normalization
 
     return ScoringConfig(
+        resource_weights=ResourceWeights(
+            cpu=weights_data.get("cpu", w.cpu),
+            gpu=weights_data.get("gpu", w.gpu),
+            memory=weights_data.get("memory", w.memory),
+            disk_io=weights_data.get("disk_io", w.disk_io),
+            wakeups=weights_data.get("wakeups", w.wakeups),
+        ),
         state_multipliers=StateMultipliers(
             idle=state_mult_data.get("idle", m.idle),
             sleeping=state_mult_data.get("sleeping", m.sleeping),
@@ -510,6 +541,9 @@ def _load_scoring_config(data: dict) -> ScoringConfig:
             ipc_min=norm_data.get("ipc_min", n.ipc_min),
             zombie_children=norm_data.get("zombie_children", n.zombie_children),
         ),
+        active_min_cpu=data.get("active_min_cpu", defaults.active_min_cpu),
+        active_min_memory_mb=data.get("active_min_memory_mb", defaults.active_min_memory_mb),
+        active_min_disk_io=data.get("active_min_disk_io", defaults.active_min_disk_io),
     )
 
 
