@@ -308,7 +308,7 @@ def count_active_processes(processes: list[dict], config: ScoringConfig) -> int:
     Returns at least 1 to avoid division by zero in fair share calculation.
     """
     count = 0
-    mem_threshold_bytes = config.active_min_memory_mb * 1_000_000
+    mem_threshold_bytes = config.active_min_memory_mb * 1_048_576  # MiB (binary)
 
     for proc in processes:
         # Must be non-idle
