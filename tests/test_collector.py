@@ -562,3 +562,132 @@ def test_count_active_processes_minimum_one():
     count = count_active_processes(processes, config)
 
     assert count == 1  # Minimum of 1
+
+
+# =============================================================================
+# Task 6: Fair share calculation tests
+# =============================================================================
+
+
+def test_calculate_resource_shares_basic():
+    """Resource shares are calculated as multiples of fair share."""
+    from rogue_hunter.collector import calculate_resource_shares
+
+    processes = [
+        {
+            "pid": 1,
+            "cpu": 50.0,
+            "gpu_time_rate": 0,
+            "mem": 1_000_000_000,
+            "disk_io_rate": 1000,
+            "wakeups_rate": 10,
+        },
+        {
+            "pid": 2,
+            "cpu": 50.0,
+            "gpu_time_rate": 0,
+            "mem": 1_000_000_000,
+            "disk_io_rate": 1000,
+            "wakeups_rate": 10,
+        },
+    ]
+    active_count = 2
+
+    shares = calculate_resource_shares(processes, active_count)
+
+    # Each process uses 50% of total CPU (50 / 100 total)
+    # Fair share = 1/2 = 50%
+    # Share ratio = 50% / 50% = 1.0 (exactly fair)
+    assert shares[1]["cpu_share"] == 1.0
+    assert shares[2]["cpu_share"] == 1.0
+
+
+def test_calculate_resource_shares_disproportionate():
+    """Process using more than fair share has share > 1."""
+    from rogue_hunter.collector import calculate_resource_shares
+
+    processes = [
+        {
+            "pid": 1,
+            "cpu": 90.0,
+            "gpu_time_rate": 0,
+            "mem": 500_000_000,
+            "disk_io_rate": 0,
+            "wakeups_rate": 0,
+        },
+        {
+            "pid": 2,
+            "cpu": 10.0,
+            "gpu_time_rate": 0,
+            "mem": 500_000_000,
+            "disk_io_rate": 0,
+            "wakeups_rate": 0,
+        },
+    ]
+    active_count = 2
+
+    shares = calculate_resource_shares(processes, active_count)
+
+    # Process 1: 90% of 100% total = 90% usage
+    # Fair share = 50%
+    # Share ratio = 90% / 50% = 1.8
+    assert shares[1]["cpu_share"] == 1.8
+    # Process 2: 10% / 50% = 0.2
+    assert shares[2]["cpu_share"] == 0.2
+
+
+def test_calculate_resource_shares_zero_total():
+    """When total resource is zero, all shares are zero."""
+    from rogue_hunter.collector import calculate_resource_shares
+
+    processes = [
+        {
+            "pid": 1,
+            "cpu": 0,
+            "gpu_time_rate": 0,
+            "mem": 1_000_000,
+            "disk_io_rate": 0,
+            "wakeups_rate": 0,
+        },
+        {
+            "pid": 2,
+            "cpu": 0,
+            "gpu_time_rate": 0,
+            "mem": 1_000_000,
+            "disk_io_rate": 0,
+            "wakeups_rate": 0,
+        },
+    ]
+    active_count = 2
+
+    shares = calculate_resource_shares(processes, active_count)
+
+    # No CPU usage, so CPU share is 0
+    assert shares[1]["cpu_share"] == 0.0
+    assert shares[2]["cpu_share"] == 0.0
+
+
+def test_calculate_resource_shares_all_resources():
+    """Shares calculated for all resource types."""
+    from rogue_hunter.collector import calculate_resource_shares
+
+    processes = [
+        {
+            "pid": 1,
+            "cpu": 100,
+            "gpu_time_rate": 50,
+            "mem": 2_000_000_000,
+            "disk_io_rate": 5000,
+            "wakeups_rate": 100,
+        },
+    ]
+    active_count = 1
+
+    shares = calculate_resource_shares(processes, active_count)
+
+    # Single process = uses 100% of all resources = 1.0 share (exactly fair when alone)
+    assert shares[1]["cpu_share"] == 1.0
+    assert shares[1]["gpu_share"] == 1.0
+    assert shares[1]["mem_share"] == 1.0
+    assert shares[1]["disk_share"] == 1.0
+    assert shares[1]["wakeups_share"] == 1.0

@@ -330,6 +330,54 @@ def count_active_processes(processes: list[dict], config: ScoringConfig) -> int:
     return max(1, count)  # Minimum 1 to avoid division by zero
 
 
+def calculate_resource_shares(
+    processes: list[dict],
+    active_count: int,
+) -> dict[int, dict[str, float]]:
+    """Calculate resource shares for each process.
+
+    For each resource type, calculates:
+    1. Total system usage across all processes
+    2. Fair share = 1 / active_count (as a fraction of total)
+    3. Each process's share ratio = (process usage / total) / fair_share
+
+    A share of 1.0 means the process uses exactly its fair share.
+    A share of 10.0 means the process uses 10x its fair share.
+
+    Returns dict mapping PID to dict of resource shares.
+    """
+    fair_share = 1.0 / active_count
+
+    # Calculate totals
+    total_cpu = sum(p.get("cpu", 0) for p in processes)
+    total_gpu = sum(p.get("gpu_time_rate", 0) for p in processes)
+    total_mem = sum(p.get("mem", 0) for p in processes)
+    total_disk = sum(p.get("disk_io_rate", 0) for p in processes)
+    total_wakeups = sum(p.get("wakeups_rate", 0) for p in processes)
+
+    result = {}
+    for proc in processes:
+        pid = proc["pid"]
+
+        # Calculate usage fraction for each resource (0.0 to 1.0)
+        cpu_fraction = proc.get("cpu", 0) / total_cpu if total_cpu > 0 else 0
+        gpu_fraction = proc.get("gpu_time_rate", 0) / total_gpu if total_gpu > 0 else 0
+        mem_fraction = proc.get("mem", 0) / total_mem if total_mem > 0 else 0
+        disk_fraction = proc.get("disk_io_rate", 0) / total_disk if total_disk > 0 else 0
+        wakeups_fraction = proc.get("wakeups_rate", 0) / total_wakeups if total_wakeups > 0 else 0
+
+        # Calculate share ratio (multiples of fair share)
+        result[pid] = {
+            "cpu_share": cpu_fraction / fair_share if fair_share > 0 else 0,
+            "gpu_share": gpu_fraction / fair_share if fair_share > 0 else 0,
+            "mem_share": mem_fraction / fair_share if fair_share > 0 else 0,
+            "disk_share": disk_fraction / fair_share if fair_share > 0 else 0,
+            "wakeups_share": wakeups_fraction / fair_share if fair_share > 0 else 0,
+        }
+
+    return result
+
+
 @dataclass
 class _PrevSample:
     """Previous sample state for delta calculations.
