@@ -15,6 +15,21 @@ def test_tui_app_starts_without_crash(tmp_path):
     assert app is not None
 
 
+def test_format_share():
+    """format_share displays resource share values compactly."""
+    from rogue_hunter.tui.app import format_share
+
+    # Test various ranges
+    assert format_share(150.0) == "150x"  # >= 100: int
+    assert format_share(100.0) == "100x"  # >= 100: int
+    assert format_share(50.5) == "50x"  # >= 10: .0f
+    assert format_share(10.0) == "10x"  # >= 10: .0f
+    assert format_share(5.5) == "5.5x"  # >= 1: .1f
+    assert format_share(1.0) == "1.0x"  # >= 1: .1f
+    assert format_share(0.5) == "0.50x"  # < 1: .2f
+    assert format_share(0.05) == "0.05x"  # < 1: .2f
+
+
 def test_format_dominant_info():
     """format_dominant_info displays dominant_resource with disproportionality."""
     from rogue_hunter.tui.app import format_dominant_info

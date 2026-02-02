@@ -1,6 +1,6 @@
 # TUI Layout Reference
 
-**Last updated:** 2026-01-29
+**Last updated:** 2026-02-02
 
 ---
 
@@ -18,9 +18,9 @@
 ├─────────────────────────────────────────────────────────────────┤
 │                       PROCESS TABLE                              │
 │  ┌─────────────────────────────────────────────────────────────┐ │
-│  │ [trend] Process  Score  CPU%  Mem  Pgin  CSW  State  Why    │ │
-│  │   ●     Safari     45   12.3  2GB   50   100   run   cpu    │ │
-│  │   ▲     Chrome     38    8.1  1GB   20    80   run   mem    │ │
+│  │ [trend] PID Process Score CPU GPU MEM DISK WAKE State Dom   │ │
+│  │   ●    1234 Safari    45 10x  2x  5x  0.5x 1.2x  run CPU10x │ │
+│  │   ▲    5678 Chrome    38  8x  1x  3x  0.2x 0.8x  run MEM 3x │ │
 │  │   ...                                                        │ │
 │  └─────────────────────────────────────────────────────────────┘ │
 ├─────────────────────────────────────────────────────────────────┤
@@ -90,14 +90,18 @@ The main grid showing current rogue processes.
 | Column | Description |
 |--------|-------------|
 | *(trend)* | `●` stable, `▲` rising, `▽` falling, `○` decayed |
+| **PID** | Process ID |
 | **Process** | Command name |
-| **Score** | Stress score (0-100) |
-| **CPU%** | CPU percentage |
-| **Mem** | Memory usage (formatted) |
-| **Pgin** | Page-ins |
-| **CSW** | Context switches |
+| **Score** | Final score (0-100) |
+| **CPU** | CPU share (multiple of fair share, e.g., "10.5x") |
+| **GPU** | GPU share |
+| **MEM** | Memory share |
+| **DISK** | Disk I/O share |
+| **WAKE** | Wakeups share |
 | **State** | Process state (run/idle/sleep/etc) |
-| **Why** | Categories that triggered selection |
+| **Dominant** | Highest weighted resource (e.g., "CPU 10.5x") |
+
+**Resource shares:** Values like "10x" mean the process is using 10× its fair share of that resource. Fair share = 1 / active_process_count.
 
 **Decay behavior:** Processes that drop out of rogue selection stay visible (dimmed) for a few seconds before disappearing.
 
@@ -137,7 +141,7 @@ Processes being tracked (entered elevated+ band).
 | **Process** | auto | Command name (truncated to 15 chars) |
 | **Peak** | 4 | Peak score reached |
 | **Dur** | 6 | Duration tracked |
-| **Why** | auto | Peak categories |
+| **Dominant** | 10 | Highest weighted resource (e.g., "CPU 10.5x") |
 | **Status** | 8 | `[green]active[/]` or `[dim]ended[/]` |
 
 **Tracking logic:**

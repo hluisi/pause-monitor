@@ -92,6 +92,25 @@ def format_duration(seconds: float) -> str:
         return f"{hours}h{mins}m"
 
 
+def format_share(value: float) -> str:
+    """Format a resource share value compactly.
+
+    Args:
+        value: The share value (multiple of fair share, e.g., 10.5 = 10.5× fair share).
+
+    Returns:
+        Formatted string like "10x", "1.5x", "0.8x".
+    """
+    if value >= 100:
+        return f"{int(value)}x"
+    elif value >= 10:
+        return f"{value:.0f}x"
+    elif value >= 1:
+        return f"{value:.1f}x"
+    else:
+        return f"{value:.2f}x"
+
+
 def format_dominant_info(dominant_resource: str, disproportionality: float) -> str:
     """Format dominant resource info for display.
 
@@ -102,15 +121,7 @@ def format_dominant_info(dominant_resource: str, disproportionality: float) -> s
     Returns:
         Formatted string like "CPU 10.5x" or "MEM 1.5x".
     """
-    # Format disproportionality as multiplier (100x, 10.5x, 1.5x, 0.50x)
-    if disproportionality >= 100:
-        disprop_str = f"{int(disproportionality)}x"
-    elif disproportionality >= 10:
-        disprop_str = f"{disproportionality:.0f}x"
-    elif disproportionality >= 1:
-        disprop_str = f"{disproportionality:.1f}x"
-    else:
-        disprop_str = f"{disproportionality:.2f}x"
+    disprop_str = format_share(disproportionality)
 
     # Labels for resources
     resource_labels = {
@@ -376,7 +387,9 @@ class ProcessTable(Static):
         """Set up table columns."""
         self.border_title = "TOP PROCESSES"
         self._table = self.query_one("#process-table", DataTable)
-        self._table.add_columns("", "PID", "Process", "Score", "State", "Dominant")
+        self._table.add_columns(
+            "", "PID", "Process", "Score", "CPU", "GPU", "MEM", "DISK", "WAKE", "State", "Dominant"
+        )
         self.set_disconnected()
 
     def _get_band_style(self, score: int, decayed: bool) -> str:
@@ -438,6 +451,11 @@ class ProcessTable(Static):
         pid: str,
         command: str,
         score_val: int,
+        cpu_share: float,
+        gpu_share: float,
+        mem_share: float,
+        disk_share: float,
+        wakeups_share: float,
         state: str,
         dominant_resource: str,
         disproportionality: float,
@@ -450,8 +468,9 @@ class ProcessTable(Static):
         - PID: Muted color (not competing with process name)
         - Process name: Band color based on score severity
         - Score: Bold band color
+        - Resource shares: Band color (shows what's driving the score)
         - State: Own colors based on process state severity
-        - Dominant: Shows resource and disproportionality
+        - Dominant: Shows highest weighted resource
         """
         colors = self.app.config.tui.colors
 
@@ -470,6 +489,11 @@ class ProcessTable(Static):
             Text(pid, style=pid_style),
             Text(command, style=band_style),
             Text(str(score_val), style=score_style),
+            Text(format_share(cpu_share), style=band_style),
+            Text(format_share(gpu_share), style=band_style),
+            Text(format_share(mem_share), style=band_style),
+            Text(format_share(disk_share), style=band_style),
+            Text(format_share(wakeups_share), style=band_style),
             Text(state, style=state_style),
             Text(dominant_display, style=band_style),
         ]
@@ -533,6 +557,11 @@ class ProcessTable(Static):
             self._prev_scores[pid] = score
 
             # Extract resource-based scoring fields
+            cpu_share = rogue.get("cpu_share", 0.0)
+            gpu_share = rogue.get("gpu_share", 0.0)
+            mem_share = rogue.get("mem_share", 0.0)
+            disk_share = rogue.get("disk_share", 0.0)
+            wakeups_share = rogue.get("wakeups_share", 0.0)
             dominant_resource = rogue.get("dominant_resource", "cpu")
             disproportionality = rogue.get("disproportionality", 0.0)
             state = rogue["state"]
@@ -543,6 +572,11 @@ class ProcessTable(Static):
                     str(pid),
                     str(rogue.get("command", "?")),
                     score,
+                    cpu_share,
+                    gpu_share,
+                    mem_share,
+                    disk_share,
+                    wakeups_share,
                     str(state),
                     dominant_resource,
                     disproportionality,
@@ -555,7 +589,21 @@ class ProcessTable(Static):
         self.add_class("disconnected")
         if self._table:
             self._table.clear()
-            row = self._make_row("", "", "(not connected)", 0, "---", "cpu", 0.0, decayed=False)
+            row = self._make_row(
+                "",  # trend
+                "",  # pid
+                "(not connected)",  # command
+                0,  # score
+                0.0,  # cpu_share
+                0.0,  # gpu_share
+                0.0,  # mem_share
+                0.0,  # disk_share
+                0.0,  # wakeups_share
+                "---",  # state
+                "cpu",  # dominant_resource
+                0.0,  # disproportionality
+                decayed=False,
+            )
             self._table.add_row(*row)
 
 
