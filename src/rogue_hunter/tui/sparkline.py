@@ -136,11 +136,19 @@ class GradientColor:
         return _rgb_to_hex(*self._parsed[-1][1])
 
 
-class SparklineMode(Enum):
-    """Rendering mode for sparkline characters."""
+class SparklineOrientation(Enum):
+    """Vertical growth direction for sparkline bars."""
 
-    BLOCKS = "blocks"  # ▁▂▃▄▅▆▇█ - solid bars
-    BRAILLE = "braille"  # ⡀⣀⣄⣤⣦⣶⣷⣿ - dot patterns
+    NORMAL = "normal"  # Bars grow upward from bottom
+    INVERTED = "inverted"  # Bars grow downward from top
+    MIRRORED = "mirrored"  # Bars grow outward from center (waveform style)
+
+
+class SparklineDirection(Enum):
+    """Horizontal flow direction for sparkline data."""
+
+    RTL = "rtl"  # Right-to-left: newest on right, wave scrolls left (standard time series)
+    LTR = "ltr"  # Left-to-right: newest on left, wave scrolls right
 
 
 class Sparkline(Static):
@@ -163,11 +171,11 @@ class Sparkline(Static):
         ```
     """
 
-    # Character sets for each mode (9 levels: empty + 8 filled)
-    CHARS: dict[SparklineMode, str] = {
-        SparklineMode.BLOCKS: " ▁▂▃▄▅▆▇█",
-        SparklineMode.BRAILLE: " ⡀⣀⣄⣤⣦⣶⣷⣿",
-    }
+    # Braille character sets (9 levels: empty + 8 filled)
+    # Normal: fills from bottom to top (for top half of mirrored, or normal/inverted modes)
+    CHARS_NORMAL = " ⡀⣀⣄⣤⣦⣶⣷⣿"
+    # Inverted visual: fills from top to bottom (for bottom half of mirrored mode)
+    CHARS_INVERTED = " ⠁⠉⠋⠛⠟⠿⡿⣿"
     LEVELS_PER_ROW = 8
 
     DEFAULT_CSS = """
@@ -185,8 +193,8 @@ class Sparkline(Static):
         height: int = 1,
         max_value: float | None = 100,
         min_value: float = 0,
-        mode: SparklineMode = SparklineMode.BLOCKS,
-        inverted: bool = False,
+        orientation: SparklineOrientation = SparklineOrientation.NORMAL,
+        direction: SparklineDirection = SparklineDirection.RTL,
         color_func: Callable[[float], str] | None = None,
         summary_func: Callable[[Sequence[float]], float] = max,
         **kwargs,
@@ -197,8 +205,8 @@ class Sparkline(Static):
             height: Number of character rows (1-4). Each row adds 8 levels.
             max_value: Maximum value for scaling. None for auto-scale.
             min_value: Minimum value for scaling.
-            mode: Character set to use (BLOCKS or BRAILLE).
-            inverted: If True, bars grow downward from top.
+            orientation: Vertical growth direction (NORMAL, INVERTED, or MIRRORED).
+            direction: Horizontal flow direction (RTL or LTR).
             color_func: Function mapping value to Rich color string.
             summary_func: Function to summarize data chunks when width < data length.
             **kwargs: Passed to Static.__init__
@@ -207,8 +215,8 @@ class Sparkline(Static):
         self._height = max(1, min(4, height))  # Clamp to 1-4
         self._max_value = max_value
         self._min_value = min_value
-        self._mode = mode
-        self._inverted = inverted
+        self._orientation = orientation
+        self._direction = direction
         self._color_func = color_func
         self._summary_func = summary_func
         self._width = 0  # Updated on resize
@@ -248,10 +256,25 @@ class Sparkline(Static):
         if effective_max <= self._min_value:
             effective_max = self._min_value + 1.0
 
-        # Build rows (bottom to top for normal, top to bottom for inverted)
+        # Build rows (bottom to top for normal, top to bottom for inverted/mirrored)
         rows: list[Text] = [Text() for _ in range(self._height)]
 
-        for value in self.data:
+        # Calculate padding for alignment during fill phase
+        padding_count = max(0, self._width - len(self.data)) if self._width > 0 else 0
+
+        # For RTL: right-align (pad left), iterate data in order
+        # For LTR: left-align (pad right), iterate data in reverse
+        if self._direction == SparklineDirection.RTL:
+            # Add left padding first (right-align)
+            if padding_count > 0:
+                for row in rows:
+                    row.append(" " * padding_count)
+            data_iter = self.data
+        else:
+            # LTR: iterate in reverse (newest first on left)
+            data_iter = reversed(self.data)
+
+        for value in data_iter:
             level = self._scale_value(value, effective_max)
             column_chars = self._render_column(level)
             color = self._get_color(value)
@@ -263,13 +286,18 @@ class Sparkline(Static):
                 else:
                     rows[row_idx].append(char)
 
+        # For LTR: add right padding after data (left-align)
+        if self._direction == SparklineDirection.LTR and padding_count > 0:
+            for row in rows:
+                row.append(" " * padding_count)
+
         # Combine rows into final output
         # For normal: rows are bottom-to-top, so reverse for display
-        # For inverted: rows are already top-to-bottom
-        if self._inverted:
-            display_rows = rows
-        else:
+        # For inverted/mirrored: rows are already top-to-bottom
+        if self._orientation == SparklineOrientation.NORMAL:
             display_rows = list(reversed(rows))
+        else:
+            display_rows = rows
 
         # Join rows with newlines
         result = Text()
@@ -281,16 +309,27 @@ class Sparkline(Static):
         return result
 
     def _scale_value(self, value: float, effective_max: float) -> int:
-        """Scale a value to 0..(height * LEVELS_PER_ROW).
+        """Scale a value to appropriate level range.
+
+        For NORMAL/INVERTED: 0..(height * LEVELS_PER_ROW)
+        For MIRRORED: 0..(half_height * LEVELS_PER_ROW) - each half renders this independently
 
         Args:
             value: The value to scale.
             effective_max: The maximum value for scaling.
 
         Returns:
-            Integer level from 0 to (height * LEVELS_PER_ROW).
+            Integer level appropriate for the orientation.
         """
-        total_levels = self._height * self.LEVELS_PER_ROW
+        if self._orientation == SparklineOrientation.MIRRORED:
+            # Mirrored: scale to half-height levels, each half renders the same level
+            half_height = self._height // 2
+            if half_height == 0:
+                half_height = 1  # height=1 edge case
+            total_levels = half_height * self.LEVELS_PER_ROW
+        else:
+            total_levels = self._height * self.LEVELS_PER_ROW
+
         # Normalize to 0-1 range
         normalized = (value - self._min_value) / (effective_max - self._min_value)
         normalized = max(0.0, min(1.0, normalized))  # Clamp
@@ -298,20 +337,90 @@ class Sparkline(Static):
         level = int(normalized * total_levels)
         return max(0, min(total_levels, level))
 
+    def _level_to_char(self, remaining: int, inverted_visual: bool = False) -> str:
+        """Convert a remaining level count to the appropriate character.
+
+        Args:
+            remaining: Levels remaining for this row (can be negative, 0, partial, or full).
+            inverted_visual: If True, use chars that fill from top-to-bottom visually.
+
+        Returns:
+            Braille character for the level.
+        """
+        chars = self.CHARS_INVERTED if inverted_visual else self.CHARS_NORMAL
+        if remaining <= 0:
+            return chars[0]  # Empty
+        elif remaining >= self.LEVELS_PER_ROW:
+            return chars[self.LEVELS_PER_ROW]  # Full
+        else:
+            return chars[remaining]  # Partial
+
+    def _render_column_mirrored(self, level: int) -> list[str]:
+        """Render a mirrored column (waveform style - bars grow outward from center).
+
+        - Top half: normal braille (visual fills bottom-to-top, rows fill bottom-to-top)
+        - Center (odd heights): always solid if level > 0
+        - Bottom half: inverted braille (visual fills top-to-bottom, rows fill top-to-bottom)
+
+        Both halves render the same level independently - full granularity preserved.
+
+        Args:
+            level: The scaled level (0 to half_height * LEVELS_PER_ROW).
+
+        Returns:
+            List of characters in top-to-bottom order.
+        """
+        result: list[str] = [" "] * self._height
+        half_height = self._height // 2
+        has_center = self._height % 2 == 1
+
+        if self._height == 1:
+            # Edge case: height=1 is just a center row
+            result[0] = self._level_to_char(self.LEVELS_PER_ROW if level > 0 else 0)
+            return result
+
+        # Top half: rows 0..(half_height-1), normal braille (grows upward visually)
+        # Row half_height-1 is "bottom" of top half, fills first
+        for row in range(half_height):
+            row_from_bottom = half_height - 1 - row
+            levels_below = row_from_bottom * self.LEVELS_PER_ROW
+            remaining = level - levels_below
+            result[row] = self._level_to_char(remaining, inverted_visual=False)
+
+        # Center row (odd heights only): always solid if level > 0
+        if has_center:
+            center_idx = half_height
+            result[center_idx] = self._level_to_char(self.LEVELS_PER_ROW if level > 0 else 0)
+
+        # Bottom half: inverted braille (grows downward visually)
+        # Row at bottom_start fills first (closest to center)
+        bottom_start = half_height + (1 if has_center else 0)
+        for i in range(half_height):
+            row_idx = bottom_start + i
+            levels_above = i * self.LEVELS_PER_ROW
+            remaining = level - levels_above
+            result[row_idx] = self._level_to_char(remaining, inverted_visual=True)
+
+        return result
+
     def _render_column(self, level: int) -> list[str]:
         """Render a single column as list of characters.
 
         Args:
-            level: The scaled level (0 to height * LEVELS_PER_ROW).
+            level: The scaled level.
 
         Returns:
-            List of characters from bottom to top (or top to bottom if inverted).
+            List of characters (top-to-bottom for inverted/mirrored, bottom-to-top for normal).
         """
-        chars = self.CHARS[self._mode]
+        if self._orientation == SparklineOrientation.MIRRORED:
+            return self._render_column_mirrored(level)
+
+        # For inverted mode, use inverted visual characters (fill from top of cell)
+        inverted_visual = self._orientation == SparklineOrientation.INVERTED
         result: list[str] = []
 
         for row in range(self._height):
-            if self._inverted:
+            if self._orientation == SparklineOrientation.INVERTED:
                 # Inverted: fill from top down
                 # Row 0 is top, fills first
                 row_from_top = row
@@ -323,15 +432,7 @@ class Sparkline(Static):
                 levels_below = row * self.LEVELS_PER_ROW
                 remaining = level - levels_below
 
-            if remaining <= 0:
-                # Empty row
-                result.append(chars[0])
-            elif remaining >= self.LEVELS_PER_ROW:
-                # Full row
-                result.append(chars[self.LEVELS_PER_ROW])
-            else:
-                # Partial row
-                result.append(chars[remaining])
+            result.append(self._level_to_char(remaining, inverted_visual=inverted_visual))
 
         return result
 

@@ -292,12 +292,12 @@ class TUIColorsConfig:
 class SparklineConfig:
     """Configuration for the sparkline widget in the header.
 
-    The sparkline shows stress history as a mini chart using Unicode characters.
+    The sparkline shows stress history as a mini chart using Braille characters.
     """
 
     height: int = 2  # Number of character rows (1-4). Each row adds 8 vertical levels.
-    mode: str = "blocks"  # "blocks" (▁▂▃▄▅▆▇█) or "braille" (⡀⣀⣄⣤⣦⣶⣷⣿)
-    inverted: bool = False  # If True, bars grow downward from top (for "badness")
+    orientation: str = "normal"  # "normal" (up), "inverted" (down), "mirrored" (waveform)
+    direction: str = "rtl"  # "rtl" (newest right, scrolls left), "ltr" (newest left, scrolls right)
 
 
 @dataclass
@@ -593,7 +593,7 @@ def _load_tui_config(data: dict) -> TUIConfig:
         ),
         sparkline=SparklineConfig(
             height=sparkline_data.get("height", sp.height),
-            mode=sparkline_data.get("mode", sp.mode),
-            inverted=sparkline_data.get("inverted", sp.inverted),
+            orientation=sparkline_data.get("orientation", sp.orientation),
+            direction=sparkline_data.get("direction", sp.direction),
         ),
     )

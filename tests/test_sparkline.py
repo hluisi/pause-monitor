@@ -2,7 +2,12 @@
 
 import pytest
 
-from rogue_hunter.tui.sparkline import GradientColor, Sparkline, SparklineMode
+from rogue_hunter.tui.sparkline import (
+    GradientColor,
+    Sparkline,
+    SparklineDirection,
+    SparklineOrientation,
+)
 
 
 class TestSparklineScaling:
@@ -46,89 +51,99 @@ class TestSparklineScaling:
 
 
 class TestSparklineColumnRendering:
-    """Tests for single column rendering."""
+    """Tests for single column rendering with Braille characters."""
+
+    # Normal Braille chars: " ⡀⣀⣄⣤⣦⣶⣷⣿"
 
     def test_render_column_empty(self) -> None:
         """Level 0 renders as space in all rows."""
-        sparkline = Sparkline(height=2, mode=SparklineMode.BLOCKS)
+        sparkline = Sparkline(height=2)
         chars = sparkline._render_column(0)
         assert chars == [" ", " "]
 
     def test_render_column_full_bottom_only(self) -> None:
         """Level 8 fills bottom row, top empty."""
-        sparkline = Sparkline(height=2, mode=SparklineMode.BLOCKS)
+        sparkline = Sparkline(height=2)
         chars = sparkline._render_column(8)
         # chars[0] is bottom row, chars[1] is top row
-        assert chars[0] == "█"  # Bottom full
+        assert chars[0] == "⣿"  # Bottom full
         assert chars[1] == " "  # Top empty
 
     def test_render_column_partial_bottom(self) -> None:
         """Partial level fills bottom row partially."""
-        sparkline = Sparkline(height=2, mode=SparklineMode.BLOCKS)
+        sparkline = Sparkline(height=2)
         chars = sparkline._render_column(4)
-        assert chars[0] == "▄"  # Half block
+        assert chars[0] == "⣤"  # Half filled braille
         assert chars[1] == " "
 
     def test_render_column_overflow_to_top(self) -> None:
         """Level > 8 overflows to top row."""
-        sparkline = Sparkline(height=2, mode=SparklineMode.BLOCKS)
+        sparkline = Sparkline(height=2)
         chars = sparkline._render_column(12)
-        assert chars[0] == "█"  # Bottom full
-        assert chars[1] == "▄"  # Top partial (level 4)
+        assert chars[0] == "⣿"  # Bottom full
+        assert chars[1] == "⣤"  # Top partial (level 4)
 
     def test_render_column_full_both_rows(self) -> None:
         """Max level fills both rows."""
-        sparkline = Sparkline(height=2, mode=SparklineMode.BLOCKS)
+        sparkline = Sparkline(height=2)
         chars = sparkline._render_column(16)
-        assert chars[0] == "█"
-        assert chars[1] == "█"
+        assert chars[0] == "⣿"
+        assert chars[1] == "⣿"
 
 
 class TestSparklineInvertedMode:
-    """Tests for inverted rendering (bars grow downward)."""
+    """Tests for inverted rendering (bars grow downward visually)."""
+
+    # Inverted Braille chars: " ⠁⠉⠋⠛⠟⠿⡿⣿"
 
     def test_inverted_partial_fills_from_top(self) -> None:
         """In inverted mode, partial values fill from top down."""
-        sparkline = Sparkline(height=2, mode=SparklineMode.BLOCKS, inverted=True)
+        sparkline = Sparkline(height=2, orientation=SparklineOrientation.INVERTED)
         chars = sparkline._render_column(4)
-        # In inverted mode, row 0 is top, fills first
-        assert chars[0] == "▄"  # Top partial
+        # In inverted mode, row 0 is top, fills first, uses inverted visual chars
+        assert chars[0] == "⠛"  # Top partial (inverted braille - fills from top of cell)
         assert chars[1] == " "  # Bottom empty
 
     def test_inverted_overflow_fills_second_row(self) -> None:
         """Inverted overflow fills bottom row."""
-        sparkline = Sparkline(height=2, mode=SparklineMode.BLOCKS, inverted=True)
+        sparkline = Sparkline(height=2, orientation=SparklineOrientation.INVERTED)
         chars = sparkline._render_column(12)
-        assert chars[0] == "█"  # Top full
-        assert chars[1] == "▄"  # Bottom partial
+        assert chars[0] == "⣿"  # Top full
+        assert chars[1] == "⠛"  # Bottom partial (inverted braille)
 
 
-class TestSparklineModes:
-    """Tests for different character sets."""
+class TestSparklineBrailleChars:
+    """Tests for Braille character sets."""
 
-    def test_blocks_mode_uses_block_chars(self) -> None:
-        """BLOCKS mode uses solid block characters."""
-        sparkline = Sparkline(height=1, mode=SparklineMode.BLOCKS)
-        # Level 4 should be half block
-        chars = sparkline._render_column(4)
-        assert chars[0] == "▄"
-
-    def test_braille_mode_uses_braille_chars(self) -> None:
-        """BRAILLE mode uses braille dot patterns."""
-        sparkline = Sparkline(height=1, mode=SparklineMode.BRAILLE)
-        # Level 4 should be half-filled braille
+    def test_normal_braille_chars(self) -> None:
+        """Normal mode uses bottom-to-top braille chars."""
+        sparkline = Sparkline(height=1)
+        # Level 4 should be half-filled braille (bottom to top)
         chars = sparkline._render_column(4)
         assert chars[0] == "⣤"
 
-    def test_braille_empty_is_blank_braille(self) -> None:
-        """BRAILLE mode uses blank braille for empty."""
-        sparkline = Sparkline(height=1, mode=SparklineMode.BRAILLE)
+    def test_normal_braille_empty(self) -> None:
+        """Normal mode uses space for empty."""
+        sparkline = Sparkline(height=1)
         chars = sparkline._render_column(0)
         assert chars[0] == " "
 
-    def test_braille_full_is_full_braille(self) -> None:
-        """BRAILLE mode uses full braille for max."""
-        sparkline = Sparkline(height=1, mode=SparklineMode.BRAILLE)
+    def test_normal_braille_full(self) -> None:
+        """Normal mode uses full braille for max."""
+        sparkline = Sparkline(height=1)
+        chars = sparkline._render_column(8)
+        assert chars[0] == "⣿"
+
+    def test_inverted_braille_chars(self) -> None:
+        """Inverted mode uses top-to-bottom braille chars."""
+        sparkline = Sparkline(height=1, orientation=SparklineOrientation.INVERTED)
+        # Level 4 should be half-filled inverted braille (top to bottom)
+        chars = sparkline._render_column(4)
+        assert chars[0] == "⠛"
+
+    def test_inverted_braille_full(self) -> None:
+        """Inverted mode uses full braille for max (same as normal)."""
+        sparkline = Sparkline(height=1, orientation=SparklineOrientation.INVERTED)
         chars = sparkline._render_column(8)
         assert chars[0] == "⣿"
 
@@ -251,9 +266,9 @@ class TestSparklineRender:
         """Single value renders correctly."""
         sparkline = Sparkline(height=1, max_value=100)
         sparkline._width = 10
-        sparkline.data = [100]  # Max value = full block
+        sparkline.data = [100]  # Max value = full braille
         result = sparkline.render()
-        assert "█" in str(result)
+        assert "⣿" in str(result)
 
     def test_render_multirow_joins_with_newlines(self) -> None:
         """Multi-row render joins rows with newlines."""
@@ -342,3 +357,191 @@ class TestGradientColor:
         gradient = GradientColor([(0, "#000"), (100, "#fff")])
         assert gradient(0) == "#000000"
         assert gradient(100) == "#ffffff"
+
+
+class TestSparklineMirroredMode:
+    """Tests for mirrored rendering (waveform style).
+
+    Mirrored mode:
+    - Top half uses normal braille (visual fills bottom-to-top)
+    - Center row (odd heights) is always solid when level > 0
+    - Bottom half uses inverted braille (visual fills top-to-bottom)
+
+    Normal braille: " ⡀⣀⣄⣤⣦⣶⣷⣿" (fills from bottom of cell)
+    Inverted braille: " ⠁⠉⠋⠛⠟⠿⡿⣿" (fills from top of cell)
+    """
+
+    def test_mirrored_height_4_empty(self) -> None:
+        """Height=4 mirrored with level 0 is all empty."""
+        sparkline = Sparkline(height=4, orientation=SparklineOrientation.MIRRORED)
+        chars = sparkline._render_column(0)
+        assert chars == [" ", " ", " ", " "]
+
+    def test_mirrored_height_4_inner_fills_first(self) -> None:
+        """Height=4 mirrored: inner rows (1,2) fill before outer rows (0,3).
+
+        Level 4 (quarter) should partially fill inner rows only.
+        Top half (row 1) uses normal braille, bottom half (row 2) uses inverted.
+        """
+        sparkline = Sparkline(height=4, orientation=SparklineOrientation.MIRRORED)
+        chars = sparkline._render_column(4)
+        assert chars[0] == " "  # Outer top empty
+        assert chars[1] == "⣤"  # Inner top partial (normal braille)
+        assert chars[2] == "⠛"  # Inner bottom partial (inverted braille)
+        assert chars[3] == " "  # Outer bottom empty
+
+    def test_mirrored_height_4_inner_full(self) -> None:
+        """Height=4 mirrored: level 8 fills inner rows completely."""
+        sparkline = Sparkline(height=4, orientation=SparklineOrientation.MIRRORED)
+        chars = sparkline._render_column(8)
+        assert chars[0] == " "  # Outer top still empty
+        assert chars[1] == "⣿"  # Inner top full
+        assert chars[2] == "⣿"  # Inner bottom full
+        assert chars[3] == " "  # Outer bottom still empty
+
+    def test_mirrored_height_4_overflow_to_outer(self) -> None:
+        """Height=4 mirrored: level 12 overflows to outer rows."""
+        sparkline = Sparkline(height=4, orientation=SparklineOrientation.MIRRORED)
+        chars = sparkline._render_column(12)
+        assert chars[0] == "⣤"  # Outer top partial (normal braille)
+        assert chars[1] == "⣿"  # Inner top full
+        assert chars[2] == "⣿"  # Inner bottom full
+        assert chars[3] == "⠛"  # Outer bottom partial (inverted braille)
+
+    def test_mirrored_height_4_full(self) -> None:
+        """Height=4 mirrored: max level fills all rows."""
+        sparkline = Sparkline(height=4, orientation=SparklineOrientation.MIRRORED)
+        chars = sparkline._render_column(16)
+        assert chars == ["⣿", "⣿", "⣿", "⣿"]
+
+    def test_mirrored_height_3_center_always_solid(self) -> None:
+        """Height=3 mirrored: center row (1) is always solid when level > 0."""
+        sparkline = Sparkline(height=3, orientation=SparklineOrientation.MIRRORED)
+        # Any non-zero level should have center solid
+        # Top/bottom halves have 1 row each, scaling to 8 levels
+        # Level 1 means partial fill on outer rows
+        chars = sparkline._render_column(1)
+        assert chars[0] == "⡀"  # Top outer partial (normal braille level 1)
+        assert chars[1] == "⣿"  # Center always full
+        assert chars[2] == "⠁"  # Bottom outer partial (inverted braille level 1)
+
+    def test_mirrored_height_3_partial_outer(self) -> None:
+        """Height=3 mirrored: partial values fill outer rows."""
+        sparkline = Sparkline(height=3, orientation=SparklineOrientation.MIRRORED)
+        chars = sparkline._render_column(4)
+        assert chars[0] == "⣤"  # Top outer partial (normal braille)
+        assert chars[1] == "⣿"  # Center full
+        assert chars[2] == "⠛"  # Bottom outer partial (inverted braille)
+
+    def test_mirrored_height_3_full(self) -> None:
+        """Height=3 mirrored: max level fills all rows."""
+        sparkline = Sparkline(height=3, orientation=SparklineOrientation.MIRRORED)
+        chars = sparkline._render_column(8)
+        assert chars == ["⣿", "⣿", "⣿"]
+
+    def test_mirrored_height_2_symmetric(self) -> None:
+        """Height=2 mirrored: top uses normal, bottom uses inverted braille."""
+        sparkline = Sparkline(height=2, orientation=SparklineOrientation.MIRRORED)
+        chars = sparkline._render_column(4)
+        assert chars[0] == "⣤"  # Top partial (normal braille)
+        assert chars[1] == "⠛"  # Bottom partial (inverted braille)
+
+    def test_mirrored_height_2_full(self) -> None:
+        """Height=2 mirrored: max level fills both rows."""
+        sparkline = Sparkline(height=2, orientation=SparklineOrientation.MIRRORED)
+        chars = sparkline._render_column(8)
+        assert chars == ["⣿", "⣿"]
+
+    def test_mirrored_height_1_binary(self) -> None:
+        """Height=1 mirrored: acts like single center row (empty or solid)."""
+        sparkline = Sparkline(height=1, orientation=SparklineOrientation.MIRRORED)
+        chars_empty = sparkline._render_column(0)
+        assert chars_empty == [" "]
+
+        # Any non-zero should be solid (center always solid when level > 0)
+        chars_solid = sparkline._render_column(1)
+        assert chars_solid == ["⣿"]
+
+    def test_mirrored_scaling_to_half_height(self) -> None:
+        """Mirrored mode scales values to half-height levels."""
+        sparkline = Sparkline(
+            height=4,
+            max_value=100,
+            min_value=0,
+            orientation=SparklineOrientation.MIRRORED,
+        )
+        # half_height=2, so max level should be 16
+        level_max = sparkline._scale_value(100, 100)
+        assert level_max == 16
+
+        # 50% should give level 8
+        level_half = sparkline._scale_value(50, 100)
+        assert level_half == 8
+
+        # 25% should give level 4
+        level_quarter = sparkline._scale_value(25, 100)
+        assert level_quarter == 4
+
+
+class TestSparklineDirection:
+    """Tests for horizontal flow direction (RTL vs LTR)."""
+
+    def test_rtl_right_aligns_during_fill(self) -> None:
+        """RTL mode right-aligns data during fill phase (pads left)."""
+        sparkline = Sparkline(height=1, max_value=100, direction=SparklineDirection.RTL)
+        sparkline._width = 5
+        sparkline.data = [100, 100]  # 2 values, width 5
+        result = sparkline.render()
+        # Should be "   ⣿⣿" (3 spaces, then 2 full chars)
+        assert str(result) == "   ⣿⣿"
+
+    def test_ltr_left_aligns_during_fill(self) -> None:
+        """LTR mode left-aligns data during fill phase (pads right)."""
+        sparkline = Sparkline(height=1, max_value=100, direction=SparklineDirection.LTR)
+        sparkline._width = 5
+        sparkline.data = [100, 100]  # 2 values, width 5
+        result = sparkline.render()
+        # Should be "⣿⣿   " (2 full chars, then 3 spaces)
+        # Note: LTR reverses data order, so newest is on left
+        assert str(result) == "⣿⣿   "
+
+    def test_rtl_data_order_oldest_left(self) -> None:
+        """RTL mode: oldest data on left, newest on right."""
+        sparkline = Sparkline(height=1, max_value=100, direction=SparklineDirection.RTL)
+        sparkline._width = 3
+        # Values: 25% → level 2 (⣀), 50% → level 4 (⣤), 100% → level 8 (⣿)
+        sparkline.data = [25, 50, 100]
+        result = sparkline.render()
+        # Oldest (25) on left, newest (100) on right
+        assert str(result) == "⣀⣤⣿"
+
+    def test_ltr_data_order_newest_left(self) -> None:
+        """LTR mode: newest data on left, oldest on right."""
+        sparkline = Sparkline(height=1, max_value=100, direction=SparklineDirection.LTR)
+        sparkline._width = 3
+        # Values: 25% → level 2 (⣀), 50% → level 4 (⣤), 100% → level 8 (⣿)
+        sparkline.data = [25, 50, 100]
+        result = sparkline.render()
+        # Newest (100) on left, oldest (25) on right (reversed)
+        assert str(result) == "⣿⣤⣀"
+
+    def test_default_direction_is_rtl(self) -> None:
+        """Default direction is RTL."""
+        sparkline = Sparkline(height=1)
+        assert sparkline._direction == SparklineDirection.RTL
+
+    def test_direction_works_with_all_orientations(self) -> None:
+        """Direction works independently of orientation."""
+        for orientation in SparklineOrientation:
+            for direction in SparklineDirection:
+                sparkline = Sparkline(
+                    height=2,
+                    max_value=100,
+                    orientation=orientation,
+                    direction=direction,
+                )
+                sparkline._width = 3
+                sparkline.data = [50, 100]
+                # Should not raise
+                result = sparkline.render()
+                assert result is not None
