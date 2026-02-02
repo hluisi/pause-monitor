@@ -24,19 +24,26 @@ class SystemConfig:
 
 @dataclass
 class BandsConfig:
-    """Band thresholds and behavior triggers.
+    """Score band thresholds and capture behavior configuration.
 
-    Each threshold is the minimum score to enter that band.
-    Scores below `medium` are in the "low" band (not tracked).
+    Band behaviors:
+    - Low (0 to medium-1): No persistence, ring buffer only
+    - Medium (medium to elevated-1): Checkpoint every medium_checkpoint_samples
+    - Elevated (elevated to high-1): Checkpoint every elevated_checkpoint_samples
+    - High (high to critical-1): Every sample persisted
+    - Critical (critical to 100): Every sample + full forensics
     """
 
     medium: int = 20  # Score to enter "medium" band
     elevated: int = 40  # Score to enter "elevated" band
     high: int = 50  # Score to enter "high" band
     critical: int = 70  # Score to enter "critical" band
-    tracking_band: str = "elevated"
-    forensics_band: str = "high"
-    checkpoint_interval: int = 30  # Seconds between checkpoint snapshots while tracking
+    tracking_band: str = "medium"  # Changed: tracking now starts at medium
+    forensics_band: str = "critical"  # Only critical triggers forensics
+    checkpoint_interval: int = 30  # Deprecated: kept for backwards compatibility
+    # Sample-based checkpoint intervals (new)
+    medium_checkpoint_samples: int = 20  # ~66s at 3 samples/sec
+    elevated_checkpoint_samples: int = 10  # ~33s at 3 samples/sec
 
     def get_band(self, score: int) -> str:
         """Return band name for a given score."""
@@ -493,6 +500,13 @@ def _load_bands_config(data: dict) -> BandsConfig:
         critical=data.get("critical", defaults.critical),
         tracking_band=tracking_band,
         forensics_band=forensics_band,
+        checkpoint_interval=data.get("checkpoint_interval", defaults.checkpoint_interval),
+        medium_checkpoint_samples=data.get(
+            "medium_checkpoint_samples", defaults.medium_checkpoint_samples
+        ),
+        elevated_checkpoint_samples=data.get(
+            "elevated_checkpoint_samples", defaults.elevated_checkpoint_samples
+        ),
     )
 
 

@@ -797,3 +797,37 @@ def test_sparkline_config_roundtrip(tmp_path):
     assert loaded.tui.sparkline.height == 4
     assert loaded.tui.sparkline.orientation == "mirrored"
     assert loaded.tui.sparkline.direction == "ltr"
+
+
+# =============================================================================
+# Sample-Based Checkpoint Configuration Tests
+# =============================================================================
+
+
+def test_checkpoint_samples_defaults():
+    """Checkpoint sample counts have defaults for each band."""
+    bands = BandsConfig()
+
+    # Medium has less frequent checkpoints than elevated
+    assert hasattr(bands, "medium_checkpoint_samples")
+    assert hasattr(bands, "elevated_checkpoint_samples")
+    assert bands.medium_checkpoint_samples > bands.elevated_checkpoint_samples
+    # Both are positive integers
+    assert bands.medium_checkpoint_samples > 0
+    assert bands.elevated_checkpoint_samples > 0
+
+
+def test_checkpoint_samples_configurable(tmp_path):
+    """Checkpoint sample counts load from TOML."""
+    toml_content = """
+[bands]
+medium_checkpoint_samples = 30
+elevated_checkpoint_samples = 15
+"""
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(toml_content)
+
+    config = Config.load(config_file)
+
+    assert config.bands.medium_checkpoint_samples == 30
+    assert config.bands.elevated_checkpoint_samples == 15
