@@ -93,37 +93,81 @@ def format_duration(seconds: float) -> str:
 
 
 def format_share(value: float) -> str:
-    """Format a resource share value compactly.
+    """Format a resource share value with 2 decimal precision.
 
     Args:
         value: The share value (multiple of fair share, e.g., 10.5 = 10.5× fair share).
 
     Returns:
-        Formatted string like "10x", "1.5x", "0.8x".
+        Formatted string like "12.34x".
     """
-    if value >= 100:
-        return f"{int(value)}x"
-    elif value >= 10:
-        return f"{value:.0f}x"
-    elif value >= 1:
-        return f"{value:.1f}x"
+    return f"{value:.2f}x"
+
+
+def format_bytes_precise(bytes_val: int | float) -> str:
+    """Format bytes as human-readable string with 2 decimal precision."""
+    val = float(bytes_val)
+    if val < 1024:
+        return f"{val:.2f}B"
+    elif val < 1024 * 1024:
+        return f"{val / 1024:.2f}K"
+    elif val < 1024 * 1024 * 1024:
+        return f"{val / (1024 * 1024):.2f}M"
     else:
-        return f"{value:.2f}x"
+        return f"{val / (1024 * 1024 * 1024):.2f}G"
+
+
+def format_cpu_column(cpu: float) -> str:
+    """Format CPU column: raw percentage, right-justified.
+
+    Example: "  45.23%"
+    """
+    return f"{cpu:>7.2f}%"
+
+
+def format_gpu_column(gpu_rate: float) -> str:
+    """Format GPU column: ms/s, right-justified.
+
+    Example: "   2.15ms"
+    """
+    return f"{gpu_rate:>7.2f}ms"
+
+
+def format_mem_column(mem: int) -> str:
+    """Format memory column: human-readable bytes, right-justified.
+
+    Example: "  1.23G"
+    """
+    return format_bytes_precise(mem).rjust(7)
+
+
+def format_disk_column(disk_rate: float) -> str:
+    """Format disk column: human-readable rate, right-justified.
+
+    Example: " 15.67M/s"
+    """
+    return f"{format_bytes_precise(disk_rate)}/s".rjust(9)
+
+
+def format_wake_column(wake_rate: float) -> str:
+    """Format wakeups column: rate/s, right-justified.
+
+    Example: "   50.00/s"
+    """
+    return f"{wake_rate:>7.2f}/s"
 
 
 def format_dominant_info(dominant_resource: str, disproportionality: float) -> str:
-    """Format dominant resource info for display.
+    """Format dominant resource info for display, right-justified.
 
     Args:
         dominant_resource: The resource type (cpu, gpu, memory, disk, wakeups).
         disproportionality: The disproportionality multiplier.
 
     Returns:
-        Formatted string like "CPU 10.5x" or "MEM 1.5x".
+        Formatted string like "CPU  10.50x" right-justified to 12 chars.
     """
-    disprop_str = format_share(disproportionality)
-
-    # Labels for resources
+    # Labels for resources (all 4 chars for alignment)
     resource_labels = {
         "cpu": "CPU",
         "gpu": "GPU",
@@ -131,8 +175,9 @@ def format_dominant_info(dominant_resource: str, disproportionality: float) -> s
         "disk": "DISK",
         "wakeups": "WAKE",
     }
-    label = resource_labels.get(dominant_resource, dominant_resource.upper())
-    return f"{label} {disprop_str}"
+    label = resource_labels.get(dominant_resource, dominant_resource.upper()[:4])
+    # Format: "LABEL" (4 chars) + " " + value (7 chars with 2 decimals) + "x"
+    return f"{label:>4} {disproportionality:>7.2f}x"
 
 
 def extract_time(timestamp_str: str) -> str:
@@ -385,8 +430,19 @@ class ProcessTable(Static):
         """Set up table columns."""
         self.border_title = "TOP PROCESSES"
         self._table = self.query_one("#process-table", DataTable)
+        # Centered headers for alignment
         self._table.add_columns(
-            "", "PID", "Process", "Score", "CPU", "GPU", "MEM", "DISK", "WAKE", "State", "Dominant"
+            "",
+            Text("PID", justify="center"),
+            Text("Process", justify="center"),
+            Text("Score", justify="center"),
+            Text("CPU", justify="center"),
+            Text("GPU", justify="center"),
+            Text("MEM", justify="center"),
+            Text("DISK", justify="center"),
+            Text("WAKE", justify="center"),
+            Text("State", justify="center"),
+            Text("Dominant", justify="center"),
         )
         self.set_disconnected()
 
@@ -449,11 +505,11 @@ class ProcessTable(Static):
         pid: str,
         command: str,
         score_val: int,
-        cpu_share: float,
-        gpu_share: float,
-        mem_share: float,
-        disk_share: float,
-        wakeups_share: float,
+        cpu: float,
+        gpu_rate: float,
+        mem: int,
+        disk_rate: float,
+        wake_rate: float,
         state: str,
         dominant_resource: str,
         disproportionality: float,
@@ -466,9 +522,9 @@ class ProcessTable(Static):
         - PID: Muted color (not competing with process name)
         - Process name: Band color based on score severity
         - Score: Bold band color
-        - Resource shares: Band color (shows what's driving the score)
+        - Resource columns: Raw metric values only
         - State: Own colors based on process state severity
-        - Dominant: Shows highest weighted resource
+        - Dominant: Shows highest weighted resource with share multiplier
         """
         colors = self.app.config.tui.colors
 
@@ -484,14 +540,14 @@ class ProcessTable(Static):
 
         return [
             Text(trend, style=trend_style),
-            Text(pid, style=pid_style),
+            Text(str(pid).rjust(6), style=pid_style),
             Text(command, style=band_style),
-            Text(str(score_val), style=score_style),
-            Text(format_share(cpu_share), style=band_style),
-            Text(format_share(gpu_share), style=band_style),
-            Text(format_share(mem_share), style=band_style),
-            Text(format_share(disk_share), style=band_style),
-            Text(format_share(wakeups_share), style=band_style),
+            Text(str(score_val).rjust(3), style=score_style),
+            Text(format_cpu_column(cpu), style=band_style),
+            Text(format_gpu_column(gpu_rate), style=band_style),
+            Text(format_mem_column(mem), style=band_style),
+            Text(format_disk_column(disk_rate), style=band_style),
+            Text(format_wake_column(wake_rate), style=band_style),
             Text(state, style=state_style),
             Text(dominant_display, style=band_style),
         ]
@@ -554,12 +610,13 @@ class ProcessTable(Static):
 
             self._prev_scores[pid] = score
 
-            # Extract resource-based scoring fields
-            cpu_share = rogue.get("cpu_share", 0.0)
-            gpu_share = rogue.get("gpu_share", 0.0)
-            mem_share = rogue.get("mem_share", 0.0)
-            disk_share = rogue.get("disk_share", 0.0)
-            wakeups_share = rogue.get("wakeups_share", 0.0)
+            # Extract raw metrics
+            cpu = rogue.get("cpu", 0.0)
+            gpu_rate = rogue.get("gpu_time_rate", 0.0)
+            mem = rogue.get("mem", 0)
+            disk_rate = rogue.get("disk_io_rate", 0.0)
+            wake_rate = rogue.get("wakeups_rate", 0.0)
+
             dominant_resource = rogue.get("dominant_resource", "cpu")
             disproportionality = rogue.get("disproportionality", 0.0)
             state = rogue["state"]
@@ -570,11 +627,11 @@ class ProcessTable(Static):
                     str(pid),
                     str(rogue.get("command", "?")),
                     score,
-                    cpu_share,
-                    gpu_share,
-                    mem_share,
-                    disk_share,
-                    wakeups_share,
+                    cpu,
+                    gpu_rate,
+                    mem,
+                    disk_rate,
+                    wake_rate,
                     str(state),
                     dominant_resource,
                     disproportionality,
@@ -592,11 +649,11 @@ class ProcessTable(Static):
                 "",  # pid
                 "(not connected)",  # command
                 0,  # score
-                0.0,  # cpu_share
-                0.0,  # gpu_share
-                0.0,  # mem_share
-                0.0,  # disk_share
-                0.0,  # wakeups_share
+                0.0,  # cpu
+                0.0,  # gpu_rate
+                0,  # mem
+                0.0,  # disk_rate
+                0.0,  # wake_rate
                 "---",  # state
                 "cpu",  # dominant_resource
                 0.0,  # disproportionality

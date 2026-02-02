@@ -16,30 +16,31 @@ def test_tui_app_starts_without_crash(tmp_path):
 
 
 def test_format_share():
-    """format_share displays resource share values compactly."""
+    """format_share displays resource share values with 2 decimal precision."""
     from rogue_hunter.tui.app import format_share
 
-    # Test various ranges
-    assert format_share(150.0) == "150x"  # >= 100: int
-    assert format_share(100.0) == "100x"  # >= 100: int
-    assert format_share(50.5) == "50x"  # >= 10: .0f
-    assert format_share(10.0) == "10x"  # >= 10: .0f
-    assert format_share(5.5) == "5.5x"  # >= 1: .1f
-    assert format_share(1.0) == "1.0x"  # >= 1: .1f
-    assert format_share(0.5) == "0.50x"  # < 1: .2f
-    assert format_share(0.05) == "0.05x"  # < 1: .2f
+    # All values use consistent 2 decimal precision
+    assert format_share(150.0) == "150.00x"
+    assert format_share(100.0) == "100.00x"
+    assert format_share(50.5) == "50.50x"
+    assert format_share(10.0) == "10.00x"
+    assert format_share(5.5) == "5.50x"
+    assert format_share(1.0) == "1.00x"
+    assert format_share(0.5) == "0.50x"
+    assert format_share(0.05) == "0.05x"
 
 
 def test_format_dominant_info():
-    """format_dominant_info displays dominant_resource with disproportionality."""
+    """format_dominant_info displays dominant_resource with disproportionality, right-justified."""
     from rogue_hunter.tui.app import format_dominant_info
 
-    # Test various disproportionality ranges
-    assert format_dominant_info("cpu", 150.0) == "CPU 150x"  # >= 100: int
-    assert format_dominant_info("gpu", 50.5) == "GPU 50x"  # >= 10: .0f
-    assert format_dominant_info("memory", 5.5) == "MEM 5.5x"  # >= 1: .1f
-    assert format_dominant_info("disk", 0.5) == "DISK 0.50x"  # < 1: .2f
-    assert format_dominant_info("wakeups", 10.0) == "WAKE 10x"
+    # All values use consistent 2 decimal precision, right-justified
+    # Format: "LABEL" (4 chars right) + " " + value (7 chars) + "x"
+    assert format_dominant_info("cpu", 150.0) == " CPU  150.00x"
+    assert format_dominant_info("gpu", 50.5) == " GPU   50.50x"
+    assert format_dominant_info("memory", 5.5) == " MEM    5.50x"
+    assert format_dominant_info("disk", 0.5) == "DISK    0.50x"
+    assert format_dominant_info("wakeups", 10.0) == "WAKE   10.00x"
 
     # Test resource labels
     assert "CPU" in format_dominant_info("cpu", 1.0)
