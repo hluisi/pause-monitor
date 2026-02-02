@@ -314,14 +314,33 @@ def test_schema_has_process_snapshots_table(tmp_path):
     conn.close()
 
 
-def test_schema_version_17(initialized_db: Path):
-    """Schema version should be 17 (simplified: removed MetricValue low/high columns)."""
-    from rogue_hunter.storage import get_connection
+def test_schema_version_is_18():
+    """Schema version is 18 for resource-based scoring."""
+    from rogue_hunter.storage import SCHEMA_VERSION
 
-    conn = get_connection(initialized_db)
-    version = get_schema_version(conn)
-    conn.close()
-    assert version == 17
+    assert SCHEMA_VERSION == 18
+
+
+def test_process_snapshots_has_resource_shares():
+    """process_snapshots table has resource share columns."""
+    from rogue_hunter.storage import SCHEMA
+
+    # New columns should exist
+    assert "cpu_share" in SCHEMA
+    assert "gpu_share" in SCHEMA
+    assert "mem_share" in SCHEMA
+    assert "disk_share" in SCHEMA
+    assert "wakeups_share" in SCHEMA
+    assert "disproportionality" in SCHEMA
+    assert "dominant_resource" in SCHEMA
+
+    # Old columns should not exist
+    assert "blocking_score" not in SCHEMA
+    assert "contention_score" not in SCHEMA
+    assert "pressure_score" not in SCHEMA
+    assert "efficiency_score" not in SCHEMA
+    assert "dominant_category" not in SCHEMA
+    assert "dominant_metrics" not in SCHEMA
 
 
 # --- Process Event CRUD Tests ---

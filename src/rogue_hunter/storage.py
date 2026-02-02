@@ -13,7 +13,7 @@ if TYPE_CHECKING:
 
 log = structlog.get_logger()
 
-SCHEMA_VERSION = 17  # Simplified: removed MetricValue low/high columns
+SCHEMA_VERSION = 18  # Resource-based scoring: cpu/gpu/mem/disk/wakeups shares
 
 
 SCHEMA = """
