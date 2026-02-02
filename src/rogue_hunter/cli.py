@@ -1,8 +1,42 @@
 """CLI commands for rogue-hunter."""
 
+import os
 from pathlib import Path
 
 import click
+
+# Sudoers rule location for forensics permissions
+SUDOERS_PATH = Path("/etc/sudoers.d/rogue-hunter")
+
+
+def get_effective_username(require_root: bool = False) -> str:
+    """Get the effective username, validating root privileges if required.
+
+    When running as root (via sudo), returns SUDO_USER to identify the
+    actual user. When running as a regular user, returns USER.
+
+    Args:
+        require_root: If True, exit with error if not running as root.
+
+    Returns:
+        The username to use for operations.
+
+    Raises:
+        SystemExit: If root is required but not available, or if SUDO_USER
+            cannot be determined when running as root.
+    """
+    if require_root and os.getuid() != 0:
+        click.echo("Error: requires root privileges. Use sudo.", err=True)
+        raise SystemExit(1)
+
+    if os.getuid() == 0:
+        username = os.environ.get("SUDO_USER")
+        if not username:
+            click.echo("Error: Could not determine user. Run with sudo, not as root.", err=True)
+            raise SystemExit(1)
+        return username
+
+    return os.environ.get("USER", "")
 
 
 @click.group()
@@ -470,8 +504,8 @@ def config_reset() -> None:
 def _setup_sudoers(username: str, runtime_dir: Path) -> None:
     """Create sudoers rule for tailspin save.
 
-    Creates /etc/sudoers.d/rogue-hunter with a narrow rule allowing
-    tailspin to write only to the configured runtime directory.
+    Creates SUDOERS_PATH with a narrow rule allowing tailspin to write
+    only to the configured runtime directory.
 
     Args:
         username: The user to grant sudo access to
@@ -480,27 +514,24 @@ def _setup_sudoers(username: str, runtime_dir: Path) -> None:
     Raises:
         RuntimeError: If the sudoers rule is invalid
     """
-    import os
     import subprocess
-
-    sudoers_path = Path("/etc/sudoers.d/rogue-hunter")
 
     # Narrow rule: only allow tailspin save to the runtime directory
     rule = f"{username} ALL = (root) NOPASSWD: /usr/bin/tailspin save -o {runtime_dir}/*\n"
 
     # Write with correct permissions (must be done atomically)
-    sudoers_path.write_text(rule)
-    os.chmod(sudoers_path, 0o440)
-    os.chown(sudoers_path, 0, 0)  # root:wheel (wheel is gid 0 on macOS)
+    SUDOERS_PATH.write_text(rule)
+    os.chmod(SUDOERS_PATH, 0o440)
+    os.chown(SUDOERS_PATH, 0, 0)  # root:wheel (wheel is gid 0 on macOS)
 
     # Validate with visudo
     result = subprocess.run(
-        ["/usr/sbin/visudo", "-c", "-f", str(sudoers_path)],
+        ["/usr/sbin/visudo", "-c", "-f", str(SUDOERS_PATH)],
         capture_output=True,
     )
     if result.returncode != 0:
         # Invalid syntax - remove and raise
-        sudoers_path.unlink()
+        SUDOERS_PATH.unlink()
         raise RuntimeError(f"Invalid sudoers syntax: {result.stderr.decode()}")
 
 
@@ -522,19 +553,11 @@ def perms_install() -> None:
     Must be run with sudo. This allows the daemon to capture
     forensic data without requiring the daemon itself to run as root.
     """
-    import os
     import subprocess
 
     from rogue_hunter.config import Config
 
-    if os.getuid() != 0:
-        click.echo("Error: requires root privileges. Use sudo.", err=True)
-        raise SystemExit(1)
-
-    username = os.environ.get("SUDO_USER")
-    if not username:
-        click.echo("Error: Could not determine user. Run with sudo, not as root.", err=True)
-        raise SystemExit(1)
+    username = get_effective_username(require_root=True)
 
     # Load config to get runtime_dir
     cfg = Config.load()
@@ -542,7 +565,7 @@ def perms_install() -> None:
     # Set up sudoers for tailspin
     click.echo("Setting up sudoers rule for tailspin...")
     _setup_sudoers(username, cfg.runtime_dir)
-    click.echo(f"  Created /etc/sudoers.d/rogue-hunter (allows writes to {cfg.runtime_dir})")
+    click.echo(f"  Created {SUDOERS_PATH} (allows writes to {cfg.runtime_dir})")
 
     # Enable tailspin
     click.echo("Enabling tailspin...")
@@ -558,18 +581,15 @@ def perms_uninstall() -> None:
 
     Must be run with sudo.
     """
-    import os
     import subprocess
 
-    if os.getuid() != 0:
-        click.echo("Error: requires root privileges. Use sudo.", err=True)
-        raise SystemExit(1)
+    # Validate root (username not needed but ensures consistent sudo usage)
+    get_effective_username(require_root=True)
 
     # Remove sudoers rule
-    sudoers_path = Path("/etc/sudoers.d/rogue-hunter")
-    if sudoers_path.exists():
-        sudoers_path.unlink()
-        click.echo("Removed /etc/sudoers.d/rogue-hunter")
+    if SUDOERS_PATH.exists():
+        SUDOERS_PATH.unlink()
+        click.echo(f"Removed {SUDOERS_PATH}")
     else:
         click.echo("Sudoers rule was not installed")
 
@@ -585,10 +605,8 @@ def perms_uninstall() -> None:
 def perms_status() -> None:
     """Check if permissions are configured."""
     import subprocess
-    from pathlib import Path
 
-    sudoers_path = Path("/etc/sudoers.d/rogue-hunter")
-    sudoers_ok = sudoers_path.exists()
+    sudoers_ok = SUDOERS_PATH.exists()
 
     # Check tailspin status
     result = subprocess.run(
@@ -649,25 +667,11 @@ def service_install(system_wide: bool, force: bool) -> None:
     Creates a LaunchAgent (user) or LaunchDaemon (system) that
     starts automatically and restarts if it crashes.
     """
-    import os
     import pwd
     import subprocess
     import sys
-    from pathlib import Path
 
-    # System-wide requires root
-    if system_wide and os.getuid() != 0:
-        click.echo("Error: system-wide install requires root. Use sudo.", err=True)
-        raise SystemExit(1)
-
-    # Determine username
-    if os.getuid() == 0:
-        username = os.environ.get("SUDO_USER")
-        if not username:
-            click.echo("Error: Could not determine user. Run with sudo, not as root.", err=True)
-            raise SystemExit(1)
-    else:
-        username = os.environ.get("USER")
+    username = get_effective_username(require_root=system_wide)
 
     plist_dir, plist_path, service_target, label = _get_service_paths(system_wide, username)
 
@@ -753,23 +757,10 @@ def service_uninstall(system_wide: bool, keep_data: bool, force: bool) -> None:
 
     Stops the daemon and removes the LaunchAgent/LaunchDaemon plist.
     """
-    import os
     import shutil
     import subprocess
 
-    # System-wide requires root
-    if system_wide and os.getuid() != 0:
-        click.echo("Error: system-wide uninstall requires root. Use sudo.", err=True)
-        raise SystemExit(1)
-
-    # Determine username
-    if os.getuid() == 0:
-        username = os.environ.get("SUDO_USER")
-        if not username:
-            click.echo("Error: Could not determine user. Run with sudo, not as root.", err=True)
-            raise SystemExit(1)
-    else:
-        username = os.environ.get("USER")
+    username = get_effective_username(require_root=system_wide)
 
     plist_dir, plist_path, service_target, label = _get_service_paths(system_wide, username)
 
