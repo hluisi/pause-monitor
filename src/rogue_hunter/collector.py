@@ -3,7 +3,6 @@
 import asyncio
 import json
 import math
-import os
 import time
 from dataclasses import dataclass
 from datetime import datetime
@@ -292,11 +291,6 @@ class ProcessSamples:
             max_score=d["max_score"],
             rogues=[ProcessScore.from_dict(r) for r in d["rogues"]],
         )
-
-
-def get_core_count() -> int:
-    """Get number of CPU cores."""
-    return os.cpu_count() or 1
 
 
 def count_active_processes(processes: list[dict], config: ScoringConfig) -> int:
@@ -791,70 +785,6 @@ class LibprocCollector:
     def _get_band(self, score: int) -> str:
         """Derive band name from score using config thresholds."""
         return self.config.bands.get_band(score)
-
-    def _get_dominant_metrics(self, proc: dict, category: str) -> list[str]:
-        """Get human-readable descriptions of top metrics for the dominant category."""
-        norm = self.config.scoring.normalization
-        metrics = []
-
-        if category == "blocking":
-            # Check pageins_rate, disk_io_rate, faults_rate, gpu_time_rate
-            if proc["pageins_rate"] > 0:
-                metrics.append(f"pageins:{int(proc['pageins_rate'])}/s")
-            if proc["disk_io_rate"] > 0:
-                rate = proc["disk_io_rate"]
-                if rate >= 1024 * 1024:
-                    metrics.append(f"disk:{rate / (1024 * 1024):.1f}M/s")
-                elif rate >= 1024:
-                    metrics.append(f"disk:{rate / 1024:.0f}K/s")
-                else:
-                    metrics.append(f"disk:{rate:.0f}B/s")
-            if proc["faults_rate"] > 0:
-                metrics.append(f"faults:{int(proc['faults_rate'])}/s")
-            if proc["gpu_time_rate"] > 0:
-                metrics.append(f"gpu:{proc['gpu_time_rate']:.0f}ms/s")
-
-        elif category == "contention":
-            # Check runnable_time_rate, csw_rate, cpu
-            if proc["runnable_time_rate"] > 0:
-                metrics.append(f"runnable:{proc['runnable_time_rate']:.0f}ms/s")
-            if proc["csw_rate"] > 0:
-                val = proc["csw_rate"]
-                if val >= 1000:
-                    metrics.append(f"csw:{val / 1000:.1f}k/s")
-                else:
-                    metrics.append(f"csw:{val:.0f}/s")
-            if proc["cpu"] > 0:
-                metrics.append(f"cpu:{proc['cpu']:.0f}%")
-
-        elif category == "pressure":
-            # Check mem, wakeups_rate, syscalls_rate, zombie_children
-            if proc["zombie_children"] > 0:
-                # Show first since unreaped zombies are unusual/significant
-                metrics.append(f"zombies:{proc['zombie_children']}")
-            if proc["mem"] > 0:
-                mem = proc["mem"]
-                if mem >= 1024**3:
-                    metrics.append(f"mem:{mem / (1024**3):.1f}G")
-                else:
-                    metrics.append(f"mem:{mem / (1024**2):.0f}M")
-            if proc["wakeups_rate"] > 0:
-                metrics.append(f"wakeups:{int(proc['wakeups_rate'])}/s")
-            if proc["syscalls_rate"] > 0:
-                val = proc["syscalls_rate"]
-                if val >= 1000:
-                    metrics.append(f"syscalls:{val / 1000:.1f}k/s")
-                else:
-                    metrics.append(f"syscalls:{val:.0f}/s")
-
-        elif category == "efficiency":
-            # Check ipc, threads
-            if proc["ipc"] > 0 and proc["ipc"] < norm.ipc_min:
-                metrics.append(f"ipc:{proc['ipc']:.2f}")
-            if proc["threads"] > 10:
-                metrics.append(f"threads:{proc['threads']}")
-
-        return metrics[:3]  # Limit to top 3
 
     def _score_process(self, proc: dict, shares: dict[str, float]) -> ProcessScore:
         """Score a process using resource-based fair share analysis.

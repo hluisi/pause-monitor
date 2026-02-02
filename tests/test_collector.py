@@ -9,7 +9,6 @@ from rogue_hunter.collector import (
     ProcessSamples,
     ProcessScore,
     count_active_processes,
-    get_core_count,
 )
 from rogue_hunter.config import Config, ScoringConfig
 
@@ -103,14 +102,26 @@ def test_process_score_no_category_scores():
 
 
 # =============================================================================
-# Original tests
+# Task 9: Verify old scoring code is removed
 # =============================================================================
 
 
-def test_get_core_count():
-    """get_core_count returns positive integer."""
-    count = get_core_count()
-    assert count > 0
+def test_old_scoring_methods_removed():
+    """Old scoring methods no longer exist."""
+    # These methods should not exist
+    assert not hasattr(LibprocCollector, "_get_dominant_metrics")
+
+
+def test_get_core_count_removed():
+    """Unused get_core_count function is removed."""
+    from rogue_hunter import collector
+
+    assert not hasattr(collector, "get_core_count")
+
+
+# =============================================================================
+# Original tests
+# =============================================================================
 
 
 # ProcessScore and ProcessSamples tests
