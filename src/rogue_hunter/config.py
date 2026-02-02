@@ -50,7 +50,6 @@ class BandsConfig:
     tracking_band: str = "medium"  # Tracking starts at medium band
     forensics_band: str = "critical"  # Only critical triggers forensics
     logging_band: str = "medium"  # Log entry at this band or higher, exit when dropping below
-    checkpoint_interval: int = 30  # Deprecated: kept for backwards compatibility
     # Sample-based checkpoint intervals
     medium_checkpoint_samples: int = 60  # ~20s at 3 samples/sec
     elevated_checkpoint_samples: int = 30  # ~10s at 3 samples/sec
@@ -139,59 +138,14 @@ class ResourceWeights:
 
 
 @dataclass
-class NormalizationConfig:
-    """Maximum values for normalizing metrics to 0-1 scale.
-
-    Note: Not currently used by the disproportionate-share scoring system.
-    Retained for potential custom scoring implementations.
-
-    Each value represents what counts as "maxed out" for that metric.
-    Rate thresholds are per-second values, NOT cumulative totals.
-    """
-
-    # Basic metrics
-    cpu: float = 100.0  # CPU percentage (natural max)
-    mem_gb: float = 8.0  # Memory in gigabytes
-
-    # Rate thresholds (per second) - available for custom scoring if needed
-    pageins_rate: float = 100.0  # 100 page-ins/sec = serious thrashing
-    faults_rate: float = 10_000.0  # 10k faults/sec
-    csw_rate: float = 10_000.0  # 10k context switches/sec
-    syscalls_rate: float = 100_000.0  # 100k syscalls/sec
-    mach_msgs_rate: float = 10_000.0  # 10k mach messages/sec
-    wakeups_rate: float = 1_000.0  # 1k wakeups/sec
-    disk_io_rate: float = 100_000_000  # 100 MB/s
-
-    # Contention thresholds
-    runnable_time_rate: float = 100.0  # 100ms runnable per second (10% contention)
-    qos_interactive_rate: float = 100.0  # 100ms interactive QoS per second
-
-    # GPU thresholds
-    gpu_time_rate: float = 500.0  # 500ms GPU/sec = significant GPU load
-
-    # Efficiency thresholds
-    threads: int = 100  # 100 threads is already excessive
-    ipc_min: float = 0.5  # IPC below this is concerning (inverse scoring)
-
-    # Pressure thresholds
-    zombie_children: int = 10  # 10+ unreaped zombies = significant problem
-
-
-@dataclass
 class ScoringConfig:
     """Scoring configuration.
 
-    Contains resource weights, normalization thresholds, state multipliers,
-    and active process detection thresholds.
+    Contains resource weights, state multipliers, and fair share thresholds.
     """
 
     resource_weights: ResourceWeights = field(default_factory=ResourceWeights)
     state_multipliers: StateMultipliers = field(default_factory=StateMultipliers)
-    normalization: NormalizationConfig = field(default_factory=NormalizationConfig)
-    # Thresholds for counting a process as "active" for fair share calculation
-    active_min_cpu: float = 0.1  # Minimum CPU % to be considered active
-    active_min_memory_mb: float = 10.0  # Minimum memory MB to be considered active
-    active_min_disk_io: float = 0.0  # Minimum disk I/O bytes/sec (0 = any disk activity counts)
     # Thresholds for fair share resource user counting (affects scoring)
     share_min_cpu: float = 0.01  # CPU % threshold to count as resource user (0.01%)
     share_min_memory_bytes: int = 268_435_456  # Memory threshold (256 MiB)
@@ -204,13 +158,10 @@ class ScoringConfig:
 class RogueSelectionConfig:
     """Configuration for rogue process selection.
 
-    Simple threshold-based selection:
-    - Processes with score >= score_threshold are included
-    - Stuck processes are always included
-    - Results limited to max_count
+    Top-N selection: selects highest-scoring processes up to max_count.
+    Stuck processes are always included regardless of score.
     """
 
-    score_threshold: int = 20  # Minimum score to be considered a rogue
     max_count: int = 20  # Maximum rogues to track
 
 
@@ -573,7 +524,6 @@ def _load_bands_config(data: dict) -> BandsConfig:
         tracking_band=tracking_band,
         forensics_band=forensics_band,
         logging_band=logging_band,
-        checkpoint_interval=data.get("checkpoint_interval", defaults.checkpoint_interval),
         medium_checkpoint_samples=medium_checkpoint_samples,
         elevated_checkpoint_samples=elevated_checkpoint_samples,
         event_cooldown_seconds=event_cooldown_seconds,
@@ -585,13 +535,11 @@ def _load_scoring_config(data: dict) -> ScoringConfig:
     """Load scoring config from TOML data."""
     weights_data = data.get("resource_weights", {})
     state_mult_data = data.get("state_multipliers", {})
-    norm_data = data.get("normalization", {})
 
     # Use dataclass instances as single source of truth for defaults
     defaults = ScoringConfig()
     w = defaults.resource_weights
     m = defaults.state_multipliers
-    n = defaults.normalization
 
     return ScoringConfig(
         resource_weights=ResourceWeights(
@@ -609,26 +557,6 @@ def _load_scoring_config(data: dict) -> ScoringConfig:
             running=state_mult_data.get("running", m.running),
             stuck=state_mult_data.get("stuck", m.stuck),
         ),
-        normalization=NormalizationConfig(
-            cpu=norm_data.get("cpu", n.cpu),
-            mem_gb=norm_data.get("mem_gb", n.mem_gb),
-            pageins_rate=norm_data.get("pageins_rate", n.pageins_rate),
-            faults_rate=norm_data.get("faults_rate", n.faults_rate),
-            csw_rate=norm_data.get("csw_rate", n.csw_rate),
-            syscalls_rate=norm_data.get("syscalls_rate", n.syscalls_rate),
-            mach_msgs_rate=norm_data.get("mach_msgs_rate", n.mach_msgs_rate),
-            wakeups_rate=norm_data.get("wakeups_rate", n.wakeups_rate),
-            disk_io_rate=norm_data.get("disk_io_rate", n.disk_io_rate),
-            runnable_time_rate=norm_data.get("runnable_time_rate", n.runnable_time_rate),
-            qos_interactive_rate=norm_data.get("qos_interactive_rate", n.qos_interactive_rate),
-            gpu_time_rate=norm_data.get("gpu_time_rate", n.gpu_time_rate),
-            threads=norm_data.get("threads", n.threads),
-            ipc_min=norm_data.get("ipc_min", n.ipc_min),
-            zombie_children=norm_data.get("zombie_children", n.zombie_children),
-        ),
-        active_min_cpu=data.get("active_min_cpu", defaults.active_min_cpu),
-        active_min_memory_mb=data.get("active_min_memory_mb", defaults.active_min_memory_mb),
-        active_min_disk_io=data.get("active_min_disk_io", defaults.active_min_disk_io),
         share_min_cpu=data.get("share_min_cpu", defaults.share_min_cpu),
         share_min_memory_bytes=data.get("share_min_memory_bytes", defaults.share_min_memory_bytes),
         share_min_wakeups=data.get("share_min_wakeups", defaults.share_min_wakeups),
@@ -640,7 +568,6 @@ def _load_rogue_selection_config(data: dict) -> RogueSelectionConfig:
     """Load rogue selection config from TOML data."""
     d = RogueSelectionConfig()
     return RogueSelectionConfig(
-        score_threshold=data.get("score_threshold", d.score_threshold),
         max_count=data.get("max_count", d.max_count),
     )
 

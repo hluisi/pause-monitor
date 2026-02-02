@@ -6,7 +6,6 @@ from rogue_hunter.config import (
     BorderColors,
     CategoryColors,
     Config,
-    NormalizationConfig,
     PidColors,
     ProcessStateColors,
     ResourceWeights,
@@ -162,7 +161,6 @@ def test_rogue_selection_default():
     """Rogue selection has correct defaults."""
     config = Config()
     defaults = RogueSelectionConfig()
-    assert config.rogue_selection.score_threshold == defaults.score_threshold
     assert config.rogue_selection.max_count == defaults.max_count
 
 
@@ -181,13 +179,11 @@ def test_config_save_includes_rogue_selection(tmp_path):
     """Config.save() writes rogue_selection section."""
     config_path = tmp_path / "config.toml"
     config = Config()
-    config.rogue_selection.score_threshold = 30
     config.rogue_selection.max_count = 15
     config.save(config_path)
 
     content = config_path.read_text()
     assert "[rogue_selection]" in content
-    assert "score_threshold = 30" in content
     assert "max_count = 15" in content
 
 
@@ -196,31 +192,11 @@ def test_config_loads_rogue_selection(tmp_path):
     config_file = tmp_path / "config.toml"
     config_file.write_text("""
 [rogue_selection]
-score_threshold = 25
 max_count = 10
 """)
 
     config = Config.load(config_file)
-    assert config.rogue_selection.score_threshold == 25
     assert config.rogue_selection.max_count == 10
-
-
-def test_normalization_config_defaults():
-    """NormalizationConfig matches its dataclass defaults."""
-    norm = NormalizationConfig()
-    defaults = NormalizationConfig()
-    assert norm.cpu == defaults.cpu
-    assert norm.mem_gb == defaults.mem_gb
-    assert norm.pageins_rate == defaults.pageins_rate
-    assert norm.csw_rate == defaults.csw_rate
-    assert norm.syscalls_rate == defaults.syscalls_rate
-    assert norm.threads == defaults.threads
-    assert norm.disk_io_rate == defaults.disk_io_rate
-    assert norm.wakeups_rate == defaults.wakeups_rate
-    assert norm.ipc_min == defaults.ipc_min
-    # Contention thresholds
-    assert norm.runnable_time_rate == defaults.runnable_time_rate
-    assert norm.qos_interactive_rate == defaults.qos_interactive_rate
 
 
 def test_bands_config_defaults():
@@ -276,80 +252,6 @@ def test_config_has_bands_not_tiers():
     config = Config()
     assert hasattr(config, "bands")
     assert not hasattr(config, "tiers")
-
-
-def test_scoring_config_includes_normalization():
-    """ScoringConfig includes normalization field."""
-    config = Config()
-    defaults = NormalizationConfig()
-    assert hasattr(config.scoring, "normalization")
-    assert config.scoring.normalization.mem_gb == defaults.mem_gb
-
-
-def test_config_save_includes_normalization(tmp_path):
-    """Config.save() writes normalization section."""
-    config_path = tmp_path / "config.toml"
-    config = Config()
-    config.scoring.normalization.mem_gb = 16.0
-    config.scoring.normalization.pageins_rate = 200.0
-    config.save(config_path)
-
-    content = config_path.read_text()
-    assert "[scoring.normalization]" in content
-    assert "mem_gb = 16.0" in content
-    assert "pageins_rate = 200.0" in content
-
-
-def test_config_loads_normalization(tmp_path):
-    """Config.load() reads normalization section from TOML."""
-    config_file = tmp_path / "config.toml"
-    config_file.write_text("""
-[scoring.normalization]
-cpu = 100.0
-mem_gb = 32.0
-pageins_rate = 200.0
-faults_rate = 20000.0
-csw_rate = 20000.0
-syscalls_rate = 200000.0
-mach_msgs_rate = 20000.0
-wakeups_rate = 2000.0
-disk_io_rate = 200000000
-runnable_time_rate = 200.0
-qos_interactive_rate = 200.0
-threads = 200
-ipc_min = 0.3
-""")
-
-    config = Config.load(config_file)
-    assert config.scoring.normalization.mem_gb == 32.0
-    assert config.scoring.normalization.pageins_rate == 200.0
-    assert config.scoring.normalization.faults_rate == 20000.0
-    assert config.scoring.normalization.csw_rate == 20000.0
-    assert config.scoring.normalization.syscalls_rate == 200000.0
-    assert config.scoring.normalization.mach_msgs_rate == 20000.0
-    assert config.scoring.normalization.wakeups_rate == 2000.0
-    assert config.scoring.normalization.disk_io_rate == 200000000
-    assert config.scoring.normalization.runnable_time_rate == 200.0
-    assert config.scoring.normalization.qos_interactive_rate == 200.0
-    assert config.scoring.normalization.threads == 200
-    assert config.scoring.normalization.ipc_min == 0.3
-
-
-def test_config_loads_partial_normalization(tmp_path):
-    """Config.load() uses defaults for missing normalization fields."""
-    config_file = tmp_path / "config.toml"
-    config_file.write_text("""
-[scoring.normalization]
-mem_gb = 64.0
-""")
-
-    config = Config.load(config_file)
-    defaults = NormalizationConfig()
-    # Specified value
-    assert config.scoring.normalization.mem_gb == 64.0
-    # Defaults for unspecified
-    assert config.scoring.normalization.cpu == defaults.cpu
-    assert config.scoring.normalization.pageins_rate == defaults.pageins_rate
 
 
 def test_bands_get_threshold_raises_for_invalid_band():
@@ -444,19 +346,6 @@ def test_resource_weights_in_scoring_config():
     assert scoring.resource_weights.cpu > 0
 
 
-def test_active_process_thresholds_defaults():
-    """Active process thresholds have defaults."""
-    scoring = ScoringConfig()
-
-    assert hasattr(scoring, "active_min_cpu")
-    assert hasattr(scoring, "active_min_memory_mb")
-    assert hasattr(scoring, "active_min_disk_io")
-    # Defaults should be small but non-zero
-    assert scoring.active_min_cpu >= 0
-    assert scoring.active_min_memory_mb >= 0
-    assert scoring.active_min_disk_io >= 0
-
-
 def test_config_load_resource_weights(tmp_path):
     """Resource weights load from TOML."""
     toml_content = """
@@ -474,24 +363,6 @@ wakeups = 2.0
 
     assert config.scoring.resource_weights.cpu == 1.5
     assert config.scoring.resource_weights.gpu == 4.0
-
-
-def test_config_load_active_thresholds(tmp_path):
-    """Active process thresholds load from TOML."""
-    toml_content = """
-[scoring]
-active_min_cpu = 0.5
-active_min_memory_mb = 20.0
-active_min_disk_io = 1000.0
-"""
-    config_file = tmp_path / "config.toml"
-    config_file.write_text(toml_content)
-
-    config = Config.load(config_file)
-
-    assert config.scoring.active_min_cpu == 0.5
-    assert config.scoring.active_min_memory_mb == 20.0
-    assert config.scoring.active_min_disk_io == 1000.0
 
 
 def test_config_load_partial_resource_weights(tmp_path):
