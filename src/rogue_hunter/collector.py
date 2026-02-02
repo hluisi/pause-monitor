@@ -120,16 +120,17 @@ class ProcessScore:
     priority: int
 
     # ─────────────────────────────────────────────────────────────
-    # Scoring (4-category system)
+    # Scoring (resource-based system)
     # ─────────────────────────────────────────────────────────────
     score: int  # Final weighted score 0-100
     band: str  # low/medium/elevated/high/critical
-    blocking_score: float  # 0-100, causes pauses
-    contention_score: float  # 0-100, fighting for resources
-    pressure_score: float  # 0-100, stressing system
-    efficiency_score: float  # 0-100, wasting resources
-    dominant_category: str  # "blocking"|"contention"|"pressure"|"efficiency"
-    dominant_metrics: list[str]  # ["pageins:847/s", "disk:42M/s"]
+    cpu_share: float  # Share of system CPU this process uses
+    gpu_share: float  # Share of system GPU this process uses
+    mem_share: float  # Share of system memory this process uses
+    disk_share: float  # Share of system disk I/O this process uses
+    wakeups_share: float  # Share of system wakeups this process causes
+    disproportionality: float  # Highest resource share (max of above)
+    dominant_resource: str  # "cpu"|"gpu"|"memory"|"disk"|"wakeups"
 
     def to_dict(self) -> dict:
         """Serialize to a dictionary."""
@@ -182,12 +183,13 @@ class ProcessScore:
             # Scoring
             "score": self.score,
             "band": self.band,
-            "blocking_score": self.blocking_score,
-            "contention_score": self.contention_score,
-            "pressure_score": self.pressure_score,
-            "efficiency_score": self.efficiency_score,
-            "dominant_category": self.dominant_category,
-            "dominant_metrics": self.dominant_metrics,
+            "cpu_share": self.cpu_share,
+            "gpu_share": self.gpu_share,
+            "mem_share": self.mem_share,
+            "disk_share": self.disk_share,
+            "wakeups_share": self.wakeups_share,
+            "disproportionality": self.disproportionality,
+            "dominant_resource": self.dominant_resource,
         }
 
     @classmethod
@@ -242,12 +244,13 @@ class ProcessScore:
             # Scoring
             score=data["score"],
             band=data["band"],
-            blocking_score=data["blocking_score"],
-            contention_score=data["contention_score"],
-            pressure_score=data["pressure_score"],
-            efficiency_score=data["efficiency_score"],
-            dominant_category=data["dominant_category"],
-            dominant_metrics=data["dominant_metrics"],
+            cpu_share=data["cpu_share"],
+            gpu_share=data["gpu_share"],
+            mem_share=data["mem_share"],
+            disk_share=data["disk_share"],
+            wakeups_share=data["wakeups_share"],
+            disproportionality=data["disproportionality"],
+            dominant_resource=data["dominant_resource"],
         )
 
 

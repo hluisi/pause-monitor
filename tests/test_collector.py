@@ -12,6 +12,84 @@ from rogue_hunter.collector import (
 )
 from rogue_hunter.config import Config
 
+# =============================================================================
+# Task 3: Resource-based scoring tests
+# =============================================================================
+
+
+def test_process_score_has_resource_shares():
+    """ProcessScore has resource share fields instead of category scores."""
+    # Create a ProcessScore with the new fields
+    score = ProcessScore(
+        pid=123,
+        command="test",
+        captured_at=datetime.now().timestamp(),
+        # Resource shares (new)
+        cpu_share=2.5,
+        gpu_share=0.0,
+        mem_share=1.2,
+        disk_share=0.5,
+        wakeups_share=0.1,
+        disproportionality=2.5,  # Highest share
+        dominant_resource="cpu",
+        # Raw metrics (unchanged)
+        cpu=25.0,
+        mem=1024000,
+        mem_peak=2048000,
+        pageins=0,
+        pageins_rate=0.0,
+        faults=100,
+        faults_rate=10.0,
+        disk_io=50000,
+        disk_io_rate=5000.0,
+        csw=1000,
+        csw_rate=100.0,
+        syscalls=5000,
+        syscalls_rate=500.0,
+        threads=4,
+        mach_msgs=100,
+        mach_msgs_rate=10.0,
+        instructions=1000000,
+        cycles=2000000,
+        ipc=0.5,
+        energy=1000,
+        energy_rate=100.0,
+        wakeups=10,
+        wakeups_rate=1.0,
+        runnable_time=5000,
+        runnable_time_rate=0.5,
+        qos_interactive=0,
+        qos_interactive_rate=0.0,
+        gpu_time=0,
+        gpu_time_rate=0.0,
+        zombie_children=0,
+        state="running",
+        priority=31,
+        score=45,
+        band="elevated",
+    )
+
+    assert score.cpu_share == 2.5
+    assert score.dominant_resource == "cpu"
+    assert score.disproportionality == 2.5
+
+
+def test_process_score_no_category_scores():
+    """ProcessScore no longer has category score fields."""
+    # These fields should not exist
+    fields = ProcessScore.__dataclass_fields__
+    assert "blocking_score" not in fields
+    assert "contention_score" not in fields
+    assert "pressure_score" not in fields
+    assert "efficiency_score" not in fields
+    assert "dominant_category" not in fields
+    assert "dominant_metrics" not in fields
+
+
+# =============================================================================
+# Original tests
+# =============================================================================
+
 
 def test_get_core_count():
     """get_core_count returns positive integer."""
