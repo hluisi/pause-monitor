@@ -15,13 +15,7 @@ import psutil
 from rogue_hunter import logging as rlog
 from rogue_hunter.boottime import get_boot_time
 from rogue_hunter.collector import (
-    BAND_SEVERITY,
-    STATE_SEVERITY,
     LibprocCollector,
-    MetricValue,
-    MetricValueStr,
-    ProcessSamples,
-    ProcessScore,
 )
 from rogue_hunter.config import Config
 from rogue_hunter.forensics import ForensicsCapture
@@ -484,9 +478,9 @@ class Daemon:
                 # New processes entering rogue selection (only log if above threshold)
                 for pid in current_pids - previous_pids:
                     rogue = next(r for r in samples.rogues if r.pid == pid)
-                    if rogue.score.current > log_threshold:
+                    if rogue.score > log_threshold:
                         metrics = ", ".join(rogue.dominant_metrics)
-                        rlog.rogue_enter(rogue.command, pid, rogue.score.current, metrics)
+                        rlog.rogue_enter(rogue.command, pid, rogue.score, metrics)
                         logged_rogues.add(pid)
 
                 # Processes exiting rogue selection (only log if we logged their entry)
@@ -497,14 +491,10 @@ class Daemon:
 
                 previous_rogues = current_rogues
 
-                # Enrich with low/high from existing ring buffer history
-                samples = self._compute_pid_low_high(samples)
-
-                # Push enriched sample to ring buffer
+                # Push sample to ring buffer
                 self.ring_buffer.push(samples)
 
-                # Update per-process tracking with enriched data
-                # (tracker persists to storage, needs full MetricValue)
+                # Update per-process tracking
                 if self.tracker is not None:
                     self.tracker.update(samples.rogues)
 
@@ -513,7 +503,7 @@ class Daemon:
                 heartbeat_score_sum += samples.max_score
                 heartbeat_max_score = max(heartbeat_max_score, samples.max_score)
 
-                # Broadcast to TUI clients (with enriched low/high data)
+                # Broadcast to TUI clients
                 if self._socket_server and self._socket_server.has_clients:
                     await self._socket_server.broadcast(samples)
 
@@ -572,143 +562,6 @@ class Daemon:
                     break
                 except asyncio.TimeoutError:
                     pass  # Continue with next sample
-
-    def _get_pid_history(self, pid: int) -> list[ProcessScore]:
-        """Get all ProcessScore entries for a PID from ring buffer."""
-        history = []
-        for ring_sample in self.ring_buffer.samples:
-            for rogue in ring_sample.samples.rogues:
-                if rogue.pid == pid:
-                    history.append(rogue)
-        return history
-
-    def _enrich_metric(
-        self, current: MetricValue, history_values: list[float | int]
-    ) -> MetricValue:
-        """Compute low/high from history and create enriched MetricValue."""
-        if not history_values:
-            return current
-        all_values = history_values + [current.current]
-        return MetricValue(
-            current=current.current,
-            low=min(all_values),
-            high=max(all_values),
-        )
-
-    def _enrich_metric_str(
-        self, current: MetricValueStr, history_values: list[str], severity_map: dict[str, int]
-    ) -> MetricValueStr:
-        """Compute low/high from history using severity ordering."""
-        if not history_values:
-            return current
-        all_values = history_values + [current.current]
-        severities = [(v, severity_map.get(v, 0)) for v in all_values]
-        sorted_by_severity = sorted(severities, key=lambda x: x[1])
-        return MetricValueStr(
-            current=current.current,
-            low=sorted_by_severity[0][0],  # least severe
-            high=sorted_by_severity[-1][0],  # most severe
-        )
-
-    def _enrich_with_low_high(
-        self, rogue: ProcessScore, history: list[ProcessScore]
-    ) -> ProcessScore:
-        """Enrich a ProcessScore with low/high computed from history."""
-
-        # Extract history values for each field
-        def hist_vals(attr: str) -> list[float | int]:
-            return [getattr(h, attr).current for h in history]
-
-        def hist_vals_str(attr: str) -> list[str]:
-            return [getattr(h, attr).current for h in history]
-
-        return ProcessScore(
-            pid=rogue.pid,
-            command=rogue.command,
-            captured_at=rogue.captured_at,
-            # CPU
-            cpu=self._enrich_metric(rogue.cpu, hist_vals("cpu")),
-            # Memory
-            mem=self._enrich_metric(rogue.mem, hist_vals("mem")),
-            mem_peak=rogue.mem_peak,  # Lifetime peak, no range needed
-            pageins=self._enrich_metric(rogue.pageins, hist_vals("pageins")),
-            pageins_rate=self._enrich_metric(rogue.pageins_rate, hist_vals("pageins_rate")),
-            faults=self._enrich_metric(rogue.faults, hist_vals("faults")),
-            faults_rate=self._enrich_metric(rogue.faults_rate, hist_vals("faults_rate")),
-            # Disk I/O
-            disk_io=self._enrich_metric(rogue.disk_io, hist_vals("disk_io")),
-            disk_io_rate=self._enrich_metric(rogue.disk_io_rate, hist_vals("disk_io_rate")),
-            # Activity
-            csw=self._enrich_metric(rogue.csw, hist_vals("csw")),
-            csw_rate=self._enrich_metric(rogue.csw_rate, hist_vals("csw_rate")),
-            syscalls=self._enrich_metric(rogue.syscalls, hist_vals("syscalls")),
-            syscalls_rate=self._enrich_metric(rogue.syscalls_rate, hist_vals("syscalls_rate")),
-            threads=self._enrich_metric(rogue.threads, hist_vals("threads")),
-            mach_msgs=self._enrich_metric(rogue.mach_msgs, hist_vals("mach_msgs")),
-            mach_msgs_rate=self._enrich_metric(rogue.mach_msgs_rate, hist_vals("mach_msgs_rate")),
-            # Efficiency
-            instructions=self._enrich_metric(rogue.instructions, hist_vals("instructions")),
-            cycles=self._enrich_metric(rogue.cycles, hist_vals("cycles")),
-            ipc=self._enrich_metric(rogue.ipc, hist_vals("ipc")),
-            # Power
-            energy=self._enrich_metric(rogue.energy, hist_vals("energy")),
-            energy_rate=self._enrich_metric(rogue.energy_rate, hist_vals("energy_rate")),
-            wakeups=self._enrich_metric(rogue.wakeups, hist_vals("wakeups")),
-            wakeups_rate=self._enrich_metric(rogue.wakeups_rate, hist_vals("wakeups_rate")),
-            # Contention
-            runnable_time=self._enrich_metric(rogue.runnable_time, hist_vals("runnable_time")),
-            runnable_time_rate=self._enrich_metric(
-                rogue.runnable_time_rate, hist_vals("runnable_time_rate")
-            ),
-            qos_interactive=self._enrich_metric(
-                rogue.qos_interactive, hist_vals("qos_interactive")
-            ),
-            qos_interactive_rate=self._enrich_metric(
-                rogue.qos_interactive_rate, hist_vals("qos_interactive_rate")
-            ),
-            # GPU
-            gpu_time=self._enrich_metric(rogue.gpu_time, hist_vals("gpu_time")),
-            gpu_time_rate=self._enrich_metric(rogue.gpu_time_rate, hist_vals("gpu_time_rate")),
-            # Zombie children
-            zombie_children=self._enrich_metric(
-                rogue.zombie_children, hist_vals("zombie_children")
-            ),
-            # State (categorical)
-            state=self._enrich_metric_str(rogue.state, hist_vals_str("state"), STATE_SEVERITY),
-            priority=self._enrich_metric(rogue.priority, hist_vals("priority")),
-            # Scoring (4-category system)
-            score=self._enrich_metric(rogue.score, hist_vals("score")),
-            band=self._enrich_metric_str(rogue.band, hist_vals_str("band"), BAND_SEVERITY),
-            blocking_score=self._enrich_metric(rogue.blocking_score, hist_vals("blocking_score")),
-            contention_score=self._enrich_metric(
-                rogue.contention_score, hist_vals("contention_score")
-            ),
-            pressure_score=self._enrich_metric(rogue.pressure_score, hist_vals("pressure_score")),
-            efficiency_score=self._enrich_metric(
-                rogue.efficiency_score, hist_vals("efficiency_score")
-            ),
-            dominant_category=rogue.dominant_category,
-            dominant_metrics=rogue.dominant_metrics,
-        )
-
-    def _compute_pid_low_high(self, samples: ProcessSamples) -> ProcessSamples:
-        """Enrich ProcessScore with low/high from ring buffer history."""
-        enriched_rogues = []
-
-        for rogue in samples.rogues:
-            # Collect history for this PID from ring buffer
-            history = self._get_pid_history(rogue.pid)
-            # Enrich with low/high values
-            enriched = self._enrich_with_low_high(rogue, history)
-            enriched_rogues.append(enriched)
-
-        return ProcessSamples(
-            timestamp=samples.timestamp,
-            elapsed_ms=samples.elapsed_ms,
-            process_count=samples.process_count,
-            max_score=samples.max_score,
-            rogues=enriched_rogues,
-        )
 
 
 async def run_daemon(config: Config | None = None) -> None:

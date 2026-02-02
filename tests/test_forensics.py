@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from rogue_hunter.collector import MetricValue, MetricValueStr, ProcessSamples, ProcessScore
+from rogue_hunter.collector import ProcessSamples, ProcessScore
 from rogue_hunter.forensics import (
     ForensicsCapture,
     identify_culprits,
@@ -16,14 +16,6 @@ from rogue_hunter.forensics import (
 )
 from rogue_hunter.ringbuffer import BufferContents, RingBuffer, RingSample
 from rogue_hunter.storage import get_connection, init_database
-
-
-def _metric(val: float | int) -> MetricValue:
-    return MetricValue(current=val, low=val, high=val)
-
-
-def _metric_str(val: str) -> MetricValueStr:
-    return MetricValueStr(current=val, low=val, high=val)
 
 
 def make_process_score(
@@ -42,44 +34,44 @@ def make_process_score(
         pid=pid,
         command=command,
         captured_at=kwargs.get("captured_at", time.time()),
-        cpu=_metric(cpu),
-        mem=_metric(kwargs.get("mem", 100 * 1024 * 1024)),
+        cpu=cpu,
+        mem=kwargs.get("mem", 100 * 1024 * 1024),
         mem_peak=kwargs.get("mem_peak", 150 * 1024 * 1024),
-        pageins=_metric(kwargs.get("pageins", 100)),
-        pageins_rate=_metric(kwargs.get("pageins_rate", 0.0)),
-        faults=_metric(kwargs.get("faults", 0)),
-        faults_rate=_metric(kwargs.get("faults_rate", 0.0)),
-        disk_io=_metric(kwargs.get("disk_io", 0)),
-        disk_io_rate=_metric(kwargs.get("disk_io_rate", 0.0)),
-        csw=_metric(kwargs.get("csw", 1000)),
-        csw_rate=_metric(kwargs.get("csw_rate", 0.0)),
-        syscalls=_metric(kwargs.get("syscalls", 500)),
-        syscalls_rate=_metric(kwargs.get("syscalls_rate", 0.0)),
-        threads=_metric(kwargs.get("threads", 10)),
-        mach_msgs=_metric(kwargs.get("mach_msgs", 0)),
-        mach_msgs_rate=_metric(kwargs.get("mach_msgs_rate", 0.0)),
-        instructions=_metric(kwargs.get("instructions", 0)),
-        cycles=_metric(kwargs.get("cycles", 0)),
-        ipc=_metric(kwargs.get("ipc", 0.0)),
-        energy=_metric(kwargs.get("energy", 0)),
-        energy_rate=_metric(kwargs.get("energy_rate", 0.0)),
-        wakeups=_metric(kwargs.get("wakeups", 0)),
-        wakeups_rate=_metric(kwargs.get("wakeups_rate", 0.0)),
-        runnable_time=_metric(kwargs.get("runnable_time", 0)),
-        runnable_time_rate=_metric(kwargs.get("runnable_time_rate", 0.0)),
-        qos_interactive=_metric(kwargs.get("qos_interactive", 0)),
-        qos_interactive_rate=_metric(kwargs.get("qos_interactive_rate", 0.0)),
-        gpu_time=_metric(kwargs.get("gpu_time", 0)),
-        gpu_time_rate=_metric(kwargs.get("gpu_time_rate", 0.0)),
-        zombie_children=_metric(kwargs.get("zombie_children", 0)),
-        state=_metric_str(state),
-        priority=_metric(kwargs.get("priority", 31)),
-        score=_metric(score),
-        band=_metric_str(band),
-        blocking_score=_metric(kwargs.get("blocking_score", score * 0.4)),
-        contention_score=_metric(kwargs.get("contention_score", score * 0.3)),
-        pressure_score=_metric(kwargs.get("pressure_score", score * 0.2)),
-        efficiency_score=_metric(kwargs.get("efficiency_score", score * 0.1)),
+        pageins=kwargs.get("pageins", 100),
+        pageins_rate=kwargs.get("pageins_rate", 0.0),
+        faults=kwargs.get("faults", 0),
+        faults_rate=kwargs.get("faults_rate", 0.0),
+        disk_io=kwargs.get("disk_io", 0),
+        disk_io_rate=kwargs.get("disk_io_rate", 0.0),
+        csw=kwargs.get("csw", 1000),
+        csw_rate=kwargs.get("csw_rate", 0.0),
+        syscalls=kwargs.get("syscalls", 500),
+        syscalls_rate=kwargs.get("syscalls_rate", 0.0),
+        threads=kwargs.get("threads", 10),
+        mach_msgs=kwargs.get("mach_msgs", 0),
+        mach_msgs_rate=kwargs.get("mach_msgs_rate", 0.0),
+        instructions=kwargs.get("instructions", 0),
+        cycles=kwargs.get("cycles", 0),
+        ipc=kwargs.get("ipc", 0.0),
+        energy=kwargs.get("energy", 0),
+        energy_rate=kwargs.get("energy_rate", 0.0),
+        wakeups=kwargs.get("wakeups", 0),
+        wakeups_rate=kwargs.get("wakeups_rate", 0.0),
+        runnable_time=kwargs.get("runnable_time", 0),
+        runnable_time_rate=kwargs.get("runnable_time_rate", 0.0),
+        qos_interactive=kwargs.get("qos_interactive", 0),
+        qos_interactive_rate=kwargs.get("qos_interactive_rate", 0.0),
+        gpu_time=kwargs.get("gpu_time", 0),
+        gpu_time_rate=kwargs.get("gpu_time_rate", 0.0),
+        zombie_children=kwargs.get("zombie_children", 0),
+        state=state,
+        priority=kwargs.get("priority", 31),
+        score=score,
+        band=band,
+        blocking_score=kwargs.get("blocking_score", score * 0.4),
+        contention_score=kwargs.get("contention_score", score * 0.3),
+        pressure_score=kwargs.get("pressure_score", score * 0.2),
+        efficiency_score=kwargs.get("efficiency_score", score * 0.1),
         dominant_category=dominant_category,
         dominant_metrics=dominant_metrics or ["cpu:50%"],
     )
@@ -96,8 +88,7 @@ def make_process_samples(
     if rogues is None:
         rogues = []
     if max_score is None:
-        # score is MetricValue, extract .current for comparison
-        max_score = max((r.score.current for r in rogues), default=0)
+        max_score = max((r.score for r in rogues), default=0)
     return ProcessSamples(
         timestamp=timestamp or datetime.now(),
         elapsed_ms=elapsed_ms,
@@ -287,8 +278,7 @@ def test_identify_culprits_from_buffer():
     assert len(culprits) == 1
     assert culprits[0]["pid"] == 100
     assert culprits[0]["command"] == "Chrome"
-    # identify_culprits returns full MetricValue dict for score
-    assert culprits[0]["score"]["current"] == 30
+    assert culprits[0]["score"] == 30
     assert culprits[0]["dominant_category"] == "blocking"
     assert culprits[0]["dominant_metrics"] == ["cpu:50%", "mem:100MB"]
 
@@ -309,10 +299,10 @@ def test_identify_culprits_multiple_processes():
     assert len(culprits) == 2
     assert culprits[0]["pid"] == 100
     assert culprits[0]["command"] == "python"
-    assert culprits[0]["score"]["current"] == 30
+    assert culprits[0]["score"] == 30
     assert culprits[1]["pid"] == 200
     assert culprits[1]["command"] == "Chrome"
-    assert culprits[1]["score"]["current"] == 15
+    assert culprits[1]["score"] == 15
 
 
 def test_identify_culprits_empty_buffer():
@@ -355,7 +345,7 @@ def test_identify_culprits_uses_peak_values():
     assert len(culprits) == 1
     assert culprits[0]["pid"] == 300
     assert culprits[0]["command"] == "Safari"
-    assert culprits[0]["score"]["current"] == 35
+    assert culprits[0]["score"] == 35
 
 
 def test_identify_culprits_differentiates_by_pid():
@@ -379,10 +369,10 @@ def test_identify_culprits_differentiates_by_pid():
     # Sorted by score descending
     assert culprits[0]["pid"] == 1001
     assert culprits[0]["command"] == "Chrome"
-    assert culprits[0]["score"]["current"] == 40
+    assert culprits[0]["score"] == 40
     assert culprits[1]["pid"] == 1002
     assert culprits[1]["command"] == "Chrome"
-    assert culprits[1]["score"]["current"] == 25
+    assert culprits[1]["score"] == 25
 
 
 # --- ForensicsCapture Integration Tests ---
@@ -435,7 +425,7 @@ async def test_forensics_capture_stores_in_database(forensics_db, tmp_path: Path
         mock_process.wait = AsyncMock(return_value=0)
         mock_exec.return_value = mock_process
 
-        capture = ForensicsCapture(conn, event_id)
+        capture = ForensicsCapture(conn, event_id, tmp_path)
 
         # capture_and_store requires temp dir to exist for tailspin
         with patch.object(capture, "_capture_tailspin") as mock_tailspin:
@@ -473,7 +463,7 @@ async def test_forensics_capture_cleans_up_temp_dir(forensics_db, tmp_path: Path
         mock_process.wait = AsyncMock(return_value=0)
         mock_exec.return_value = mock_process
 
-        capture = ForensicsCapture(conn, event_id)
+        capture = ForensicsCapture(conn, event_id, tmp_path)
 
         with patch.object(capture, "_capture_tailspin") as mock_tailspin:
             mock_tailspin.return_value = Exception("skipped")
@@ -484,7 +474,7 @@ async def test_forensics_capture_cleans_up_temp_dir(forensics_db, tmp_path: Path
 
 
 @pytest.mark.asyncio
-async def test_forensics_capture_handles_failures_gracefully(forensics_db):
+async def test_forensics_capture_handles_failures_gracefully(forensics_db, tmp_path: Path):
     """ForensicsCapture handles capture failures without crashing."""
     conn, event_id = forensics_db
 
@@ -497,7 +487,7 @@ async def test_forensics_capture_handles_failures_gracefully(forensics_db):
     with patch("rogue_hunter.forensics.asyncio.create_subprocess_exec") as mock_exec:
         mock_exec.side_effect = FileNotFoundError("Command not found")
 
-        capture = ForensicsCapture(conn, event_id)
+        capture = ForensicsCapture(conn, event_id, tmp_path)
         await capture.capture_and_store(contents, trigger="test")
 
     # Should still create capture record with failure status
@@ -511,11 +501,11 @@ async def test_forensics_capture_handles_failures_gracefully(forensics_db):
 
 
 @pytest.mark.asyncio
-async def test_tailspin_capture_uses_sudo(forensics_db):
+async def test_tailspin_capture_uses_sudo(forensics_db, tmp_path: Path):
     """Tailspin capture uses sudo -n for non-interactive sudo."""
     conn, event_id = forensics_db
 
-    capture = ForensicsCapture(conn, event_id)
+    capture = ForensicsCapture(conn, event_id, tmp_path)
 
     with patch("rogue_hunter.forensics.asyncio.create_subprocess_exec") as mock_exec:
         # Simulate successful sudo tailspin
@@ -524,11 +514,8 @@ async def test_tailspin_capture_uses_sudo(forensics_db):
         mock_process.returncode = 0
         mock_exec.return_value = mock_process
 
-        # Create the expected output file so the check passes
-        from rogue_hunter.forensics import TAILSPIN_DIR
-
-        TAILSPIN_DIR.mkdir(parents=True, exist_ok=True)
-        expected_path = TAILSPIN_DIR / f"capture_{event_id}.tailspin"
+        # Create the expected output file so the check passes (using tmp_path as runtime_dir)
+        expected_path = tmp_path / f"capture_{event_id}.tailspin"
         expected_path.write_bytes(b"dummy")
 
         try:
@@ -542,7 +529,8 @@ async def test_tailspin_capture_uses_sudo(forensics_db):
             assert call_args[2] == "/usr/bin/tailspin"
             assert call_args[3] == "save"
             assert call_args[4] == "-o"
-            assert "/tmp/rogue-hunter/capture_" in call_args[5]
+            # Now uses tmp_path, not hardcoded /tmp/rogue-hunter
+            assert str(tmp_path) in call_args[5]
 
             assert result == expected_path
         finally:
@@ -552,11 +540,11 @@ async def test_tailspin_capture_uses_sudo(forensics_db):
 
 
 @pytest.mark.asyncio
-async def test_tailspin_capture_permission_error(forensics_db):
+async def test_tailspin_capture_permission_error(forensics_db, tmp_path: Path):
     """Tailspin capture raises PermissionError when sudo -n fails."""
     conn, event_id = forensics_db
 
-    capture = ForensicsCapture(conn, event_id)
+    capture = ForensicsCapture(conn, event_id, tmp_path)
 
     with patch("rogue_hunter.forensics.asyncio.create_subprocess_exec") as mock_exec:
         # Simulate sudo -n failure (password required)

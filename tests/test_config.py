@@ -629,8 +629,8 @@ def test_sparkline_config_defaults():
     """SparklineConfig has correct defaults."""
     config = SparklineConfig()
     assert config.height == 2
-    assert config.mode == "blocks"
-    assert config.inverted is False
+    assert config.orientation == "normal"
+    assert config.direction == "rtl"
 
 
 def test_tui_config_has_sparkline():
@@ -644,15 +644,15 @@ def test_config_save_includes_sparkline(tmp_path):
     config_path = tmp_path / "config.toml"
     config = Config()
     config.tui.sparkline.height = 3
-    config.tui.sparkline.mode = "braille"
-    config.tui.sparkline.inverted = True
+    config.tui.sparkline.orientation = "inverted"
+    config.tui.sparkline.direction = "ltr"
     config.save(config_path)
 
     content = config_path.read_text()
     assert "[tui.sparkline]" in content
     assert "height = 3" in content
-    assert 'mode = "braille"' in content
-    assert "inverted = true" in content
+    assert 'orientation = "inverted"' in content
+    assert 'direction = "ltr"' in content
 
 
 def test_config_loads_sparkline(tmp_path):
@@ -661,14 +661,14 @@ def test_config_loads_sparkline(tmp_path):
     config_file.write_text("""
 [tui.sparkline]
 height = 3
-mode = "braille"
-inverted = true
+orientation = "inverted"
+direction = "ltr"
 """)
 
     config = Config.load(config_file)
     assert config.tui.sparkline.height == 3
-    assert config.tui.sparkline.mode == "braille"
-    assert config.tui.sparkline.inverted is True
+    assert config.tui.sparkline.orientation == "inverted"
+    assert config.tui.sparkline.direction == "ltr"
 
 
 def test_config_loads_partial_sparkline(tmp_path):
@@ -676,14 +676,14 @@ def test_config_loads_partial_sparkline(tmp_path):
     config_file = tmp_path / "config.toml"
     config_file.write_text("""
 [tui.sparkline]
-mode = "braille"
+orientation = "mirrored"
 """)
 
     config = Config.load(config_file)
     defaults = SparklineConfig()
-    assert config.tui.sparkline.mode == "braille"
+    assert config.tui.sparkline.orientation == "mirrored"
     assert config.tui.sparkline.height == defaults.height
-    assert config.tui.sparkline.inverted == defaults.inverted
+    assert config.tui.sparkline.direction == defaults.direction
 
 
 def test_sparkline_config_roundtrip(tmp_path):
@@ -692,11 +692,11 @@ def test_sparkline_config_roundtrip(tmp_path):
 
     config = Config()
     config.tui.sparkline.height = 4
-    config.tui.sparkline.mode = "braille"
-    config.tui.sparkline.inverted = True
+    config.tui.sparkline.orientation = "mirrored"
+    config.tui.sparkline.direction = "ltr"
     config.save(config_path)
 
     loaded = Config.load(config_path)
     assert loaded.tui.sparkline.height == 4
-    assert loaded.tui.sparkline.mode == "braille"
-    assert loaded.tui.sparkline.inverted is True
+    assert loaded.tui.sparkline.orientation == "mirrored"
+    assert loaded.tui.sparkline.direction == "ltr"

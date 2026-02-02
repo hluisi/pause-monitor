@@ -14,8 +14,6 @@ import pytest
 
 from rogue_hunter.collector import (
     LibprocCollector,
-    MetricValue,
-    MetricValueStr,
     ProcessSamples,
 )
 from rogue_hunter.config import Config
@@ -23,16 +21,6 @@ from rogue_hunter.daemon import Daemon, DaemonState
 
 # Test constants
 TEST_TIMESTAMP = 1706000000.0  # 2024-01-23 UTC
-
-
-def _metric(val: float | int) -> MetricValue:
-    """Create MetricValue with same value for current/low/high."""
-    return MetricValue(current=val, low=val, high=val)
-
-
-def _metric_str(val: str) -> MetricValueStr:
-    """Create MetricValueStr with same value for current/low/high."""
-    return MetricValueStr(current=val, low=val, high=val)
 
 
 # === Test Fixtures ===

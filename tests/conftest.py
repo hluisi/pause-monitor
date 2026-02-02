@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from rogue_hunter.collector import MetricValue, MetricValueStr, ProcessScore
+from rogue_hunter.collector import ProcessScore
 from rogue_hunter.storage import init_database
 
 
@@ -20,28 +20,6 @@ def initialized_db(tmp_db: Path) -> Path:
     """Create an initialized database with schema."""
     init_database(tmp_db)
     return tmp_db
-
-
-def make_metric(
-    value: float | int,
-    low: float | int | None = None,
-    high: float | int | None = None,
-) -> MetricValue:
-    """Create a MetricValue for testing with optional low/high."""
-    return MetricValue(
-        current=value,
-        low=low if low is not None else value,
-        high=high if high is not None else value,
-    )
-
-
-def make_metric_str(value: str, low: str | None = None, high: str | None = None) -> MetricValueStr:
-    """Create a MetricValueStr for testing with optional low/high."""
-    return MetricValueStr(
-        current=value,
-        low=low if low is not None else value,
-        high=high if high is not None else value,
-    )
 
 
 def make_process_score(
@@ -89,64 +67,61 @@ def make_process_score(
     dominant_metrics: list[str] | None = None,
     captured_at: float | None = None,
 ) -> ProcessScore:
-    """Create a ProcessScore for testing.
-
-    All MetricValue fields are created with low=high=current.
-    """
+    """Create a ProcessScore for testing."""
     cap_time = captured_at or time.time()
     return ProcessScore(
         pid=pid,
         command=command,
         captured_at=cap_time,
         # CPU
-        cpu=make_metric(cpu),
+        cpu=cpu,
         # Memory
-        mem=make_metric(mem),
+        mem=mem,
         mem_peak=mem_peak,
-        pageins=make_metric(pageins),
-        pageins_rate=make_metric(pageins_rate),
-        faults=make_metric(faults),
-        faults_rate=make_metric(faults_rate),
+        pageins=pageins,
+        pageins_rate=pageins_rate,
+        faults=faults,
+        faults_rate=faults_rate,
         # Disk I/O
-        disk_io=make_metric(disk_io),
-        disk_io_rate=make_metric(disk_io_rate),
+        disk_io=disk_io,
+        disk_io_rate=disk_io_rate,
         # Activity
-        csw=make_metric(csw),
-        csw_rate=make_metric(csw_rate),
-        syscalls=make_metric(syscalls),
-        syscalls_rate=make_metric(syscalls_rate),
-        threads=make_metric(threads),
-        mach_msgs=make_metric(mach_msgs),
-        mach_msgs_rate=make_metric(mach_msgs_rate),
+        csw=csw,
+        csw_rate=csw_rate,
+        syscalls=syscalls,
+        syscalls_rate=syscalls_rate,
+        threads=threads,
+        mach_msgs=mach_msgs,
+        mach_msgs_rate=mach_msgs_rate,
         # Efficiency
-        instructions=make_metric(instructions),
-        cycles=make_metric(cycles),
-        ipc=make_metric(ipc),
+        instructions=instructions,
+        cycles=cycles,
+        ipc=ipc,
         # Power
-        energy=make_metric(energy),
-        energy_rate=make_metric(energy_rate),
-        wakeups=make_metric(wakeups),
-        wakeups_rate=make_metric(wakeups_rate),
+        energy=energy,
+        energy_rate=energy_rate,
+        wakeups=wakeups,
+        wakeups_rate=wakeups_rate,
         # Contention
-        runnable_time=make_metric(runnable_time),
-        runnable_time_rate=make_metric(runnable_time_rate),
-        qos_interactive=make_metric(qos_interactive),
-        qos_interactive_rate=make_metric(qos_interactive_rate),
+        runnable_time=runnable_time,
+        runnable_time_rate=runnable_time_rate,
+        qos_interactive=qos_interactive,
+        qos_interactive_rate=qos_interactive_rate,
         # GPU
-        gpu_time=make_metric(gpu_time),
-        gpu_time_rate=make_metric(gpu_time_rate),
+        gpu_time=gpu_time,
+        gpu_time_rate=gpu_time_rate,
         # Zombie children
-        zombie_children=make_metric(zombie_children),
+        zombie_children=zombie_children,
         # State
-        state=make_metric_str(state),
-        priority=make_metric(priority),
+        state=state,
+        priority=priority,
         # Scoring
-        score=make_metric(score),
-        band=make_metric_str(band),
-        blocking_score=make_metric(blocking_score),
-        contention_score=make_metric(contention_score),
-        pressure_score=make_metric(pressure_score),
-        efficiency_score=make_metric(efficiency_score),
+        score=score,
+        band=band,
+        blocking_score=blocking_score,
+        contention_score=contention_score,
+        pressure_score=pressure_score,
+        efficiency_score=efficiency_score,
         dominant_category=dominant_category,
         dominant_metrics=dominant_metrics or [],
     )

@@ -16,8 +16,6 @@ from pathlib import Path
 import pytest
 
 from rogue_hunter.collector import (
-    MetricValue,
-    MetricValueStr,
     ProcessSamples,
     ProcessScore,
 )
@@ -38,16 +36,6 @@ def short_tmp_path():
         yield Path(tmpdir)
 
 
-def _metric(val: float | int) -> MetricValue:
-    """Create MetricValue with same value for current/low/high."""
-    return MetricValue(current=val, low=val, high=val)
-
-
-def _metric_str(val: str) -> MetricValueStr:
-    """Create MetricValueStr with same value for current/low/high."""
-    return MetricValueStr(current=val, low=val, high=val)
-
-
 def make_test_process_score(**kwargs) -> ProcessScore:
     """Create ProcessScore with sensible defaults for testing."""
     cap_time = kwargs.pop("captured_at", time.time())
@@ -56,7 +44,6 @@ def make_test_process_score(**kwargs) -> ProcessScore:
     dominant_category = kwargs.pop("dominant_category", "blocking")
     dominant_metrics = kwargs.pop("dominant_metrics", ["cpu:50%"])
 
-    # Handle MetricValue fields - convert simple values to MetricValue
     cpu = kwargs.pop("cpu", 50.0)
     mem = kwargs.pop("mem", 1024 * 1024)
     pageins = kwargs.pop("pageins", 10)
@@ -93,7 +80,6 @@ def make_test_process_score(**kwargs) -> ProcessScore:
     pressure_score = kwargs.pop("pressure_score", score * 0.2)
     efficiency_score = kwargs.pop("efficiency_score", score * 0.1)
 
-    # MetricValueStr fields
     state = kwargs.pop("state", "running")
     band = kwargs.pop("band", "elevated")
 
@@ -101,44 +87,44 @@ def make_test_process_score(**kwargs) -> ProcessScore:
         pid=pid,
         command=command,
         captured_at=cap_time,
-        cpu=_metric(cpu),
-        mem=_metric(mem),
+        cpu=cpu,
+        mem=mem,
         mem_peak=mem,
-        pageins=_metric(pageins),
-        pageins_rate=_metric(pageins_rate),
-        faults=_metric(faults),
-        faults_rate=_metric(faults_rate),
-        disk_io=_metric(disk_io),
-        disk_io_rate=_metric(disk_io_rate),
-        csw=_metric(csw),
-        csw_rate=_metric(csw_rate),
-        syscalls=_metric(syscalls),
-        syscalls_rate=_metric(syscalls_rate),
-        threads=_metric(threads),
-        mach_msgs=_metric(mach_msgs),
-        mach_msgs_rate=_metric(mach_msgs_rate),
-        instructions=_metric(instructions),
-        cycles=_metric(cycles),
-        ipc=_metric(ipc),
-        energy=_metric(energy),
-        energy_rate=_metric(energy_rate),
-        wakeups=_metric(wakeups),
-        wakeups_rate=_metric(wakeups_rate),
-        runnable_time=_metric(runnable_time),
-        runnable_time_rate=_metric(runnable_time_rate),
-        qos_interactive=_metric(qos_interactive),
-        qos_interactive_rate=_metric(qos_interactive_rate),
-        gpu_time=_metric(gpu_time),
-        gpu_time_rate=_metric(gpu_time_rate),
-        zombie_children=_metric(zombie_children),
-        state=_metric_str(state),
-        priority=_metric(priority),
-        score=_metric(score),
-        band=_metric_str(band),
-        blocking_score=_metric(blocking_score),
-        contention_score=_metric(contention_score),
-        pressure_score=_metric(pressure_score),
-        efficiency_score=_metric(efficiency_score),
+        pageins=pageins,
+        pageins_rate=pageins_rate,
+        faults=faults,
+        faults_rate=faults_rate,
+        disk_io=disk_io,
+        disk_io_rate=disk_io_rate,
+        csw=csw,
+        csw_rate=csw_rate,
+        syscalls=syscalls,
+        syscalls_rate=syscalls_rate,
+        threads=threads,
+        mach_msgs=mach_msgs,
+        mach_msgs_rate=mach_msgs_rate,
+        instructions=instructions,
+        cycles=cycles,
+        ipc=ipc,
+        energy=energy,
+        energy_rate=energy_rate,
+        wakeups=wakeups,
+        wakeups_rate=wakeups_rate,
+        runnable_time=runnable_time,
+        runnable_time_rate=runnable_time_rate,
+        qos_interactive=qos_interactive,
+        qos_interactive_rate=qos_interactive_rate,
+        gpu_time=gpu_time,
+        gpu_time_rate=gpu_time_rate,
+        zombie_children=zombie_children,
+        state=state,
+        priority=priority,
+        score=score,
+        band=band,
+        blocking_score=blocking_score,
+        contention_score=contention_score,
+        pressure_score=pressure_score,
+        efficiency_score=efficiency_score,
         dominant_category=dominant_category,
         dominant_metrics=(
             list(dominant_metrics) if isinstance(dominant_metrics, frozenset) else dominant_metrics
@@ -286,9 +272,9 @@ async def test_full_collection_to_socket_cycle(short_tmp_path):
             (r for r in broadcast_msg["rogues"] if r["command"] == "test_proc"), None
         )
         assert proc_in_broadcast is not None
-        # MetricValue fields are serialized as {"current", "low", "high"} dicts
-        assert proc_in_broadcast["cpu"]["current"] == 85.1
-        assert proc_in_broadcast["score"]["current"] == 75
+        # Fields are now plain values
+        assert proc_in_broadcast["cpu"] == 85.1
+        assert proc_in_broadcast["score"] == 75
 
         writer.close()
         await writer.wait_closed()

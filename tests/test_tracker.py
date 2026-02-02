@@ -1,15 +1,7 @@
 # tests/test_tracker.py
 """Tests for per-process band tracker."""
 
-from rogue_hunter.collector import MetricValue, MetricValueStr, ProcessScore
-
-
-def _metric(val: float | int) -> MetricValue:
-    return MetricValue(current=val, low=val, high=val)
-
-
-def _metric_str(val: str) -> MetricValueStr:
-    return MetricValueStr(current=val, low=val, high=val)
+from rogue_hunter.collector import ProcessScore
 
 
 def _get_band_for_score(score: int) -> str:
@@ -44,44 +36,44 @@ def make_score(
         pid=pid,
         command=command,
         captured_at=captured_at,
-        cpu=_metric(kwargs.get("cpu", 50.0)),
-        mem=_metric(kwargs.get("mem", 1000)),
+        cpu=kwargs.get("cpu", 50.0),
+        mem=kwargs.get("mem", 1000),
         mem_peak=kwargs.get("mem_peak", 1500),
-        pageins=_metric(kwargs.get("pageins", 0)),
-        pageins_rate=_metric(kwargs.get("pageins_rate", 0.0)),
-        faults=_metric(kwargs.get("faults", 0)),
-        faults_rate=_metric(kwargs.get("faults_rate", 0.0)),
-        disk_io=_metric(kwargs.get("disk_io", 0)),
-        disk_io_rate=_metric(kwargs.get("disk_io_rate", 0.0)),
-        csw=_metric(kwargs.get("csw", 10)),
-        csw_rate=_metric(kwargs.get("csw_rate", 0.0)),
-        syscalls=_metric(kwargs.get("syscalls", 5)),
-        syscalls_rate=_metric(kwargs.get("syscalls_rate", 0.0)),
-        threads=_metric(kwargs.get("threads", 2)),
-        mach_msgs=_metric(kwargs.get("mach_msgs", 0)),
-        mach_msgs_rate=_metric(kwargs.get("mach_msgs_rate", 0.0)),
-        instructions=_metric(kwargs.get("instructions", 0)),
-        cycles=_metric(kwargs.get("cycles", 0)),
-        ipc=_metric(kwargs.get("ipc", 0.0)),
-        energy=_metric(kwargs.get("energy", 0)),
-        energy_rate=_metric(kwargs.get("energy_rate", 0.0)),
-        wakeups=_metric(kwargs.get("wakeups", 0)),
-        wakeups_rate=_metric(kwargs.get("wakeups_rate", 0.0)),
-        runnable_time=_metric(kwargs.get("runnable_time", 0)),
-        runnable_time_rate=_metric(kwargs.get("runnable_time_rate", 0.0)),
-        qos_interactive=_metric(kwargs.get("qos_interactive", 0)),
-        qos_interactive_rate=_metric(kwargs.get("qos_interactive_rate", 0.0)),
-        gpu_time=_metric(kwargs.get("gpu_time", 0)),
-        gpu_time_rate=_metric(kwargs.get("gpu_time_rate", 0.0)),
-        zombie_children=_metric(kwargs.get("zombie_children", 0)),
-        state=_metric_str(state),
-        priority=_metric(kwargs.get("priority", 31)),
-        score=_metric(score),
-        band=_metric_str(band),
-        blocking_score=_metric(kwargs.get("blocking_score", score * 0.4)),
-        contention_score=_metric(kwargs.get("contention_score", score * 0.3)),
-        pressure_score=_metric(kwargs.get("pressure_score", score * 0.2)),
-        efficiency_score=_metric(kwargs.get("efficiency_score", score * 0.1)),
+        pageins=kwargs.get("pageins", 0),
+        pageins_rate=kwargs.get("pageins_rate", 0.0),
+        faults=kwargs.get("faults", 0),
+        faults_rate=kwargs.get("faults_rate", 0.0),
+        disk_io=kwargs.get("disk_io", 0),
+        disk_io_rate=kwargs.get("disk_io_rate", 0.0),
+        csw=kwargs.get("csw", 10),
+        csw_rate=kwargs.get("csw_rate", 0.0),
+        syscalls=kwargs.get("syscalls", 5),
+        syscalls_rate=kwargs.get("syscalls_rate", 0.0),
+        threads=kwargs.get("threads", 2),
+        mach_msgs=kwargs.get("mach_msgs", 0),
+        mach_msgs_rate=kwargs.get("mach_msgs_rate", 0.0),
+        instructions=kwargs.get("instructions", 0),
+        cycles=kwargs.get("cycles", 0),
+        ipc=kwargs.get("ipc", 0.0),
+        energy=kwargs.get("energy", 0),
+        energy_rate=kwargs.get("energy_rate", 0.0),
+        wakeups=kwargs.get("wakeups", 0),
+        wakeups_rate=kwargs.get("wakeups_rate", 0.0),
+        runnable_time=kwargs.get("runnable_time", 0),
+        runnable_time_rate=kwargs.get("runnable_time_rate", 0.0),
+        qos_interactive=kwargs.get("qos_interactive", 0),
+        qos_interactive_rate=kwargs.get("qos_interactive_rate", 0.0),
+        gpu_time=kwargs.get("gpu_time", 0),
+        gpu_time_rate=kwargs.get("gpu_time_rate", 0.0),
+        zombie_children=kwargs.get("zombie_children", 0),
+        state=state,
+        priority=kwargs.get("priority", 31),
+        score=score,
+        band=band,
+        blocking_score=kwargs.get("blocking_score", score * 0.4),
+        contention_score=kwargs.get("contention_score", score * 0.3),
+        pressure_score=kwargs.get("pressure_score", score * 0.2),
+        efficiency_score=kwargs.get("efficiency_score", score * 0.1),
         dominant_category=kwargs.get("dominant_category", "blocking"),
         dominant_metrics=kwargs.get("dominant_metrics", ["cpu:50%"] if score >= 40 else []),
     )
@@ -274,14 +266,14 @@ def test_tracker_inserts_entry_snapshot(tmp_path):
     # Get the event ID
     event_id = tracker.tracked[789].event_id
 
-    # Check snapshot was inserted with structured columns (MetricValue dicts)
+    # Check snapshot was inserted
     snapshots = get_process_snapshots(conn, event_id)
     assert len(snapshots) == 1
     snap = snapshots[0]
     assert snap["snapshot_type"] == "entry"
-    assert snap["score"]["current"] == 55
-    assert snap["cpu"]["current"] == 60.0
-    assert snap["mem"]["current"] == 2000
+    assert snap["score"] == 55
+    assert snap["cpu"] == 60.0
+    assert snap["mem"] == 2000
     assert snap["dominant_category"] == "blocking"
     assert snap["dominant_metrics"] == ["cpu:60%", "mem:2KB"]
 
@@ -314,9 +306,9 @@ def test_tracker_inserts_exit_snapshot_on_score_drop(tmp_path):
     types = {s["snapshot_type"] for s in snapshots}
     assert types == {"entry", "exit"}
 
-    # Verify exit snapshot has the low score (MetricValue dict)
+    # Verify exit snapshot has the low score
     exit_snap = [s for s in snapshots if s["snapshot_type"] == "exit"][0]
-    assert exit_snap["score"]["current"] == 30
+    assert exit_snap["score"] == 30
 
     conn.close()
 

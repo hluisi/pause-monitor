@@ -21,7 +21,12 @@ from textual.widgets import DataTable, Footer, Label, RichLog, Static
 
 from rogue_hunter.config import Config
 from rogue_hunter.socket_client import SocketClient
-from rogue_hunter.tui.sparkline import GradientColor, Sparkline, SparklineMode
+from rogue_hunter.tui.sparkline import (
+    GradientColor,
+    Sparkline,
+    SparklineDirection,
+    SparklineOrientation,
+)
 
 
 def get_tier_name(score: int, elevated: int, critical: int) -> str:
@@ -171,12 +176,26 @@ class HeaderBar(Static):
 
         # Create sparkline with config values
         sp_config = self.app.config.tui.sparkline
-        mode = SparklineMode.BRAILLE if sp_config.mode == "braille" else SparklineMode.BLOCKS
+
+        # Map config strings to enums
+        orientation_map = {
+            "normal": SparklineOrientation.NORMAL,
+            "inverted": SparklineOrientation.INVERTED,
+            "mirrored": SparklineOrientation.MIRRORED,
+        }
+        orientation = orientation_map.get(sp_config.orientation, SparklineOrientation.NORMAL)
+
+        direction_map = {
+            "rtl": SparklineDirection.RTL,
+            "ltr": SparklineDirection.LTR,
+        }
+        direction = direction_map.get(sp_config.direction, SparklineDirection.RTL)
+
         sparkline = Sparkline(
             height=sp_config.height,
             max_value=100,
-            mode=mode,
-            inverted=sp_config.inverted,
+            orientation=orientation,
+            direction=direction,
             color_func=self._get_sparkline_color,
             id="sparkline",
         )
@@ -498,9 +517,9 @@ class ProcessTable(Static):
                     del self._cached_rogues[pid]
                     self._last_seen.pop(pid, None)
 
-        # Sort by score (MetricValue dict: {"current": x, "low": y, "high": z})
+        # Sort by score (plain int value)
         display_list.sort(
-            key=lambda x: x[0]["score"]["current"],
+            key=lambda x: x[0]["score"],
             reverse=True,
         )
 
@@ -508,7 +527,7 @@ class ProcessTable(Static):
 
         for rogue, is_decayed in display_list:
             pid = rogue.get("pid", 0)
-            score = rogue["score"]["current"]
+            score = rogue["score"]
 
             prev_score = self._prev_scores.get(pid, score)
 
@@ -523,15 +542,15 @@ class ProcessTable(Static):
 
             self._prev_scores[pid] = score
 
-            # Extract category scores
-            blocking = rogue.get("blocking_score", {}).get("current", 0)
-            contention = rogue.get("contention_score", {}).get("current", 0)
-            pressure = rogue.get("pressure_score", {}).get("current", 0)
-            efficiency = rogue.get("efficiency_score", {}).get("current", 0)
+            # Extract category scores (plain values)
+            blocking = rogue.get("blocking_score", 0)
+            contention = rogue.get("contention_score", 0)
+            pressure = rogue.get("pressure_score", 0)
+            efficiency = rogue.get("efficiency_score", 0)
             dominant_cat = rogue.get("dominant_category", "")
             dominant_metrics = rogue.get("dominant_metrics", [])
 
-            state = rogue["state"]["current"]
+            state = rogue["state"]
 
             self._table.add_row(
                 *self._make_row(
@@ -637,11 +656,8 @@ class TrackedEventsPanel(Static):
         self._table.show_header = True
 
     def _extract_score(self, rogue: dict) -> int:
-        """Extract current score value from rogue dict.
-
-        Score is always a MetricValue dict: {"current": x, "low": y, "high": z}
-        """
-        return rogue["score"]["current"]
+        """Extract score value from rogue dict."""
+        return rogue["score"]
 
     def update_tracking(self, rogues: list[dict], now: float) -> None:
         """Update tracking based on current rogues.

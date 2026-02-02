@@ -314,14 +314,14 @@ def test_schema_has_process_snapshots_table(tmp_path):
     conn.close()
 
 
-def test_schema_version_16(initialized_db: Path):
-    """Schema version should be 16 (zombie_children added, state multipliers updated)."""
+def test_schema_version_17(initialized_db: Path):
+    """Schema version should be 17 (simplified: removed MetricValue low/high columns)."""
     from rogue_hunter.storage import get_connection
 
     conn = get_connection(initialized_db)
     version = get_schema_version(conn)
     conn.close()
-    assert version == 16
+    assert version == 17
 
 
 # --- Process Event CRUD Tests ---
@@ -496,15 +496,15 @@ def test_insert_process_snapshot(tmp_path):
     assert snapshot_id is not None
     assert isinstance(snapshot_id, int)
 
-    # Verify structured columns with MetricValue dicts
+    # Verify structured columns with plain values
     snapshots = get_process_snapshots(conn, event_id)
     assert len(snapshots) == 1
     snap = snapshots[0]
     assert snap["snapshot_type"] == "entry"
-    # MetricValue fields are dicts with current/low/high
-    assert snap["score"]["current"] == 45
-    assert snap["cpu"]["current"] == 30.5
-    assert snap["mem"]["current"] == 200
+    # Fields are now plain values
+    assert snap["score"] == 45
+    assert snap["cpu"] == 30.5
+    assert snap["mem"] == 200
     # New 4-category scoring
     assert snap["dominant_category"] == "blocking"
     assert isinstance(snap["dominant_metrics"], list)

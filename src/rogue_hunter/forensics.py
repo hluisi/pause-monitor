@@ -272,13 +272,11 @@ def identify_culprits(contents: "BufferContents") -> list[dict]:
     for sample in contents.samples:
         for rogue in sample.samples.rogues:
             existing = peak_scores.get(rogue.pid)
-            score_val = rogue.score.current
-            if existing is None or score_val > existing["score"]["current"]:
-                # Store full score MetricValue for consistency
+            if existing is None or rogue.score > existing["score"]:
                 peak_scores[rogue.pid] = {
                     "pid": rogue.pid,
                     "command": rogue.command,
-                    "score": rogue.score.to_dict(),
+                    "score": rogue.score,
                     "dominant_category": rogue.dominant_category,
                     "dominant_metrics": list(rogue.dominant_metrics),
                 }
@@ -286,7 +284,7 @@ def identify_culprits(contents: "BufferContents") -> list[dict]:
     # Sort by score descending
     culprits = sorted(
         peak_scores.values(),
-        key=lambda c: c["score"]["current"],
+        key=lambda c: c["score"],
         reverse=True,
     )
     return culprits
@@ -586,8 +584,7 @@ class ForensicsCapture:
             contents: Frozen ring buffer contents
         """
         culprits = identify_culprits(contents)
-        # Score is now MetricValue dict: {"current": x, "low": y, "high": z}
-        peak_score = max((c["score"]["current"] for c in culprits), default=0)
+        peak_score = max((c["score"] for c in culprits), default=0)
 
         insert_buffer_context(
             self.conn,

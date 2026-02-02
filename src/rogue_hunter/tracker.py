@@ -94,13 +94,13 @@ class ProcessTracker:
 
         # Process each score
         for score in scores:
-            in_bad_state = score.score.current >= threshold
+            in_bad_state = score.score >= threshold
 
             if score.pid in self.tracked:
                 # Already tracking — update peak or close
                 tracked = self.tracked[score.pid]
                 if in_bad_state:
-                    if score.score.current > tracked.peak_score:
+                    if score.score > tracked.peak_score:
                         self._update_peak(score)
                     # Checkpoint: periodic snapshot while in bad state
                     checkpoint_interval = self.bands.checkpoint_interval
@@ -118,7 +118,7 @@ class ProcessTracker:
         """Create new event for process entering bad state."""
         import asyncio
 
-        band = score.band.current
+        band = score.band
 
         # Create event (peak_snapshot_id starts NULL)
         event_id = create_process_event(
@@ -128,7 +128,7 @@ class ProcessTracker:
             boot_time=self.boot_time,
             entry_time=score.captured_at,
             entry_band=band,
-            peak_score=score.score.current,
+            peak_score=score.score,
             peak_band=band,
         )
 
@@ -137,7 +137,7 @@ class ProcessTracker:
         update_process_event_peak(
             self.conn,
             event_id,
-            peak_score=score.score.current,
+            peak_score=score.score,
             peak_band=band,
             peak_snapshot_id=snapshot_id,
         )
@@ -146,7 +146,7 @@ class ProcessTracker:
             event_id=event_id,
             pid=score.pid,
             command=score.command,
-            peak_score=score.score.current,
+            peak_score=score.score,
             peak_snapshot_id=snapshot_id,
             last_checkpoint=score.captured_at,  # Start checkpoint timer from entry
         )
@@ -154,7 +154,7 @@ class ProcessTracker:
         log.info(
             "tracking_started",
             command=score.command,
-            score=score.score.current,
+            score=score.score,
             pid=score.pid,
             band=band,
         )
@@ -191,7 +191,7 @@ class ProcessTracker:
 
         # Log with reason for closure
         reason = "score_dropped" if exit_score is not None else "process_gone"
-        exit_score_val = exit_score.score.current if exit_score else None
+        exit_score_val = exit_score.score if exit_score else None
         log.info(
             "tracking_ended",
             command=tracked.command,
@@ -208,9 +208,9 @@ class ProcessTracker:
         tracked = self.tracked[score.pid]
         old_score = tracked.peak_score
         old_band = self.bands.get_band(old_score)
-        tracked.peak_score = score.score.current
+        tracked.peak_score = score.score
 
-        band = score.band.current
+        band = score.band
 
         # Log band transitions (escalations)
         if band != old_band:
@@ -218,7 +218,7 @@ class ProcessTracker:
                 "band_changed",
                 command=score.command,
                 old_score=old_score,
-                new_score=score.score.current,
+                new_score=score.score,
                 pid=score.pid,
                 old_band=old_band,
                 new_band=band,
@@ -240,7 +240,7 @@ class ProcessTracker:
         update_process_event_peak(
             self.conn,
             tracked.event_id,
-            peak_score=score.score.current,
+            peak_score=score.score,
             peak_band=band,
             peak_snapshot_id=snapshot_id,
         )
@@ -249,7 +249,7 @@ class ProcessTracker:
             "tracking_peak",
             command=score.command,
             old_score=old_score,
-            new_score=score.score.current,
+            new_score=score.score,
             pid=score.pid,
         )
 
@@ -265,6 +265,6 @@ class ProcessTracker:
         log.debug(
             "tracking_checkpoint",
             command=score.command,
-            score=score.score.current,
+            score=score.score,
             pid=score.pid,
         )
