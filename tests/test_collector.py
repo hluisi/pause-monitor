@@ -863,3 +863,92 @@ def test_score_from_shares_clamped_to_100():
     score, _, _ = score_from_shares(shares, weights)
 
     assert score == 100
+
+
+# =============================================================================
+# Task 8: Integration tests - new scoring in collector
+# =============================================================================
+
+
+class TestCollectorNewScoringIntegration:
+    """Tests that collector properly integrates the new resource-based scoring."""
+
+    def test_collector_uses_new_scoring(self):
+        """Verifies ProcessScore has new fields and not old category fields."""
+        import platform
+
+        if platform.system() != "Darwin":
+            pytest.skip("LibprocCollector only works on macOS")
+
+        config = Config()
+        collector = LibprocCollector(config)
+
+        # Run two collections to get rate data
+        collector._collect_sync()
+        import time
+
+        time.sleep(0.05)
+        samples = collector._collect_sync()
+
+        # Verify ProcessScore has new resource share fields
+        for rogue in samples.rogues:
+            # New fields should exist and be populated
+            assert hasattr(rogue, "cpu_share")
+            assert hasattr(rogue, "gpu_share")
+            assert hasattr(rogue, "mem_share")
+            assert hasattr(rogue, "disk_share")
+            assert hasattr(rogue, "wakeups_share")
+            assert hasattr(rogue, "disproportionality")
+            assert hasattr(rogue, "dominant_resource")
+
+            # Dominant resource should be a valid resource type
+            assert rogue.dominant_resource in ("cpu", "gpu", "memory", "disk", "wakeups")
+
+        # Old category fields should NOT exist on ProcessScore
+        fields = ProcessScore.__dataclass_fields__
+        assert "blocking_score" not in fields
+        assert "contention_score" not in fields
+        assert "pressure_score" not in fields
+        assert "efficiency_score" not in fields
+        assert "dominant_category" not in fields
+
+    def test_collector_calculates_active_count(self):
+        """Verifies count_active_processes is called with correct args."""
+        import platform
+        from unittest.mock import patch
+
+        if platform.system() != "Darwin":
+            pytest.skip("LibprocCollector only works on macOS")
+
+        config = Config()
+        collector = LibprocCollector(config)
+
+        # Mock count_active_processes to verify it's called
+        with patch(
+            "rogue_hunter.collector.count_active_processes", wraps=count_active_processes
+        ) as mock_count:
+            # First collection
+            collector._collect_sync()
+            import time
+
+            time.sleep(0.05)
+            # Second collection should use the function
+            collector._collect_sync()
+
+            # Verify count_active_processes was called
+            assert mock_count.call_count >= 1
+
+            # Verify it was called with a list of process dicts and the scoring config
+            call_args = mock_count.call_args
+            processes_arg = call_args[0][0]
+            config_arg = call_args[0][1]
+
+            assert isinstance(processes_arg, list)
+            assert len(processes_arg) > 0
+            # Each process should be a dict with expected keys
+            assert "pid" in processes_arg[0]
+            assert "cpu" in processes_arg[0]
+            assert "mem" in processes_arg[0]
+            assert "state" in processes_arg[0]
+            # Config should be the scoring config
+            assert config_arg == config.scoring

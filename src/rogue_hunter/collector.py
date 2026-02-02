@@ -726,8 +726,14 @@ class LibprocCollector:
         for proc in all_processes:
             proc["zombie_children"] = zombie_count.get(proc["pid"], 0)
 
+        # Calculate fair shares for resource-based scoring
+        active_count = count_active_processes(all_processes, self.config.scoring)
+        shares_by_pid = calculate_resource_shares(all_processes, active_count)
+
         # Score ALL processes first (cheap - just math), then select
-        all_scored = [self._score_process(p) for p in all_processes]
+        all_scored = [
+            self._score_process(p, shares_by_pid.get(p["pid"], {})) for p in all_processes
+        ]
         scored = self._select_rogues(all_scored)
 
         elapsed_ms = int((time.monotonic() - start) * 1000)
@@ -850,108 +856,42 @@ class LibprocCollector:
 
         return metrics[:3]  # Limit to top 3
 
-    def _score_process(self, proc: dict) -> ProcessScore:
-        """Compute 4-category stress scores, then weighted final score.
+    def _score_process(self, proc: dict, shares: dict[str, float]) -> ProcessScore:
+        """Score a process using resource-based fair share analysis.
 
-        Categories:
-        - Blocking (40%): Things that CAUSE pauses (I/O, paging)
-        - Contention (30%): Fighting for resources (scheduler pressure)
-        - Pressure (20%): Stressing system resources (memory, syscalls)
-        - Efficiency (10%): Wasting resources (stalled pipeline, too many threads)
+        Uses the new scoring system based on how much of each resource
+        a process consumes relative to its fair share.
         """
-        norm = self.config.scoring.normalization
         multipliers = self.config.scoring.state_multipliers
+        weights = self.config.scoring.resource_weights
 
-        # ═══════════════════════════════════════════════════════════════════
-        # BLOCKING SCORE (40% of final) - Things that CAUSE pauses
-        # ═══════════════════════════════════════════════════════════════════
-        if proc["state"] == "stuck":
-            blocking_score = 100.0  # Automatic max for stuck processes
-        else:
-            blocking_score = (
-                min(1.0, proc["pageins_rate"] / norm.pageins_rate) * 30
-                + min(1.0, proc["disk_io_rate"] / norm.disk_io_rate) * 30
-                + min(1.0, proc["faults_rate"] / norm.faults_rate) * 20
-                + min(1.0, proc["gpu_time_rate"] / norm.gpu_time_rate) * 20
-            )
+        # Default shares if not provided (e.g., process disappeared between collect and score)
+        default_shares = {
+            "cpu_share": 0.0,
+            "gpu_share": 0.0,
+            "mem_share": 0.0,
+            "disk_share": 0.0,
+            "wakeups_share": 0.0,
+        }
+        shares = shares if shares else default_shares
 
-        # ═══════════════════════════════════════════════════════════════════
-        # CONTENTION SCORE (30% of final) - Fighting for resources
-        # ═══════════════════════════════════════════════════════════════════
-        contention_score = (
-            min(1.0, proc["runnable_time_rate"] / norm.runnable_time_rate) * 30
-            + min(1.0, proc["csw_rate"] / norm.csw_rate) * 30
-            + min(1.0, proc["cpu"] / norm.cpu) * 25
-            + min(1.0, proc["qos_interactive_rate"] / norm.qos_interactive_rate) * 15
-        )
-
-        # ═══════════════════════════════════════════════════════════════════
-        # PRESSURE SCORE (20% of final) - Stressing system resources
-        # ═══════════════════════════════════════════════════════════════════
-        pressure_score = (
-            min(1.0, proc["mem"] / (norm.mem_gb * 1024**3)) * 30
-            + min(1.0, proc["wakeups_rate"] / norm.wakeups_rate) * 25
-            + min(1.0, proc["syscalls_rate"] / norm.syscalls_rate) * 15
-            + min(1.0, proc["mach_msgs_rate"] / norm.mach_msgs_rate) * 15
-            + min(1.0, proc["zombie_children"] / norm.zombie_children) * 15
-        )
-
-        # ═══════════════════════════════════════════════════════════════════
-        # EFFICIENCY SCORE (10% of final) - Wasting resources
-        # ═══════════════════════════════════════════════════════════════════
-        # Low IPC with high cycles = stalled pipeline (wasting CPU)
-        ipc_penalty = (
-            max(0.0, 1.0 - proc["ipc"] / norm.ipc_min) if proc["ipc"] < norm.ipc_min else 0.0
-        )
-        has_cycles = 1.0 if proc["cycles"] > 0 else 0.0
-        efficiency_score = (ipc_penalty * has_cycles) * 60 + min(
-            1.0, proc["threads"] / norm.threads
-        ) * 40
-
-        # ═══════════════════════════════════════════════════════════════════
-        # FINAL SCORE - Weighted combination
-        # ═══════════════════════════════════════════════════════════════════
-        base_score = (
-            blocking_score * 0.40
-            + contention_score * 0.30
-            + pressure_score * 0.20
-            + efficiency_score * 0.10
-        )
+        # Calculate score from resource shares
+        base_score, dominant_resource, disproportionality = score_from_shares(shares, weights)
 
         # Apply state multiplier (discount for currently-inactive processes)
         state_mult = multipliers.get(proc["state"])
-        final_score = min(100, int(base_score * state_mult))
+        final_score = max(0, min(100, int(base_score * state_mult)))
 
-        # Determine dominant resource based on category scores
-        # Map old categories to new resource names for compatibility
-        category_to_resource: dict[str, DominantResource] = {
-            "blocking": "disk",  # Blocking is I/O-related
-            "contention": "cpu",  # Contention is CPU scheduler pressure
-            "pressure": "memory",  # Pressure is memory/syscalls
-            "efficiency": "cpu",  # Efficiency issues show up as CPU waste
-        }
-        scores = {
-            "blocking": blocking_score,
-            "contention": contention_score,
-            "pressure": pressure_score,
-            "efficiency": efficiency_score,
-        }
-        dominant_category = max(scores, key=lambda k: scores[k])
-        dominant_resource = category_to_resource[dominant_category]
-
-        # Temporary placeholder values for resource shares
-        # Will be properly implemented in Task 6 (fair share calculation)
-        cpu_share = proc["cpu"] / 100.0  # Normalize CPU% to share
-        gpu_share = proc["gpu_time_rate"] / 1000.0 if proc["gpu_time_rate"] > 0 else 0.0
-        mem_share = 0.0  # Requires total system memory context
-        disk_share = 0.0  # Requires system-wide disk I/O context
-        wakeups_share = 0.0  # Requires system-wide wakeups context
-
-        # Disproportionality is the max share
-        disproportionality = max(cpu_share, gpu_share, mem_share, disk_share, wakeups_share)
-
-        band = self._get_band(final_score)
+        # Get band from config
+        band = self.config.bands.get_band(final_score)
         captured_at = time.time()
+
+        # Extract share values
+        cpu_share = shares.get("cpu_share", 0.0)
+        gpu_share = shares.get("gpu_share", 0.0)
+        mem_share = shares.get("mem_share", 0.0)
+        disk_share = shares.get("disk_share", 0.0)
+        wakeups_share = shares.get("wakeups_share", 0.0)
 
         return ProcessScore(
             pid=proc["pid"],
