@@ -39,6 +39,7 @@ class TrackedProcess:
     peak_snapshot_id: int
     last_checkpoint: float = 0.0  # Timestamp of last checkpoint snapshot
     samples_since_checkpoint: int = 0  # Samples since last checkpoint
+    samples_below_threshold: int = 0  # Consecutive samples below threshold (for exit stability)
 
 
 class ProcessTracker:
@@ -66,6 +67,8 @@ class ProcessTracker:
         self.boot_time = boot_time
         self.tracked: dict[int, TrackedProcess] = {}
         self._on_forensics_trigger = on_forensics_trigger
+        # Track when events were closed for each PID (for cooldown)
+        self._event_cooldowns: dict[int, float] = {}
         self._restore_open_events()
 
     def _restore_open_events(self) -> None:
@@ -108,10 +111,24 @@ class ProcessTracker:
         band_threshold = self.bands.get_threshold(band)
         return band_threshold >= forensics_threshold
 
+    def _can_open_event(self, pid: int, current_time: float) -> bool:
+        """Check if we can open a new event for this PID (cooldown check).
+
+        Returns True if no recent event was closed for this PID, or if
+        the cooldown period has elapsed.
+        """
+        if pid not in self._event_cooldowns:
+            return True
+
+        last_close_time = self._event_cooldowns[pid]
+        elapsed = current_time - last_close_time
+        return elapsed >= self.bands.event_cooldown_seconds
+
     def update(self, scores: list[ProcessScore]) -> None:
         """Update tracking with new scores."""
         current_pids = {s.pid for s in scores}
         threshold = self.bands.tracking_threshold
+        exit_stability = self.bands.exit_stability_samples
 
         # Close events for PIDs no longer present (process exited or dropped from top-N)
         for pid in list(self.tracked.keys()):
@@ -134,6 +151,9 @@ class ProcessTracker:
                 # Already tracking — update peak or close
                 tracked = self.tracked[score.pid]
                 if in_bad_state:
+                    # Reset below-threshold counter since we're back above
+                    tracked.samples_below_threshold = 0
+
                     if score.score > tracked.peak_score:
                         self._update_peak(score)
 
@@ -149,12 +169,25 @@ class ProcessTracker:
                         self._insert_checkpoint(score, tracked)
                         tracked.samples_since_checkpoint = 0
                 else:
-                    # Score dropped below threshold — capture exit state
-                    self._close_event(score.pid, score.captured_at, exit_score=score)
+                    # Score dropped below threshold — check exit stability
+                    tracked.samples_below_threshold += 1
+                    if tracked.samples_below_threshold >= exit_stability:
+                        # Stable below threshold — close event
+                        self._close_event(score.pid, score.captured_at, exit_score=score)
             else:
-                # Not tracking — maybe start
-                if in_bad_state:
+                # Not tracking — maybe start (check cooldown first)
+                if in_bad_state and self._can_open_event(score.pid, score.captured_at):
                     self._open_event(score)
+
+        # Cleanup stale cooldown entries (older than 2x cooldown period)
+        if scores:
+            current_time = scores[0].captured_at
+            max_age = self.bands.event_cooldown_seconds * 2
+            self._event_cooldowns = {
+                pid: close_time
+                for pid, close_time in self._event_cooldowns.items()
+                if current_time - close_time < max_age
+            }
 
     def _open_event(self, score: ProcessScore) -> None:
         """Create new event for process entering bad state."""
@@ -230,6 +263,9 @@ class ProcessTracker:
             insert_process_snapshot(self.conn, tracked.event_id, SNAPSHOT_EXIT, exit_score)
 
         close_process_event(self.conn, tracked.event_id, exit_time)
+
+        # Record close time for cooldown (prevents rapid re-opening)
+        self._event_cooldowns[pid] = exit_time
 
         # Log with reason for closure
         reason = "score_dropped" if exit_score is not None else "process_gone"

@@ -534,7 +534,7 @@ class TestConfigCommand:
         # Verify defaults were written
         reset_config = Config.load(config_path)
         assert reset_config.retention.events_days == 90
-        assert reset_config.bands.medium == 20
+        assert reset_config.bands.medium == 30  # Updated default threshold
 
 
 class TestPermsCommand:

@@ -34,16 +34,20 @@ class BandsConfig:
     - Critical (critical to 100): Every sample + full forensics
     """
 
-    medium: int = 20  # Score to enter "medium" band
-    elevated: int = 40  # Score to enter "elevated" band
-    high: int = 50  # Score to enter "high" band
-    critical: int = 70  # Score to enter "critical" band
+    medium: int = 30  # Score to enter "medium" band (8x fair share)
+    elevated: int = 45  # Score to enter "elevated" band (22x fair share)
+    high: int = 60  # Score to enter "high" band (64x fair share)
+    critical: int = 80  # Score to enter "critical" band (256x fair share)
     tracking_band: str = "medium"  # Tracking starts at medium band
     forensics_band: str = "critical"  # Only critical triggers forensics
+    logging_band: str = "medium"  # Log entry at this band or higher, exit when dropping below
     checkpoint_interval: int = 30  # Deprecated: kept for backwards compatibility
-    # Sample-based checkpoint intervals (new)
-    medium_checkpoint_samples: int = 20  # ~66s at 3 samples/sec
-    elevated_checkpoint_samples: int = 10  # ~33s at 3 samples/sec
+    # Sample-based checkpoint intervals
+    medium_checkpoint_samples: int = 60  # ~20s at 3 samples/sec
+    elevated_checkpoint_samples: int = 30  # ~10s at 3 samples/sec
+    # Event debouncing to reduce noise from processes bouncing above/below threshold
+    event_cooldown_seconds: float = 60.0  # Don't create new event for same PID within this time
+    exit_stability_samples: int = 15  # Process must be below threshold for N samples before closing
 
     def get_band(self, score: int) -> str:
         """Return band name for a given score."""
@@ -79,6 +83,11 @@ class BandsConfig:
     def forensics_threshold(self) -> int:
         """Return the threshold for the forensics band."""
         return self.get_threshold(self.forensics_band)
+
+    @property
+    def logging_threshold(self) -> int:
+        """Return the threshold for the logging band."""
+        return self.get_threshold(self.logging_band)
 
 
 @dataclass
@@ -118,7 +127,7 @@ class ResourceWeights:
     gpu: float = 3.0  # GPU work is intensive
     memory: float = 1.0
     disk_io: float = 1.0
-    wakeups: float = 2.0  # Penalized for system disruption
+    wakeups: float = 1.5  # Moderate penalty for system disruption
 
 
 @dataclass
@@ -486,6 +495,7 @@ def _load_bands_config(data: dict) -> BandsConfig:
 
     tracking_band = data.get("tracking_band", defaults.tracking_band)
     forensics_band = data.get("forensics_band", defaults.forensics_band)
+    logging_band = data.get("logging_band", defaults.logging_band)
 
     if tracking_band not in valid_bands:
         raise ValueError(f"Invalid tracking_band: {tracking_band!r}. Must be one of {valid_bands}")
@@ -493,6 +503,8 @@ def _load_bands_config(data: dict) -> BandsConfig:
         raise ValueError(
             f"Invalid forensics_band: {forensics_band!r}. Must be one of {valid_bands}"
         )
+    if logging_band not in valid_bands:
+        raise ValueError(f"Invalid logging_band: {logging_band!r}. Must be one of {valid_bands}")
 
     medium_checkpoint_samples = data.get(
         "medium_checkpoint_samples", defaults.medium_checkpoint_samples
@@ -508,6 +520,14 @@ def _load_bands_config(data: dict) -> BandsConfig:
             f"elevated_checkpoint_samples must be >= 1, got {elevated_checkpoint_samples}"
         )
 
+    event_cooldown_seconds = data.get("event_cooldown_seconds", defaults.event_cooldown_seconds)
+    exit_stability_samples = data.get("exit_stability_samples", defaults.exit_stability_samples)
+
+    if event_cooldown_seconds < 0:
+        raise ValueError(f"event_cooldown_seconds must be >= 0, got {event_cooldown_seconds}")
+    if exit_stability_samples < 1:
+        raise ValueError(f"exit_stability_samples must be >= 1, got {exit_stability_samples}")
+
     return BandsConfig(
         medium=data.get("medium", defaults.medium),
         elevated=data.get("elevated", defaults.elevated),
@@ -515,9 +535,12 @@ def _load_bands_config(data: dict) -> BandsConfig:
         critical=data.get("critical", defaults.critical),
         tracking_band=tracking_band,
         forensics_band=forensics_band,
+        logging_band=logging_band,
         checkpoint_interval=data.get("checkpoint_interval", defaults.checkpoint_interval),
         medium_checkpoint_samples=medium_checkpoint_samples,
         elevated_checkpoint_samples=elevated_checkpoint_samples,
+        event_cooldown_seconds=event_cooldown_seconds,
+        exit_stability_samples=exit_stability_samples,
     )
 
 

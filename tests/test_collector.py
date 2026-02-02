@@ -8,9 +8,8 @@ from rogue_hunter.collector import (
     LibprocCollector,
     ProcessSamples,
     ProcessScore,
-    count_active_processes,
 )
-from rogue_hunter.config import Config, ScoringConfig
+from rogue_hunter.config import Config
 
 # =============================================================================
 # Task 3: Resource-based scoring tests
@@ -518,70 +517,12 @@ class TestLibprocCollectorIntegration:
 
 
 # =============================================================================
-# Task 5: Active process counting tests
-# =============================================================================
-
-
-def test_count_active_processes_excludes_idle():
-    """Idle processes are not counted as active."""
-    processes = [
-        {"state": "running", "cpu": 5.0, "mem": 100_000_000, "disk_io_rate": 0},
-        {"state": "idle", "cpu": 1.0, "mem": 50_000_000, "disk_io_rate": 0},  # idle = excluded
-        {"state": "sleeping", "cpu": 0.5, "mem": 200_000_000, "disk_io_rate": 100},
-    ]
-    config = ScoringConfig()
-
-    count = count_active_processes(processes, config)
-
-    assert count == 2  # idle process excluded
-
-
-def test_count_active_processes_excludes_no_resources():
-    """Processes using no resources are not counted as active."""
-    processes = [
-        {"state": "running", "cpu": 5.0, "mem": 100_000_000, "disk_io_rate": 0},
-        {"state": "sleeping", "cpu": 0.0, "mem": 0, "disk_io_rate": 0},  # no resources = excluded
-        {"state": "running", "cpu": 0.0, "mem": 0, "disk_io_rate": 1000},  # has disk I/O = included
-    ]
-    config = ScoringConfig()
-
-    count = count_active_processes(processes, config)
-
-    assert count == 2  # zero-resource process excluded
-
-
-def test_count_active_processes_respects_thresholds():
-    """Active thresholds from config are respected."""
-    processes = [
-        # Below all thresholds - not counted
-        {"state": "running", "cpu": 0.05, "mem": 5_000_000, "disk_io_rate": 0},
-        # CPU above threshold - counted
-        {"state": "running", "cpu": 0.2, "mem": 5_000_000, "disk_io_rate": 0},
-    ]
-    config = ScoringConfig(active_min_cpu=0.1, active_min_memory_mb=10.0, active_min_disk_io=0)
-
-    count = count_active_processes(processes, config)
-
-    assert count == 1  # only process with cpu > 0.1 counts
-
-
-def test_count_active_processes_minimum_one():
-    """Active process count is at least 1 to avoid division by zero."""
-    processes = []  # No processes
-    config = ScoringConfig()
-
-    count = count_active_processes(processes, config)
-
-    assert count == 1  # Minimum of 1
-
-
-# =============================================================================
-# Task 6: Fair share calculation tests
+# Task 6: Fair share calculation tests (per-resource active counting)
 # =============================================================================
 
 
 def test_calculate_resource_shares_basic():
-    """Resource shares are calculated as multiples of fair share."""
+    """Resource shares are calculated as multiples of fair share (per-resource)."""
     from rogue_hunter.collector import calculate_resource_shares
 
     processes = [
@@ -602,10 +543,10 @@ def test_calculate_resource_shares_basic():
             "wakeups_rate": 10,
         },
     ]
-    active_count = 2
 
-    shares = calculate_resource_shares(processes, active_count)
+    shares = calculate_resource_shares(processes)
 
+    # Both processes use CPU > 0.01%, so cpu_users = 2
     # Each process uses 50% of total CPU (50 / 100 total)
     # Fair share = 1/2 = 50%
     # Share ratio = 50% / 50% = 1.0 (exactly fair)
@@ -635,12 +576,12 @@ def test_calculate_resource_shares_disproportionate():
             "wakeups_rate": 0,
         },
     ]
-    active_count = 2
 
-    shares = calculate_resource_shares(processes, active_count)
+    shares = calculate_resource_shares(processes)
 
+    # Both have cpu > 0.01%, so cpu_users = 2
     # Process 1: 90% of 100% total = 90% usage
-    # Fair share = 50%
+    # Fair share = 1/2 = 50%
     # Share ratio = 90% / 50% = 1.8
     assert shares[1]["cpu_share"] == 1.8
     # Process 2: 10% / 50% = 0.2
@@ -669,9 +610,8 @@ def test_calculate_resource_shares_zero_total():
             "wakeups_rate": 0,
         },
     ]
-    active_count = 2
 
-    shares = calculate_resource_shares(processes, active_count)
+    shares = calculate_resource_shares(processes)
 
     # No CPU usage, so CPU share is 0
     assert shares[1]["cpu_share"] == 0.0
@@ -692,9 +632,8 @@ def test_calculate_resource_shares_all_resources():
             "wakeups_rate": 100,
         },
     ]
-    active_count = 1
 
-    shares = calculate_resource_shares(processes, active_count)
+    shares = calculate_resource_shares(processes)
 
     # Single process = uses 100% of all resources = 1.0 share (exactly fair when alone)
     assert shares[1]["cpu_share"] == 1.0
@@ -702,6 +641,58 @@ def test_calculate_resource_shares_all_resources():
     assert shares[1]["mem_share"] == 1.0
     assert shares[1]["disk_share"] == 1.0
     assert shares[1]["wakeups_share"] == 1.0
+
+
+def test_calculate_resource_shares_per_resource_counting():
+    """Each resource counts users independently - the key fix for the scoring bug."""
+    from rogue_hunter.collector import calculate_resource_shares
+
+    # Scenario that exposed the bug:
+    # 3 processes use memory, but only 1 uses disk I/O
+    # Old algorithm: active_count=3, disk_fair=1/3, disk user gets 3x "disproportionate"
+    # New algorithm: disk_users=1, disk_fair=1/1, disk user gets 1x (fair share)
+    processes = [
+        {
+            "pid": 1,
+            "cpu": 10.0,
+            "gpu_time_rate": 0,
+            "mem": 2_000_000_000,  # 2 GB
+            "disk_io_rate": 100_000_000,  # 100 MB/sec - only disk user
+            "wakeups_rate": 0,
+        },
+        {
+            "pid": 2,
+            "cpu": 10.0,
+            "gpu_time_rate": 0,
+            "mem": 2_000_000_000,  # 2 GB
+            "disk_io_rate": 0,  # No disk
+            "wakeups_rate": 0,
+        },
+        {
+            "pid": 3,
+            "cpu": 10.0,
+            "gpu_time_rate": 0,
+            "mem": 2_000_000_000,  # 2 GB
+            "disk_io_rate": 0,  # No disk
+            "wakeups_rate": 0,
+        },
+    ]
+
+    shares = calculate_resource_shares(processes)
+
+    # CPU: 3 users at 10% each = fair share (1.0)
+    assert shares[1]["cpu_share"] == 1.0
+    assert shares[2]["cpu_share"] == 1.0
+
+    # Memory: 3 users at 33% each = fair share (1.0)
+    assert shares[1]["mem_share"] == 1.0
+    assert shares[2]["mem_share"] == 1.0
+
+    # Disk: ONLY 1 user, so fair share for disk = 1/1 = 100%
+    # Process 1 uses 100% of disk = exactly fair share = 1.0
+    # NOT 3.0 like the old buggy algorithm would calculate!
+    assert shares[1]["disk_share"] == 1.0
+    assert shares[2]["disk_share"] == 0.0  # No disk usage = 0 share
 
 
 # =============================================================================
@@ -923,10 +914,12 @@ class TestCollectorNewScoringIntegration:
         assert "efficiency_score" not in fields
         assert "dominant_category" not in fields
 
-    def test_collector_calculates_active_count(self):
-        """Verifies count_active_processes is called with correct args."""
+    def test_collector_calculates_per_resource_shares(self):
+        """Verifies calculate_resource_shares is called during collection."""
         import platform
         from unittest.mock import patch
+
+        from rogue_hunter.collector import calculate_resource_shares
 
         if platform.system() != "Darwin":
             pytest.skip("LibprocCollector only works on macOS")
@@ -934,10 +927,11 @@ class TestCollectorNewScoringIntegration:
         config = Config()
         collector = LibprocCollector(config)
 
-        # Mock count_active_processes to verify it's called
+        # Mock calculate_resource_shares to verify it's called
         with patch(
-            "rogue_hunter.collector.count_active_processes", wraps=count_active_processes
-        ) as mock_count:
+            "rogue_hunter.collector.calculate_resource_shares",
+            wraps=calculate_resource_shares,
+        ) as mock_shares:
             # First collection
             collector._collect_sync()
             import time
@@ -946,13 +940,12 @@ class TestCollectorNewScoringIntegration:
             # Second collection should use the function
             collector._collect_sync()
 
-            # Verify count_active_processes was called
-            assert mock_count.call_count >= 1
+            # Verify calculate_resource_shares was called
+            assert mock_shares.call_count >= 1
 
-            # Verify it was called with a list of process dicts and the scoring config
-            call_args = mock_count.call_args
+            # Verify it was called with a list of process dicts (no active_count param)
+            call_args = mock_shares.call_args
             processes_arg = call_args[0][0]
-            config_arg = call_args[0][1]
 
             assert isinstance(processes_arg, list)
             assert len(processes_arg) > 0
@@ -960,6 +953,3 @@ class TestCollectorNewScoringIntegration:
             assert "pid" in processes_arg[0]
             assert "cpu" in processes_arg[0]
             assert "mem" in processes_arg[0]
-            assert "state" in processes_arg[0]
-            # Config should be the scoring config
-            assert config_arg == config.scoring

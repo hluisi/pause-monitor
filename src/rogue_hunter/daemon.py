@@ -15,6 +15,7 @@ import psutil
 from rogue_hunter import logging as rlog
 from rogue_hunter.boottime import get_boot_time
 from rogue_hunter.collector import (
+    BAND_SEVERITY,
     LibprocCollector,
 )
 from rogue_hunter.config import Config
@@ -453,10 +454,17 @@ class Daemon:
         heartbeat_max_score = 0
         heartbeat_score_sum = 0
 
-        # Track rogue selection churn (PIDs entering/leaving selection)
-        previous_rogues: dict[int, str] = {}  # pid -> command
-        logged_rogues: set[int] = set()  # PIDs we logged as "entered" (above threshold)
-        log_threshold = 10  # Only log enter/exit for scores above this
+        # Track band transitions for logging with stability filter
+        # Key: pid, Value: (logged_band, current_band, command, consecutive, last_seen)
+        # - logged_band: the band we last logged for this process
+        # - current_band: the band the process is currently at
+        # - consecutive: samples at current_band (for stability filter)
+        # - last_seen: sample count when last seen (for staleness pruning)
+        # We log entry only after N consecutive samples at new higher band
+        tracked_bands: dict[int, tuple[str, str, str, int, int]] = {}
+        sample_count = 0
+        stability_threshold = 3  # Require 3 consecutive samples (~0.6s) before logging
+        stale_threshold = 1500  # Prune entries not seen in ~5 minutes
 
         sample_interval = self.config.system.sample_interval
 
@@ -470,27 +478,61 @@ class Daemon:
                 if self._shutdown_event.is_set():
                     break
 
-                # Log rogue selection churn (new/exited processes)
-                current_rogues = {r.pid: r.command for r in samples.rogues}
-                current_pids = set(current_rogues.keys())
-                previous_pids = set(previous_rogues.keys())
+                # Build current state from rogues
+                current_rogues = {r.pid: r for r in samples.rogues}
 
-                # New processes entering rogue selection (only log if above threshold)
-                for pid in current_pids - previous_pids:
-                    rogue = next(r for r in samples.rogues if r.pid == pid)
-                    if rogue.score > log_threshold:
-                        # Log dominant resource and disproportionality
+                sample_count += 1
+
+                # Check for band transitions with stability filter
+                for pid, rogue in current_rogues.items():
+                    band = rogue.band
+                    # Get previous state: (logged_band, current_band, cmd, consecutive, last_seen)
+                    logged_band, prev_band, _, consecutive, _ = tracked_bands.get(
+                        pid, ("low", "low", "", 0, 0)
+                    )
+
+                    # Update consecutive counter
+                    if band == prev_band:
+                        consecutive += 1
+                    else:
+                        consecutive = 1  # Band changed, reset counter
+
+                    # Check for escalation: band is higher than what we logged AND stable
+                    if (
+                        BAND_SEVERITY.get(band, 0) > BAND_SEVERITY.get(logged_band, 0)
+                        and band in ("medium", "elevated", "high", "critical")
+                        and consecutive >= stability_threshold
+                    ):
                         metrics = f"{rogue.dominant_resource}: {rogue.disproportionality:.1f}x"
                         rlog.rogue_enter(rogue.command, pid, rogue.score, metrics)
-                        logged_rogues.add(pid)
+                        logged_band = band  # Update logged band
 
-                # Processes exiting rogue selection (only log if we logged their entry)
-                for pid in previous_pids - current_pids:
-                    if pid in logged_rogues:
-                        rlog.rogue_exit(previous_rogues[pid], pid)
-                        logged_rogues.discard(pid)
+                    # Check for exit: dropped to "low" AND stable AND we had logged something
+                    if (
+                        band == "low"
+                        and logged_band != "low"
+                        and consecutive >= stability_threshold
+                    ):
+                        rlog.rogue_exit(rogue.command, pid)
+                        logged_band = "low"
 
-                previous_rogues = current_rogues
+                    # Update tracked state
+                    tracked_bands[pid] = (
+                        logged_band,
+                        band,
+                        rogue.command,
+                        consecutive,
+                        sample_count,
+                    )
+
+                # Prune stale entries (not seen in stale_threshold samples)
+                # This prevents memory growth while keeping state for processes
+                # that temporarily leave the top-N rogue selection
+                tracked_bands = {
+                    pid: v
+                    for pid, v in tracked_bands.items()
+                    if sample_count - v[4] < stale_threshold
+                }
 
                 # Push sample to ring buffer
                 self.ring_buffer.push(samples)

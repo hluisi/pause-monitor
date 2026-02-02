@@ -117,7 +117,8 @@ def test_tracker_closes_event_when_score_drops(tmp_path):
     init_database(db_path)
     conn = get_connection(db_path)
 
-    bands = BandsConfig(tracking_band="elevated")
+    # Use exit_stability_samples=1 for simple test (closes on first sample below threshold)
+    bands = BandsConfig(tracking_band="elevated", exit_stability_samples=1)
     tracker = ProcessTracker(conn, bands, boot_time=1706000000)
 
     # Enter bad state
@@ -290,7 +291,8 @@ def test_tracker_inserts_exit_snapshot_on_score_drop(tmp_path):
     init_database(db_path)
     conn = get_connection(db_path)
 
-    bands = BandsConfig(tracking_band="elevated")
+    # Use exit_stability_samples=1 for simple test
+    bands = BandsConfig(tracking_band="elevated", exit_stability_samples=1)
     tracker = ProcessTracker(conn, bands, boot_time=1706000000)
 
     # Enter bad state
@@ -391,7 +393,8 @@ def test_tracker_handles_multiple_simultaneous_processes(tmp_path):
     init_database(db_path)
     conn = get_connection(db_path)
 
-    bands = BandsConfig(tracking_band="elevated")
+    # Use exit_stability_samples=1 for simple test
+    bands = BandsConfig(tracking_band="elevated", exit_stability_samples=1)
     tracker = ProcessTracker(conn, bands, boot_time=1706000000)
 
     # Three processes enter bad state at once
@@ -552,7 +555,8 @@ def test_medium_band_checkpoints_every_n_samples(tmp_path):
     tracker = ProcessTracker(conn, bands, boot_time=1706000000)
 
     # Sample 1: Enter medium band - creates entry snapshot
-    tracker.update([make_score(pid=123, score=25, band="medium", captured_at=1706000100.0)])
+    # Use score=35 (above medium threshold of 30)
+    tracker.update([make_score(pid=123, score=35, band="medium", captured_at=1706000100.0)])
     event_id = tracker.tracked[123].event_id
 
     # Verify entry snapshot only
@@ -564,15 +568,15 @@ def test_medium_band_checkpoints_every_n_samples(tmp_path):
     assert tracker.tracked[123].samples_since_checkpoint == 0
 
     # Sample 2: No checkpoint yet
-    tracker.update([make_score(pid=123, score=25, band="medium", captured_at=1706000101.0)])
+    tracker.update([make_score(pid=123, score=35, band="medium", captured_at=1706000101.0)])
     assert tracker.tracked[123].samples_since_checkpoint == 1
 
     # Sample 3: Still no checkpoint
-    tracker.update([make_score(pid=123, score=25, band="medium", captured_at=1706000102.0)])
+    tracker.update([make_score(pid=123, score=35, band="medium", captured_at=1706000102.0)])
     assert tracker.tracked[123].samples_since_checkpoint == 2
 
     # Sample 4: Checkpoint triggers (3 samples since entry)
-    tracker.update([make_score(pid=123, score=25, band="medium", captured_at=1706000103.0)])
+    tracker.update([make_score(pid=123, score=35, band="medium", captured_at=1706000103.0)])
     assert tracker.tracked[123].samples_since_checkpoint == 0  # Reset after checkpoint
 
     checkpoint_count = conn.execute(
@@ -602,10 +606,11 @@ def test_elevated_band_checkpoints_more_frequently(tmp_path):
     tracker = ProcessTracker(conn, bands, boot_time=1706000000)
 
     # Start tracking both processes
+    # Use score=35 for medium (above threshold of 30), score=50 for elevated (above threshold of 45)
     tracker.update(
         [
-            make_score(pid=100, score=25, band="medium", captured_at=1706000100.0),
-            make_score(pid=200, score=45, band="elevated", captured_at=1706000100.0),
+            make_score(pid=100, score=35, band="medium", captured_at=1706000100.0),
+            make_score(pid=200, score=50, band="elevated", captured_at=1706000100.0),
         ]
     )
     medium_event_id = tracker.tracked[100].event_id
@@ -615,8 +620,8 @@ def test_elevated_band_checkpoints_more_frequently(tmp_path):
     for i in range(1, 11):
         tracker.update(
             [
-                make_score(pid=100, score=25, band="medium", captured_at=1706000100.0 + i),
-                make_score(pid=200, score=45, band="elevated", captured_at=1706000100.0 + i),
+                make_score(pid=100, score=35, band="medium", captured_at=1706000100.0 + i),
+                make_score(pid=200, score=50, band="elevated", captured_at=1706000100.0 + i),
             ]
         )
 

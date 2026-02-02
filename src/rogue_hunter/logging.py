@@ -149,7 +149,7 @@ def rogue_enter(cmd: str, pid: int, score: int, metrics: str) -> None:
 def rogue_exit(cmd: str, pid: int) -> None:
     """Log process exited rogue tracking."""
     cmd_display = cmd[:28] + ".." if len(cmd) > 28 else cmd
-    info(f"[cyan]{cmd_display}[/] [dim]({pid})[/]", Icon.ROGUE_EXIT)
+    info(f"[cyan]{cmd_display}[/] [dim]({pid})[/] no longer rogue", Icon.ROGUE_EXIT)
 
 
 def heartbeat(

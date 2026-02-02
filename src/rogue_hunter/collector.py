@@ -10,7 +10,7 @@ from typing import Literal
 
 import structlog
 
-from rogue_hunter.config import Config, ResourceWeights, ScoringConfig
+from rogue_hunter.config import Config, ResourceWeights
 
 # Type alias for dominant resource values
 DominantResource = Literal["cpu", "gpu", "memory", "disk", "wakeups"]
@@ -293,63 +293,72 @@ class ProcessSamples:
         )
 
 
-def count_active_processes(processes: list[dict], config: ScoringConfig) -> int:
-    """Count processes that are considered 'active' for fair share calculation.
-
-    A process is active if:
-    1. State is NOT idle (running, sleeping, stopped, zombie, stuck all count)
-    2. AND using measurable resources (CPU > threshold OR memory > threshold OR disk I/O > 0)
-
-    Returns at least 1 to avoid division by zero in fair share calculation.
-    """
-    count = 0
-    mem_threshold_bytes = config.active_min_memory_mb * 1_048_576  # MiB (binary)
-
-    for proc in processes:
-        # Must be non-idle
-        if proc.get("state") == "idle":
-            continue
-
-        # Must be using some resources
-        cpu = proc.get("cpu", 0)
-        mem = proc.get("mem", 0)
-        disk_io_rate = proc.get("disk_io_rate", 0)
-
-        uses_cpu = cpu >= config.active_min_cpu
-        uses_memory = mem >= mem_threshold_bytes
-        uses_disk = disk_io_rate > config.active_min_disk_io
-
-        if uses_cpu or uses_memory or uses_disk:
-            count += 1
-
-    return max(1, count)  # Minimum 1 to avoid division by zero
-
-
 def calculate_resource_shares(
     processes: list[dict],
-    active_count: int,
 ) -> dict[int, dict[str, float]]:
-    """Calculate resource shares for each process.
+    """Calculate resource shares for each process using per-resource fair share.
 
     For each resource type, calculates:
-    1. Total system usage across all processes
-    2. Fair share = 1 / active_count (as a fraction of total)
+    1. Count processes actively using THAT SPECIFIC resource
+    2. Fair share = 1 / active_users_of_resource
     3. Each process's share ratio = (process usage / total) / fair_share
 
-    A share of 1.0 means the process uses exactly its fair share.
-    A share of 10.0 means the process uses 10x its fair share.
+    Key insight: fair share is calculated PER RESOURCE. If 100 processes exist
+    but only 2 use disk I/O, fair share for disk is 1/2 = 50%, not 1/100 = 1%.
+    This prevents flagging a process as "disproportionate" just because it's
+    one of few using that resource type.
+
+    A share of 1.0 means the process uses exactly its fair share among users.
+    A share of 2.0 means the process uses 2x its fair share (in a 2-user pool).
 
     Returns dict mapping PID to dict of resource shares.
     """
-    fair_share = 1.0 / active_count
+    # First pass: calculate totals and count active users per resource
+    total_cpu = 0.0
+    total_gpu = 0.0
+    total_mem = 0
+    total_disk = 0.0
+    total_wakeups = 0.0
+    cpu_users = 0
+    gpu_users = 0
+    mem_users = 0
+    disk_users = 0
+    wakeups_users = 0
 
-    # Calculate totals
-    total_cpu = sum(p.get("cpu", 0) for p in processes)
-    total_gpu = sum(p.get("gpu_time_rate", 0) for p in processes)
-    total_mem = sum(p.get("mem", 0) for p in processes)
-    total_disk = sum(p.get("disk_io_rate", 0) for p in processes)
-    total_wakeups = sum(p.get("wakeups_rate", 0) for p in processes)
+    for proc in processes:
+        cpu = proc.get("cpu", 0)
+        gpu = proc.get("gpu_time_rate", 0)
+        mem = proc.get("mem", 0)
+        disk = proc.get("disk_io_rate", 0)
+        wakeups = proc.get("wakeups_rate", 0)
 
+        total_cpu += cpu
+        total_gpu += gpu
+        total_mem += mem
+        total_disk += disk
+        total_wakeups += wakeups
+
+        # Count processes with non-trivial usage of each resource
+        # Using small thresholds to filter measurement noise
+        if cpu > 0.01:  # 0.01% CPU
+            cpu_users += 1
+        if gpu > 0:  # Any GPU usage
+            gpu_users += 1
+        if mem > 268_435_456:  # 256 MiB memory
+            mem_users += 1
+        if disk > 0:  # Any disk I/O
+            disk_users += 1
+        if wakeups > 0:  # Any wakeups
+            wakeups_users += 1
+
+    # Fair share per resource (minimum 1 to avoid division by zero)
+    cpu_fair = 1.0 / max(1, cpu_users)
+    gpu_fair = 1.0 / max(1, gpu_users)
+    mem_fair = 1.0 / max(1, mem_users)
+    disk_fair = 1.0 / max(1, disk_users)
+    wakeups_fair = 1.0 / max(1, wakeups_users)
+
+    # Second pass: calculate shares for each process
     result = {}
     for proc in processes:
         pid = proc["pid"]
@@ -361,13 +370,13 @@ def calculate_resource_shares(
         disk_fraction = proc.get("disk_io_rate", 0) / total_disk if total_disk > 0 else 0
         wakeups_fraction = proc.get("wakeups_rate", 0) / total_wakeups if total_wakeups > 0 else 0
 
-        # Calculate share ratio (multiples of fair share)
+        # Calculate share ratio (multiples of fair share for that resource)
         result[pid] = {
-            "cpu_share": cpu_fraction / fair_share if fair_share > 0 else 0,
-            "gpu_share": gpu_fraction / fair_share if fair_share > 0 else 0,
-            "mem_share": mem_fraction / fair_share if fair_share > 0 else 0,
-            "disk_share": disk_fraction / fair_share if fair_share > 0 else 0,
-            "wakeups_share": wakeups_fraction / fair_share if fair_share > 0 else 0,
+            "cpu_share": cpu_fraction / cpu_fair,
+            "gpu_share": gpu_fraction / gpu_fair,
+            "mem_share": mem_fraction / mem_fair,
+            "disk_share": disk_fraction / disk_fair,
+            "wakeups_share": wakeups_fraction / wakeups_fair,
         }
 
     return result
@@ -720,9 +729,8 @@ class LibprocCollector:
         for proc in all_processes:
             proc["zombie_children"] = zombie_count.get(proc["pid"], 0)
 
-        # Calculate fair shares for resource-based scoring
-        active_count = count_active_processes(all_processes, self.config.scoring)
-        shares_by_pid = calculate_resource_shares(all_processes, active_count)
+        # Calculate fair shares for resource-based scoring (per-resource active counts)
+        shares_by_pid = calculate_resource_shares(all_processes)
 
         # Score ALL processes first (cheap - just math), then select
         all_scored = [
