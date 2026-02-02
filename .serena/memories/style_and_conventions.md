@@ -78,6 +78,10 @@ class MetricValue:
 - Test files: `tests/test_<module>.py`
 - Use fixtures from `conftest.py`
 
+## Using Project Systems
+
+This project has established infrastructure for common concerns. Before creating new utilities, check `systems` memory for existing solutions.
+
 ## Philosophy
 
 | Principle | Practice |

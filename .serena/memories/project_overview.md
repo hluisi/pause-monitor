@@ -1,19 +1,38 @@
 # Project Overview
 
-**Rogue Hunter** is a real-time process surveillance tool for macOS that identifies processes negatively affecting system performance.
+**Rogue Hunter** is a real-time process surveillance tool for macOS that identifies processes consuming disproportionate system resources.
 
 ## Purpose
 
-Track down intermittent macOS system pauses by continuously monitoring all running processes and scoring them on four dimensions of "rogue behavior":
+Track down intermittent macOS system pauses by continuously monitoring all running processes. The scoring system identifies processes that claim more than their fair share of any resource:
 
-| Category | Weight | What It Detects |
-|----------|--------|-----------------|
-| **Blocking** | 40% | I/O bottlenecks, memory thrashing, disk saturation |
-| **Contention** | 30% | CPU fighting, scheduler pressure, context switching |
-| **Pressure** | 20% | Memory hogging, kernel overhead, excessive wakeups |
-| **Efficiency** | 10% | Stalled pipelines, thread proliferation |
+| Resource | What It Measures |
+|----------|------------------|
+| **CPU** | CPU time relative to fair share per active process |
+| **GPU** | GPU time consumption |
+| **Memory** | Resident memory footprint |
+| **Disk** | I/O bytes read/written |
+| **Wakeups** | Interrupt wakeups (power impact) |
 
-When processes cross configurable thresholds, forensic data (tailspin, logs) is captured automatically.
+### Disproportionate-Share Scoring (v18)
+
+Instead of categorical scoring, the system calculates each process's **share** of system resources:
+
+```
+fair_share = 1.0 / active_processes  (e.g., 100 processes = 1% fair share)
+cpu_share = process_cpu / (active_processes × per_core_fair_share)
+```
+
+The **disproportionality** is the maximum share across all resources. A process using 15% of CPU when fair share is 1% has 15× disproportionality.
+
+Scores are assigned by band:
+- **Low (0-29)**: Normal behavior
+- **Medium (30-44)**: Slightly elevated
+- **Elevated (45-59)**: Tracking begins, entry snapshots captured
+- **High (60-79)**: Significant resource usage
+- **Critical (80+)**: Forensics triggered automatically
+
+When processes cross thresholds, forensic data (tailspin, logs) is captured automatically.
 
 ## Tech Stack
 
@@ -32,18 +51,18 @@ When processes cross configurable thresholds, forensic data (tailspin, logs) is 
 
 | Interface | Purpose |
 |-----------|---------|
-| `rogue-hunter daemon` | Background sampler (5Hz) |
+| `rogue-hunter daemon` | Background sampler (3Hz) |
 | `rogue-hunter tui` | Interactive dashboard |
 | `rogue-hunter events` | Historical event queries |
 | `rogue-hunter status` | Quick health check |
 
 ## Architecture Summary
 
-- **Daemon** collects process metrics via libproc (no subprocess spawning)
-- **ProcessTracker** creates events when processes cross thresholds
-- **RingBuffer** maintains 30 seconds of pre-incident context
-- **SocketServer** streams real-time data to TUI via Unix socket
-- **SQLite** persists events with entry/peak/exit snapshots
+- **Daemon** collects process metrics via libproc at 3Hz (no subprocess spawning)
+- **ProcessTracker** creates events when processes cross tracking threshold (configurable via `bands.tracking_threshold`)
+- **RingBuffer** maintains recent samples for context and sparklines
+- **SocketServer** streams real-time data to TUI via Unix socket (push-based)
+- **SQLite** persists events with entry/checkpoint/exit snapshots
 
 ## Project Type
 

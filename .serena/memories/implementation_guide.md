@@ -61,12 +61,12 @@
 ### Data Flow
 
 1. **Collection:** `LibprocCollector` calls libproc.dylib APIs to gather per-process metrics
-2. **Scoring:** Each process gets a weighted stress score (0-100) with category tags
+2. **Scoring:** Each process gets a resource-share score (0-100) with dominant resource
 3. **Rogue Selection:** Top-N processes by score become "rogues" for display/tracking
 4. **Ring Buffer:** ProcessSamples pushed to buffer for historical context
 5. **Low/High Enrichment:** Daemon computes per-metric low/high from ring buffer history
 6. **Tracking:** ProcessTracker opens/updates/closes events for processes in "bad" bands
-7. **Forensics:** When process enters high band, forensic capture is triggered
+7. **Forensics:** When process enters critical band, forensic capture is triggered
 8. **Broadcast:** SocketServer sends enriched samples to TUI clients
 9. **Display:** TUI updates widgets from socket messages (no DB queries)
 
@@ -335,12 +335,12 @@ class TrackedProcess:
 | `_insert_checkpoint(score, tracked)` | Periodic checkpoint while in bad band |
 
 ### Tracking Rules
-1. Process enters tracking when `score >= tracking_threshold` (default: 40 = elevated)
+1. Process enters tracking when `score >= tracking_threshold` (default: 30 = medium)
 2. Entry snapshot saved with full ProcessScore
-3. Checkpoints every `checkpoint_interval` seconds (default: 30)
+3. Checkpoints every N samples (60 for medium, 30 for elevated+)
 4. Peak updated when score exceeds previous peak
-5. Exit when score drops below threshold OR process disappears
-6. Forensics triggered when process enters high band (score >= 50)
+5. Exit when score drops below threshold for exit_stability_samples (15)
+6. Forensics triggered when process enters critical band (score >= 80)
 
 ---
 
@@ -469,13 +469,16 @@ id, capture_id (FK), sample_count, peak_score, culprits (JSON)
 | Band | Threshold |
 |------|-----------|
 | low | 0 |
-| medium | 20 |
-| elevated | 40 |
-| high | 50 |
-| critical | 70 |
-| tracking_band | "elevated" (40) |
-| forensics_band | "high" (50) |
-| checkpoint_interval | 30 seconds |
+| medium | 30 |
+| elevated | 45 |
+| high | 60 |
+| critical | 80 |
+| tracking_band | "medium" (30) |
+| forensics_band | "critical" (80) |
+| medium_checkpoint_samples | 60 (~20s at 3Hz) |
+| elevated_checkpoint_samples | 30 (~10s at 3Hz) |
+| event_cooldown_seconds | 60.0 |
+| exit_stability_samples | 15 |
 
 ### Config Paths
 | Property | Path |
@@ -557,7 +560,7 @@ Newline-delimited JSON over Unix socket at `/tmp/rogue-hunter/daemon.sock`
 
 ## Module: forensics.py
 
-**Purpose:** Diagnostic capture (tailspin + logs) when process enters high band.
+**Purpose:** Diagnostic capture (tailspin + logs) when process enters critical band.
 
 **Privilege Model:** Only `tailspin save` requires sudo. Decoding and log extraction are unprivileged. The sudoers rule is configured during `rogue-hunter install` and restricts writes to `/tmp/rogue-hunter/`.
 

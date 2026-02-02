@@ -18,6 +18,7 @@ rogue-hunter/
 │   ├── socket_client.py       # Unix socket client
 │   ├── forensics.py           # tailspin/log capture
 │   ├── formatting.py          # Output formatting utilities
+│   ├── logging.py             # Structlog configuration (dual-output)
 │   ├── libproc.py             # libproc.dylib ctypes bindings
 │   ├── iokit.py               # IOKit bindings (GPU metrics)
 │   ├── sysctl.py              # sysctl bindings
@@ -25,8 +26,9 @@ rogue-hunter/
 │   ├── sleepwake.py           # Sleep/wake detection
 │   └── tui/                   # Textual dashboard
 │       ├── __init__.py
-│       └── app.py             # RogueHunterApp
-├── tests/                     # pytest test suite
+│       ├── app.py             # RogueHunterApp
+│       └── sparkline.py       # Sparkline widget
+├── tests/                     # pytest test suite (25 files)
 │   ├── conftest.py            # Shared fixtures
 │   └── test_*.py              # Module tests
 ├── docs/                      # Documentation
@@ -49,9 +51,11 @@ rogue-hunter/
 | `collector.py` | `LibprocCollector`, `ProcessScore`, `ProcessSamples` dataclasses |
 | `daemon.py` | Main sampling loop, integrates collector + tracker + forensics |
 | `tracker.py` | `ProcessTracker` — event lifecycle management |
-| `storage.py` | `Storage` class — SQLite with WAL, schema v16 |
-| `config.py` | `Config`, `BandsConfig` — TOML loading/saving |
+| `storage.py` | `Storage` class — SQLite with WAL, schema v18 |
+| `config.py` | `Config`, `BandsConfig`, `ScoringConfig` — TOML loading/saving |
+| `logging.py` | Dual-output structlog (console + JSON file), domain helpers |
 | `tui/app.py` | `RogueHunterApp` — Textual dashboard |
+| `tui/sparkline.py` | `Sparkline` widget for metric visualization |
 
 ## Data Flow
 
@@ -69,6 +73,5 @@ libproc.dylib → LibprocCollector → ProcessSamples
 |---------|------|
 | Config | `~/.config/rogue-hunter/config.toml` |
 | Database | `~/.local/share/rogue-hunter/data.db` |
-| Events | `~/.local/share/rogue-hunter/events/` |
 | Daemon log | `~/.local/state/rogue-hunter/daemon.log` |
 | Socket | `/tmp/rogue-hunter/daemon.sock` |

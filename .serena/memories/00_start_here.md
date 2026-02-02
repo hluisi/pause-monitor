@@ -48,6 +48,27 @@ This is a **personal project** — one developer + AI assistants. No external us
 - **Tracker** (`tracker.py`): Event lifecycle (entry/checkpoint/exit snapshots)
 - **Socket IPC** (`socket_server.py`): Real-time streaming to TUI
 
+## Testing Infrastructure
+
+| Pattern | Purpose | Entry Point |
+|---------|---------|-------------|
+| `tmp_db` fixture | Temporary database path | `def test_x(tmp_db):` |
+| `initialized_db` fixture | Database with schema | `def test_x(initialized_db):` |
+| `make_process_score()` | Factory for ProcessScore | `make_process_score(pid=123, score=50)` |
+
+Use `make_process_score()` instead of manually constructing ProcessScore with all 50+ fields.
+
+## External Dependencies
+
+| Need | Use | Not |
+|------|-----|-----|
+| Process metrics | libproc.dylib (ctypes) | `top`, `ps`, subprocess |
+| GPU metrics | IOKit (ctypes) | `ioreg`, subprocess |
+| Database | sqlite3 stdlib | SQLAlchemy, ORM |
+| TUI framework | Textual | curses |
+| CLI framework | Click | argparse |
+| Logging | structlog + Rich | stdlib logging, print() |
+
 ## First Steps
 
 1. Read this file

@@ -28,6 +28,10 @@ grep -r "TODO\|FIXME\|NotImplementedError\|pass$" src/
 - [ ] No removed functionality without explicit request
 - [ ] No accidental deletions
 
+## No Duplicate Infrastructure
+
+- [ ] Verified no duplicate infrastructure was created (see `systems` memory)
+
 ## Documentation
 
 - [ ] Update `implementation_guide` memory if architecture changed

@@ -19,12 +19,14 @@
 | `uv run rogue-hunter tui` | Launch interactive dashboard |
 | `uv run rogue-hunter status` | Quick health check |
 | `uv run rogue-hunter events` | List pause events |
-| `uv run rogue-hunter events <id>` | Show event details |
+| `uv run rogue-hunter events show <id>` | Show detailed event view |
+| `uv run rogue-hunter history --hours 24 -f json` | Export data as JSON |
+| `uv run rogue-hunter prune --dry-run` | Preview data deletion |
 
 ## Configuration
 
 | Command | Purpose |
-|---------|---------
+|---------|---------|
 | `uv run rogue-hunter config show` | Show current config |
 | `uv run rogue-hunter config edit` | Edit config file |
 | `uv run rogue-hunter config reset` | Reset to defaults |
@@ -32,7 +34,7 @@
 ## Service Management
 
 | Command | Purpose |
-|---------|---------
+|---------|---------|
 | `uv run rogue-hunter perms install` | Set up sudoers rules for forensics |
 | `uv run rogue-hunter perms uninstall` | Remove sudoers rules |
 | `uv run rogue-hunter perms status` | Check permissions status |
