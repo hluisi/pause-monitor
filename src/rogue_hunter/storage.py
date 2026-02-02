@@ -298,21 +298,21 @@ def require_database(
 
 
 def get_schema_version(conn: sqlite3.Connection) -> int:
-    """Get current schema version from database."""
-    try:
-        row = conn.execute("SELECT value FROM daemon_state WHERE key = 'schema_version'").fetchone()
-        return int(row[0]) if row else 0
-    except sqlite3.OperationalError:
-        return 0
+    """Get current schema version from database.
+
+    Requires database to be initialized first (daemon_state table must exist).
+    """
+    row = conn.execute("SELECT value FROM daemon_state WHERE key = 'schema_version'").fetchone()
+    return int(row[0]) if row else 0
 
 
 def get_daemon_state(conn: sqlite3.Connection, key: str) -> str | None:
-    """Get a value from daemon_state table."""
-    try:
-        row = conn.execute("SELECT value FROM daemon_state WHERE key = ?", (key,)).fetchone()
-        return row[0] if row else None
-    except sqlite3.OperationalError:
-        return None
+    """Get a value from daemon_state table.
+
+    Requires database to be initialized first (daemon_state table must exist).
+    """
+    row = conn.execute("SELECT value FROM daemon_state WHERE key = ?", (key,)).fetchone()
+    return row[0] if row else None
 
 
 def set_daemon_state(conn: sqlite3.Connection, key: str, value: str) -> None:

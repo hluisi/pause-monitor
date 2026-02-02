@@ -13,7 +13,7 @@ from datetime import datetime
 from typing import Any
 
 from rich.text import Text
-from textual.app import App, ComposeResult
+from textual.app import App, ComposeResult, ScreenStackError
 from textual.containers import Horizontal
 from textual.css.query import NoMatches
 from textual.reactive import reactive
@@ -370,8 +370,6 @@ class ProcessTable(Static):
     }
     """
 
-    DECAY_SECONDS = 10.0
-
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self._table: DataTable | None = None
@@ -525,7 +523,7 @@ class ProcessTable(Static):
         for pid, cached in list(self._cached_rogues.items()):
             if pid not in current_pids:
                 age = now - self._last_seen.get(pid, 0)
-                if age < self.DECAY_SECONDS:
+                if age < self.app.config.tui.decay_seconds:
                     display_list.append((cached, True))
                 else:
                     del self._cached_rogues[pid]
@@ -655,8 +653,6 @@ class TrackedEventsPanel(Static):
     }
     """
 
-    MAX_HISTORY = 15
-
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self._table: DataTable | None = None
@@ -746,13 +742,14 @@ class TrackedEventsPanel(Static):
                     self._history[cmd] = tracked
 
         # Limit history size (keep highest peaks)
-        if len(self._history) > self.MAX_HISTORY:
+        max_history = self.app.config.tui.tracked_max_history
+        if len(self._history) > max_history:
             sorted_history = sorted(
                 self._history.items(),
                 key=lambda x: x[1].peak_score,
                 reverse=True,
             )
-            self._history = dict(sorted_history[: self.MAX_HISTORY])
+            self._history = dict(sorted_history[:max_history])
 
         self._tracked_pids = current_pids
         self._refresh_display()
@@ -764,8 +761,9 @@ class TrackedEventsPanel(Static):
 
         self._table.clear()
 
-        # Get status colors from config
+        # Get config values
         status_colors = self.app.config.tui.colors.status
+        cmd_truncate = self.app.config.tui.command_truncate_length
 
         # Show active tracking first (sorted by peak score desc)
         active_sorted = sorted(
@@ -782,7 +780,7 @@ class TrackedEventsPanel(Static):
 
             self._table.add_row(
                 time_str,
-                tracked.command[:15],
+                tracked.command[:cmd_truncate],
                 str(tracked.peak_score),
                 duration,
                 dominant_display,
@@ -804,7 +802,7 @@ class TrackedEventsPanel(Static):
 
             self._table.add_row(
                 time_str,
-                tracked.command[:15],
+                tracked.command[:cmd_truncate],
                 str(tracked.peak_score),
                 duration,
                 dominant_display,
@@ -828,19 +826,22 @@ class ActivityLog(Static):
     }
     """
 
-    MAX_ENTRIES = 15
-
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self._prev_tier = "NORMAL"
 
     def compose(self) -> ComposeResult:
-        """Create log using RichLog for auto-scroll and auto-prune."""
-        yield RichLog(id="activity-log", markup=True, max_lines=self.MAX_ENTRIES)
+        """Create container - RichLog created in on_mount where config is available."""
+        # RichLog created in on_mount to access config for max_lines
+        return
+        yield  # Makes this a generator (never reached)
 
     def on_mount(self) -> None:
-        """Set border title and initial state."""
+        """Set up RichLog with config values and initial state."""
         self.border_title = "ACTIVITY"
+        max_entries = self.app.config.tui.activity_max_entries
+        log = RichLog(id="activity-log", markup=True, max_lines=max_entries)
+        self.mount(log)
         self._add_entry("Waiting for connection...", "normal")
 
     def _add_entry(self, message: str, level: str = "normal") -> None:
@@ -912,11 +913,6 @@ class RogueHunterApp(App):
         ("q", "quit", "Quit"),
     ]
 
-    # Reconnect backoff settings
-    _RECONNECT_INITIAL_DELAY = 1.0  # Start with 1 second
-    _RECONNECT_MAX_DELAY = 30.0  # Cap at 30 seconds
-    _RECONNECT_MULTIPLIER = 2.0  # Double each time
-
     def __init__(self, config: Config | None = None):
         super().__init__()
         self.config = config or Config.load()
@@ -986,11 +982,11 @@ class RogueHunterApp(App):
                         "path": str(self.config.socket_path),
                     }
                 )
-            except Exception:
+            except ConnectionError:
                 pass  # Connection logging is best-effort
             try:
                 self.query_one("#activity", ActivityLog).connected()
-            except Exception:
+            except (NoMatches, ScreenStackError):
                 pass
             self._socket_read_task = asyncio.create_task(self._read_socket_loop())
             return True
@@ -1023,9 +1019,10 @@ class RogueHunterApp(App):
     async def _reconnect_loop(self) -> None:
         """Attempt to reconnect with exponential backoff.
 
-        Backoff schedule: 1s → 2s → 4s → 8s → 16s → 30s (capped)
+        Backoff schedule uses config values (default: 1s → 2s → 4s → 8s → 16s → 30s capped)
         """
-        delay = self._RECONNECT_INITIAL_DELAY
+        tui_config = self.config.tui
+        delay = tui_config.reconnect_initial_delay
 
         while not self._stopping:
             self.sub_title = f"Real-time Dashboard (reconnecting in {delay:.0f}s...)"
@@ -1059,7 +1056,10 @@ class RogueHunterApp(App):
                 return  # Success! Exit reconnect loop
 
             # Increase delay with exponential backoff
-            delay = min(delay * self._RECONNECT_MULTIPLIER, self._RECONNECT_MAX_DELAY)
+            delay = min(
+                delay * tui_config.reconnect_multiplier,
+                tui_config.reconnect_max_delay,
+            )
 
     async def _read_socket_loop(self) -> None:
         """Read messages from socket and update UI."""
@@ -1090,11 +1090,11 @@ class RogueHunterApp(App):
         self.sub_title = "Real-time Dashboard (disconnected)"
         try:
             self.query_one("#header", HeaderBar).set_disconnected()
-        except Exception:
+        except (NoMatches, ScreenStackError):
             pass
         try:
             self.query_one("#main-area", ProcessTable).set_disconnected()
-        except Exception:
+        except (NoMatches, ScreenStackError):
             pass
 
         # Start reconnect loop if not already running and not shutting down

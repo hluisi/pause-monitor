@@ -20,6 +20,15 @@ class SystemConfig:
     ring_buffer_size: int = 60  # Number of samples to keep in ring buffer
     sample_interval: float = 1 / 3  # Seconds between samples (~0.333s = 3Hz)
     forensics_debounce: float = 2.0  # Min seconds between forensics captures
+    # Daemon heartbeat and logging
+    heartbeat_samples: int = 60  # Log heartbeat every N samples (~20s at 3Hz)
+    log_stability_samples: int = 3  # Samples before logging band transitions
+    auto_prune_interval_hours: int = 24  # Hours between auto-prune runs
+    # Log file rotation
+    log_max_bytes: int = 5 * 1024 * 1024  # Max log file size (5MB)
+    log_backup_count: int = 3  # Number of backup log files to keep
+    # Forensics capture
+    forensics_log_seconds: int = 60  # Seconds of logs to capture during forensics
 
 
 @dataclass
@@ -120,14 +129,13 @@ class ResourceWeights:
 
     Higher weight = more impact on score.
     GPU weighted higher because GPU work is intensive.
-    Wakeups penalized because they cause system-wide disruption.
     """
 
     cpu: float = 1.0
     gpu: float = 3.0  # GPU work is intensive
     memory: float = 1.0
     disk_io: float = 1.0
-    wakeups: float = 1.5  # Moderate penalty for system disruption
+    wakeups: float = 1.0
 
 
 @dataclass
@@ -184,6 +192,12 @@ class ScoringConfig:
     active_min_cpu: float = 0.1  # Minimum CPU % to be considered active
     active_min_memory_mb: float = 10.0  # Minimum memory MB to be considered active
     active_min_disk_io: float = 0.0  # Minimum disk I/O bytes/sec (0 = any disk activity counts)
+    # Thresholds for fair share resource user counting (affects scoring)
+    share_min_cpu: float = 0.01  # CPU % threshold to count as resource user (0.01%)
+    share_min_memory_bytes: int = 268_435_456  # Memory threshold (256 MiB)
+    share_min_wakeups: float = 10.0  # Wakeups/sec threshold for resource user
+    # Score curve tuning
+    score_curve_multiplier: float = 10.0  # Multiplier for log2 scoring curve
 
 
 @dataclass
@@ -344,6 +358,15 @@ class TUIConfig:
 
     colors: TUIColorsConfig = field(default_factory=TUIColorsConfig)
     sparkline: SparklineConfig = field(default_factory=SparklineConfig)
+    # Display settings
+    decay_seconds: float = 10.0  # Seconds to show dimmed processes after leaving rogues
+    tracked_max_history: int = 15  # Max entries in tracked events panel
+    activity_max_entries: int = 15  # Max entries in activity log
+    command_truncate_length: int = 15  # Max chars for command in tracked panel
+    # Reconnection settings
+    reconnect_initial_delay: float = 1.0  # Initial reconnect delay (seconds)
+    reconnect_max_delay: float = 30.0  # Max reconnect delay (seconds)
+    reconnect_multiplier: float = 2.0  # Exponential backoff multiplier
 
 
 def _dataclass_to_table(obj: object) -> tomlkit.items.Table:
@@ -480,6 +503,20 @@ class Config:
                 forensics_debounce=system_data.get(
                     "forensics_debounce", sys_defaults.forensics_debounce
                 ),
+                heartbeat_samples=system_data.get(
+                    "heartbeat_samples", sys_defaults.heartbeat_samples
+                ),
+                log_stability_samples=system_data.get(
+                    "log_stability_samples", sys_defaults.log_stability_samples
+                ),
+                auto_prune_interval_hours=system_data.get(
+                    "auto_prune_interval_hours", sys_defaults.auto_prune_interval_hours
+                ),
+                log_max_bytes=system_data.get("log_max_bytes", sys_defaults.log_max_bytes),
+                log_backup_count=system_data.get("log_backup_count", sys_defaults.log_backup_count),
+                forensics_log_seconds=system_data.get(
+                    "forensics_log_seconds", sys_defaults.forensics_log_seconds
+                ),
             ),
             bands=_load_bands_config(bands_data),
             scoring=_load_scoring_config(scoring_data),
@@ -592,6 +629,10 @@ def _load_scoring_config(data: dict) -> ScoringConfig:
         active_min_cpu=data.get("active_min_cpu", defaults.active_min_cpu),
         active_min_memory_mb=data.get("active_min_memory_mb", defaults.active_min_memory_mb),
         active_min_disk_io=data.get("active_min_disk_io", defaults.active_min_disk_io),
+        share_min_cpu=data.get("share_min_cpu", defaults.share_min_cpu),
+        share_min_memory_bytes=data.get("share_min_memory_bytes", defaults.share_min_memory_bytes),
+        share_min_wakeups=data.get("share_min_wakeups", defaults.share_min_wakeups),
+        score_curve_multiplier=data.get("score_curve_multiplier", defaults.score_curve_multiplier),
     )
 
 
@@ -609,6 +650,7 @@ def _load_tui_config(data: dict) -> TUIConfig:
 
     Handles nested [tui.colors.*] and [tui.sparkline] sections with defaults.
     """
+    tui_defaults = TUIConfig()
     colors_data = data.get("colors", {})
     bands_data = colors_data.get("bands", {})
     trends_data = colors_data.get("trends", {})
@@ -678,4 +720,16 @@ def _load_tui_config(data: dict) -> TUIConfig:
             orientation=sparkline_data.get("orientation", sp.orientation),
             direction=sparkline_data.get("direction", sp.direction),
         ),
+        # TUI display settings
+        decay_seconds=data.get("decay_seconds", tui_defaults.decay_seconds),
+        tracked_max_history=data.get("tracked_max_history", tui_defaults.tracked_max_history),
+        activity_max_entries=data.get("activity_max_entries", tui_defaults.activity_max_entries),
+        command_truncate_length=data.get(
+            "command_truncate_length", tui_defaults.command_truncate_length
+        ),
+        reconnect_initial_delay=data.get(
+            "reconnect_initial_delay", tui_defaults.reconnect_initial_delay
+        ),
+        reconnect_max_delay=data.get("reconnect_max_delay", tui_defaults.reconnect_max_delay),
+        reconnect_multiplier=data.get("reconnect_multiplier", tui_defaults.reconnect_multiplier),
     )

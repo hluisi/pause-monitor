@@ -27,6 +27,9 @@ if TYPE_CHECKING:
 # Rich console for colorful human-readable output
 _console = Console(highlight=False)
 
+# Module-level config reference for score_color (set by configure())
+_config: "Config | None" = None
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Icons
@@ -103,10 +106,20 @@ def error(msg: str, icon: str = "") -> None:
 
 
 def score_color(score: int) -> str:
-    """Return Rich color name based on score severity."""
-    if score >= 50:
+    """Return Rich color name based on score severity.
+
+    Requires configure() to have been called first.
+
+    Raises:
+        RuntimeError: If configure() hasn't been called.
+    """
+    if _config is None:
+        raise RuntimeError("score_color() called before configure()")
+
+    bands = _config.bands
+    if score >= bands.high:
         return "bright_red"
-    elif score >= 30:
+    elif score >= bands.elevated:
         return "bright_yellow"
     return "green"
 
@@ -372,15 +385,17 @@ def configure(config: Config) -> None:
     Args:
         config: Application config with paths
     """
+    global _config
+    _config = config
+
     # Ensure state directory exists for log file
     config.state_dir.mkdir(parents=True, exist_ok=True)
 
     # Set up rotating file handler for JSON output
-    # 5MB max size, keep 3 backup files
     file_handler = logging.handlers.RotatingFileHandler(
         config.log_path,
-        maxBytes=5 * 1024 * 1024,  # 5MB
-        backupCount=3,
+        maxBytes=config.system.log_max_bytes,
+        backupCount=config.system.log_backup_count,
         encoding="utf-8",
     )
     file_handler.setLevel(logging.INFO)

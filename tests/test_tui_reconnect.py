@@ -6,6 +6,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+from textual.css.query import NoMatches
 
 
 class TestTUIReconnect:
@@ -24,22 +25,24 @@ class TestTUIReconnect:
         config.socket_path = short_tmp_path / "test.sock"
         return config
 
-    def test_reconnect_backoff_constants(self):
-        """Verify reconnect backoff constants are correctly set."""
-        from rogue_hunter.tui.app import RogueHunterApp
+    def test_reconnect_backoff_config_defaults(self):
+        """Verify reconnect backoff config defaults are correctly set."""
+        from rogue_hunter.config import TUIConfig
 
-        assert RogueHunterApp._RECONNECT_INITIAL_DELAY == 1.0
-        assert RogueHunterApp._RECONNECT_MAX_DELAY == 30.0
-        assert RogueHunterApp._RECONNECT_MULTIPLIER == 2.0
+        tui_config = TUIConfig()
+        assert tui_config.reconnect_initial_delay == 1.0
+        assert tui_config.reconnect_max_delay == 30.0
+        assert tui_config.reconnect_multiplier == 2.0
 
     def test_backoff_calculation(self, mock_config):
         """Verify the backoff calculation logic."""
-        from rogue_hunter.tui.app import RogueHunterApp
+        from rogue_hunter.config import TUIConfig
 
-        # Test the backoff calculation directly
-        initial = RogueHunterApp._RECONNECT_INITIAL_DELAY
-        multiplier = RogueHunterApp._RECONNECT_MULTIPLIER
-        max_delay = RogueHunterApp._RECONNECT_MAX_DELAY
+        # Test the backoff calculation using config defaults
+        tui_config = TUIConfig()
+        initial = tui_config.reconnect_initial_delay
+        multiplier = tui_config.reconnect_multiplier
+        max_delay = tui_config.reconnect_max_delay
 
         # Calculate expected sequence
         delay = initial
@@ -59,10 +62,11 @@ class TestTUIReconnect:
 
     def test_max_delay_cap(self, mock_config):
         """Verify delay is capped at MAX_DELAY."""
-        from rogue_hunter.tui.app import RogueHunterApp
+        from rogue_hunter.config import TUIConfig
 
-        max_delay = RogueHunterApp._RECONNECT_MAX_DELAY
-        multiplier = RogueHunterApp._RECONNECT_MULTIPLIER
+        tui_config = TUIConfig()
+        max_delay = tui_config.reconnect_max_delay
+        multiplier = tui_config.reconnect_multiplier
 
         # Even with a very large delay, it should be capped
         delay = 100.0
@@ -78,7 +82,7 @@ class TestTUIReconnect:
         # When stopping, reconnect should not be started
         app._stopping = True
         app._reconnect_task = None
-        app.query_one = MagicMock(side_effect=Exception("no widgets"))
+        app.query_one = MagicMock(side_effect=NoMatches("no widgets"))
 
         # This should not start a reconnect task
         with patch("asyncio.create_task") as mock_create:
@@ -95,7 +99,7 @@ class TestTUIReconnect:
         app._reconnect_task = None
 
         # Mock query_one to avoid Textual widget issues
-        app.query_one = MagicMock(side_effect=Exception("no widgets"))
+        app.query_one = MagicMock(side_effect=NoMatches("no widgets"))
 
         # Create a task that we'll check for
         mock_task = MagicMock()
@@ -116,7 +120,7 @@ class TestTUIReconnect:
         app._stopping = True  # Shutting down
         app._reconnect_task = None
 
-        app.query_one = MagicMock(side_effect=Exception("no widgets"))
+        app.query_one = MagicMock(side_effect=NoMatches("no widgets"))
 
         with patch("asyncio.create_task") as mock_create:
             app._set_disconnected("test error", start_reconnect=True)
@@ -130,7 +134,7 @@ class TestTUIReconnect:
         from rogue_hunter.tui.app import RogueHunterApp
 
         app = RogueHunterApp(config=mock_config)
-        app.query_one = MagicMock(side_effect=Exception("no widgets"))
+        app.query_one = MagicMock(side_effect=NoMatches("no widgets"))
         app.notify = MagicMock()
 
         # Test failure (socket doesn't exist)
@@ -143,7 +147,7 @@ class TestTUIReconnect:
         from rogue_hunter.tui.app import RogueHunterApp
 
         app = RogueHunterApp(config=mock_config)
-        app.query_one = MagicMock(side_effect=Exception("no widgets"))
+        app.query_one = MagicMock(side_effect=NoMatches("no widgets"))
         app.notify = MagicMock()
         app._reconnect_task = None
 

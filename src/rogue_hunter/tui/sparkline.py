@@ -132,8 +132,9 @@ class GradientColor:
                 rgb = _lerp_color(c1, c2, t)
                 return _rgb_to_hex(*rgb)
 
-        # Fallback (shouldn't reach here)
-        return _rgb_to_hex(*self._parsed[-1][1])
+        # If we reach here, the algorithm has a bug — value should always
+        # fall between some consecutive pair after edge case handling
+        raise AssertionError(f"Gradient interpolation failed for value {value}")
 
 
 class SparklineOrientation(Enum):

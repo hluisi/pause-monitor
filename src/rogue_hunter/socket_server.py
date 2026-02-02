@@ -125,7 +125,7 @@ class SocketServer:
             try:
                 writer.write(data)
                 await writer.drain()
-            except Exception:
+            except OSError:
                 self._clients.discard(writer)
 
     def _handle_log_message(self, msg: dict) -> None:
