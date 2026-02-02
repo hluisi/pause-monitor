@@ -6,10 +6,14 @@ import os
 import time
 from dataclasses import dataclass
 from datetime import datetime
+from typing import Literal
 
 import structlog
 
 from rogue_hunter.config import Config
+
+# Type alias for dominant resource values
+DominantResource = Literal["cpu", "gpu", "memory", "disk", "wakeups"]
 
 log = structlog.get_logger()
 
@@ -130,7 +134,7 @@ class ProcessScore:
     disk_share: float  # Share of system disk I/O this process uses
     wakeups_share: float  # Share of system wakeups this process causes
     disproportionality: float  # Highest resource share (max of above)
-    dominant_resource: str  # "cpu"|"gpu"|"memory"|"disk"|"wakeups"
+    dominant_resource: DominantResource  # Which resource this process dominates
 
     def to_dict(self) -> dict:
         """Serialize to a dictionary."""
@@ -778,7 +782,14 @@ class LibprocCollector:
         state_mult = multipliers.get(proc["state"])
         final_score = min(100, int(base_score * state_mult))
 
-        # Determine dominant category
+        # Determine dominant resource based on category scores
+        # Map old categories to new resource names for compatibility
+        category_to_resource: dict[str, DominantResource] = {
+            "blocking": "disk",  # Blocking is I/O-related
+            "contention": "cpu",  # Contention is CPU scheduler pressure
+            "pressure": "memory",  # Pressure is memory/syscalls
+            "efficiency": "cpu",  # Efficiency issues show up as CPU waste
+        }
         scores = {
             "blocking": blocking_score,
             "contention": contention_score,
@@ -786,7 +797,18 @@ class LibprocCollector:
             "efficiency": efficiency_score,
         }
         dominant_category = max(scores, key=lambda k: scores[k])
-        dominant_metrics = self._get_dominant_metrics(proc, dominant_category)
+        dominant_resource = category_to_resource[dominant_category]
+
+        # Temporary placeholder values for resource shares
+        # Will be properly implemented in Task 6 (fair share calculation)
+        cpu_share = proc["cpu"] / 100.0  # Normalize CPU% to share
+        gpu_share = proc["gpu_time_rate"] / 1000.0 if proc["gpu_time_rate"] > 0 else 0.0
+        mem_share = 0.0  # Requires total system memory context
+        disk_share = 0.0  # Requires system-wide disk I/O context
+        wakeups_share = 0.0  # Requires system-wide wakeups context
+
+        # Disproportionality is the max share
+        disproportionality = max(cpu_share, gpu_share, mem_share, disk_share, wakeups_share)
 
         band = self._get_band(final_score)
         captured_at = time.time()
@@ -840,10 +862,11 @@ class LibprocCollector:
             # Scoring
             score=final_score,
             band=band,
-            blocking_score=blocking_score,
-            contention_score=contention_score,
-            pressure_score=pressure_score,
-            efficiency_score=efficiency_score,
-            dominant_category=dominant_category,
-            dominant_metrics=dominant_metrics,
+            cpu_share=cpu_share,
+            gpu_share=gpu_share,
+            mem_share=mem_share,
+            disk_share=disk_share,
+            wakeups_share=wakeups_share,
+            disproportionality=disproportionality,
+            dominant_resource=dominant_resource,
         )

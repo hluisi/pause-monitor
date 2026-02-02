@@ -32,11 +32,12 @@ def make_score(
     # Derive band from score if not explicitly provided
     if band is None:
         band = _get_band_for_score(score)
+    cpu = kwargs.get("cpu", 50.0)
     return ProcessScore(
         pid=pid,
         command=command,
         captured_at=captured_at,
-        cpu=kwargs.get("cpu", 50.0),
+        cpu=cpu,
         mem=kwargs.get("mem", 1000),
         mem_peak=kwargs.get("mem_peak", 1500),
         pageins=kwargs.get("pageins", 0),
@@ -70,12 +71,13 @@ def make_score(
         priority=kwargs.get("priority", 31),
         score=score,
         band=band,
-        blocking_score=kwargs.get("blocking_score", score * 0.4),
-        contention_score=kwargs.get("contention_score", score * 0.3),
-        pressure_score=kwargs.get("pressure_score", score * 0.2),
-        efficiency_score=kwargs.get("efficiency_score", score * 0.1),
-        dominant_category=kwargs.get("dominant_category", "blocking"),
-        dominant_metrics=kwargs.get("dominant_metrics", ["cpu:50%"] if score >= 40 else []),
+        cpu_share=kwargs.get("cpu_share", cpu / 100.0),
+        gpu_share=kwargs.get("gpu_share", 0.0),
+        mem_share=kwargs.get("mem_share", 0.0),
+        disk_share=kwargs.get("disk_share", 0.0),
+        wakeups_share=kwargs.get("wakeups_share", 0.0),
+        disproportionality=kwargs.get("disproportionality", cpu / 100.0),
+        dominant_resource=kwargs.get("dominant_resource", "cpu"),
     )
 
 
@@ -89,7 +91,7 @@ def test_tracker_creates_event_on_threshold_crossing(tmp_path):
     init_database(db_path)
     conn = get_connection(db_path)
 
-    bands = BandsConfig()  # tracking_band="elevated", threshold=40
+    bands = BandsConfig(tracking_band="elevated")  # tracking_band="elevated", threshold=40
     tracker = ProcessTracker(conn, bands, boot_time=1706000000)
 
     # Score below threshold — no event
@@ -115,7 +117,7 @@ def test_tracker_closes_event_when_score_drops(tmp_path):
     init_database(db_path)
     conn = get_connection(db_path)
 
-    bands = BandsConfig()
+    bands = BandsConfig(tracking_band="elevated")
     tracker = ProcessTracker(conn, bands, boot_time=1706000000)
 
     # Enter bad state
@@ -139,7 +141,7 @@ def test_tracker_updates_peak(tmp_path):
     init_database(db_path)
     conn = get_connection(db_path)
 
-    bands = BandsConfig()
+    bands = BandsConfig(tracking_band="elevated")
     tracker = ProcessTracker(conn, bands, boot_time=1706000000)
 
     # Enter at 50
@@ -167,7 +169,7 @@ def test_tracker_closes_missing_pids(tmp_path):
     init_database(db_path)
     conn = get_connection(db_path)
 
-    bands = BandsConfig()
+    bands = BandsConfig(tracking_band="elevated")
     tracker = ProcessTracker(conn, bands, boot_time=1706000000)
 
     # PID 123 enters bad state
@@ -214,7 +216,7 @@ def test_tracker_restores_state_from_db(tmp_path):
     snapshot_id = insert_process_snapshot(conn, event_id, "entry", entry_score)
     update_process_event_peak(conn, event_id, 60, "high", snapshot_id)
 
-    bands = BandsConfig()
+    bands = BandsConfig(tracking_band="elevated")
     tracker = ProcessTracker(conn, bands, boot_time=1706000000)
 
     # Tracker should have loaded the open event
@@ -244,7 +246,7 @@ def test_tracker_inserts_entry_snapshot(tmp_path):
     init_database(db_path)
     conn = get_connection(db_path)
 
-    bands = BandsConfig()
+    bands = BandsConfig(tracking_band="elevated")
     tracker = ProcessTracker(conn, bands, boot_time=1706000000)
 
     score = make_score(
@@ -274,8 +276,8 @@ def test_tracker_inserts_entry_snapshot(tmp_path):
     assert snap["score"] == 55
     assert snap["cpu"] == 60.0
     assert snap["mem"] == 2000
-    assert snap["dominant_category"] == "blocking"
-    assert snap["dominant_metrics"] == ["cpu:60%", "mem:2KB"]
+    assert snap["dominant_resource"] == "cpu"
+    assert isinstance(snap["disproportionality"], float)
 
     conn.close()
 
@@ -290,7 +292,7 @@ def test_tracker_inserts_exit_snapshot_on_score_drop(tmp_path):
     init_database(db_path)
     conn = get_connection(db_path)
 
-    bands = BandsConfig()
+    bands = BandsConfig(tracking_band="elevated")
     tracker = ProcessTracker(conn, bands, boot_time=1706000000)
 
     # Enter bad state
@@ -323,7 +325,7 @@ def test_tracker_no_exit_snapshot_for_disappeared_pid(tmp_path):
     init_database(db_path)
     conn = get_connection(db_path)
 
-    bands = BandsConfig()
+    bands = BandsConfig(tracking_band="elevated")
     tracker = ProcessTracker(conn, bands, boot_time=1706000000)
 
     # Enter bad state
@@ -354,7 +356,7 @@ def test_tracker_does_not_update_peak_for_equal_score(tmp_path):
     init_database(db_path)
     conn = get_connection(db_path)
 
-    bands = BandsConfig()
+    bands = BandsConfig(tracking_band="elevated")
     tracker = ProcessTracker(conn, bands, boot_time=1706000000)
 
     # Enter at 50
@@ -391,7 +393,7 @@ def test_tracker_handles_multiple_simultaneous_processes(tmp_path):
     init_database(db_path)
     conn = get_connection(db_path)
 
-    bands = BandsConfig()
+    bands = BandsConfig(tracking_band="elevated")
     tracker = ProcessTracker(conn, bands, boot_time=1706000000)
 
     # Three processes enter bad state at once

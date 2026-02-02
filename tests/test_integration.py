@@ -41,8 +41,7 @@ def make_test_process_score(**kwargs) -> ProcessScore:
     cap_time = kwargs.pop("captured_at", time.time())
     pid = kwargs.pop("pid", 1)
     command = kwargs.pop("command", "test_proc")
-    dominant_category = kwargs.pop("dominant_category", "blocking")
-    dominant_metrics = kwargs.pop("dominant_metrics", ["cpu:50%"])
+    dominant_resource = kwargs.pop("dominant_resource", "cpu")
 
     cpu = kwargs.pop("cpu", 50.0)
     mem = kwargs.pop("mem", 1024 * 1024)
@@ -75,10 +74,12 @@ def make_test_process_score(**kwargs) -> ProcessScore:
     zombie_children = kwargs.pop("zombie_children", 0)
     priority = kwargs.pop("priority", 31)
     score = kwargs.pop("score", 50)
-    blocking_score = kwargs.pop("blocking_score", score * 0.4)
-    contention_score = kwargs.pop("contention_score", score * 0.3)
-    pressure_score = kwargs.pop("pressure_score", score * 0.2)
-    efficiency_score = kwargs.pop("efficiency_score", score * 0.1)
+    cpu_share = kwargs.pop("cpu_share", cpu / 100.0)
+    gpu_share = kwargs.pop("gpu_share", 0.0)
+    mem_share = kwargs.pop("mem_share", 0.0)
+    disk_share = kwargs.pop("disk_share", 0.0)
+    wakeups_share = kwargs.pop("wakeups_share", 0.0)
+    disproportionality = kwargs.pop("disproportionality", cpu / 100.0)
 
     state = kwargs.pop("state", "running")
     band = kwargs.pop("band", "elevated")
@@ -121,14 +122,13 @@ def make_test_process_score(**kwargs) -> ProcessScore:
         priority=priority,
         score=score,
         band=band,
-        blocking_score=blocking_score,
-        contention_score=contention_score,
-        pressure_score=pressure_score,
-        efficiency_score=efficiency_score,
-        dominant_category=dominant_category,
-        dominant_metrics=(
-            list(dominant_metrics) if isinstance(dominant_metrics, frozenset) else dominant_metrics
-        ),
+        cpu_share=cpu_share,
+        gpu_share=gpu_share,
+        mem_share=mem_share,
+        disk_share=disk_share,
+        wakeups_share=wakeups_share,
+        disproportionality=disproportionality,
+        dominant_resource=dominant_resource,
     )
 
 

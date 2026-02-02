@@ -73,6 +73,21 @@ def test_process_score_has_resource_shares():
     assert score.dominant_resource == "cpu"
     assert score.disproportionality == 2.5
 
+    # Verify round-trip serialization works for new fields
+    d = score.to_dict()
+    assert d["cpu_share"] == 2.5
+    assert d["dominant_resource"] == "cpu"
+    assert d["disproportionality"] == 2.5
+
+    restored = ProcessScore.from_dict(d)
+    assert restored.cpu_share == 2.5
+    assert restored.gpu_share == 0.0
+    assert restored.mem_share == 1.2
+    assert restored.disk_share == 0.5
+    assert restored.wakeups_share == 0.1
+    assert restored.dominant_resource == "cpu"
+    assert restored.disproportionality == 2.5
+
 
 def test_process_score_no_category_scores():
     """ProcessScore no longer has category score fields."""
@@ -140,18 +155,19 @@ def test_process_score_to_dict():
         priority=31,
         score=42,
         band="elevated",
-        blocking_score=30.0,
-        contention_score=20.0,
-        pressure_score=10.0,
-        efficiency_score=5.0,
-        dominant_category="blocking",
-        dominant_metrics=["pageins:5/s"],
+        cpu_share=5.0,
+        gpu_share=0.0,
+        mem_share=1.0,
+        disk_share=0.0,
+        wakeups_share=0.0,
+        disproportionality=5.0,
+        dominant_resource="cpu",
     )
     d = ps.to_dict()
     assert d["pid"] == 123
     assert d["score"] == 42
-    assert d["dominant_category"] == "blocking"
-    assert d["dominant_metrics"] == ["pageins:5/s"]
+    assert d["dominant_resource"] == "cpu"
+    assert d["disproportionality"] == 5.0
 
 
 def test_process_score_from_dict():
@@ -194,17 +210,18 @@ def test_process_score_from_dict():
         "priority": 31,
         "score": 42,
         "band": "elevated",
-        "blocking_score": 30.0,
-        "contention_score": 20.0,
-        "pressure_score": 10.0,
-        "efficiency_score": 5.0,
-        "dominant_category": "blocking",
-        "dominant_metrics": ["pageins:5/s"],
+        "cpu_share": 5.0,
+        "gpu_share": 0.0,
+        "mem_share": 1.0,
+        "disk_share": 0.0,
+        "wakeups_share": 0.0,
+        "disproportionality": 5.0,
+        "dominant_resource": "cpu",
     }
     ps = ProcessScore.from_dict(d)
     assert ps.pid == 123
-    assert ps.dominant_category == "blocking"
-    assert ps.dominant_metrics == ["pageins:5/s"]
+    assert ps.dominant_resource == "cpu"
+    assert ps.disproportionality == 5.0
 
 
 def test_process_samples_json_roundtrip():
@@ -253,12 +270,13 @@ def test_process_samples_json_roundtrip():
                 priority=31,
                 score=75,
                 band="high",
-                blocking_score=40.0,
-                contention_score=30.0,
-                pressure_score=20.0,
-                efficiency_score=10.0,
-                dominant_category="blocking",
-                dominant_metrics=["cpu:80%"],
+                cpu_share=8.0,
+                gpu_share=0.0,
+                mem_share=0.1,
+                disk_share=0.0,
+                wakeups_share=0.0,
+                disproportionality=8.0,
+                dominant_resource="cpu",
             ),
         ],
     )
@@ -476,11 +494,12 @@ class TestLibprocCollectorIntegration:
         samples2 = await collector.collect()
         assert isinstance(samples2, ProcessSamples)
 
-        # Check rogues have all required fields
+        # Check rogues have all required resource share fields
         for rogue in samples2.rogues:
-            assert hasattr(rogue, "blocking_score")
-            assert hasattr(rogue, "contention_score")
-            assert hasattr(rogue, "pressure_score")
-            assert hasattr(rogue, "efficiency_score")
-            assert hasattr(rogue, "dominant_category")
-            assert hasattr(rogue, "dominant_metrics")
+            assert hasattr(rogue, "cpu_share")
+            assert hasattr(rogue, "gpu_share")
+            assert hasattr(rogue, "mem_share")
+            assert hasattr(rogue, "disk_share")
+            assert hasattr(rogue, "wakeups_share")
+            assert hasattr(rogue, "disproportionality")
+            assert hasattr(rogue, "dominant_resource")

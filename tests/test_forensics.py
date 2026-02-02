@@ -25,8 +25,7 @@ def make_process_score(
     score: int = 25,
     state: str = "running",
     band: str = "low",
-    dominant_category: str = "blocking",
-    dominant_metrics: list[str] | None = None,
+    dominant_resource: str = "cpu",
     **kwargs,
 ) -> ProcessScore:
     """Create ProcessScore with sensible defaults for testing."""
@@ -68,12 +67,13 @@ def make_process_score(
         priority=kwargs.get("priority", 31),
         score=score,
         band=band,
-        blocking_score=kwargs.get("blocking_score", score * 0.4),
-        contention_score=kwargs.get("contention_score", score * 0.3),
-        pressure_score=kwargs.get("pressure_score", score * 0.2),
-        efficiency_score=kwargs.get("efficiency_score", score * 0.1),
-        dominant_category=dominant_category,
-        dominant_metrics=dominant_metrics or ["cpu:50%"],
+        cpu_share=kwargs.get("cpu_share", cpu / 100.0),
+        gpu_share=kwargs.get("gpu_share", 0.0),
+        mem_share=kwargs.get("mem_share", 0.0),
+        disk_share=kwargs.get("disk_share", 0.0),
+        wakeups_share=kwargs.get("wakeups_share", 0.0),
+        disproportionality=kwargs.get("disproportionality", cpu / 100.0),
+        dominant_resource=dominant_resource,
     )
 
 
@@ -267,7 +267,7 @@ def test_parse_logs_ndjson_handles_invalid_json():
 def test_identify_culprits_from_buffer():
     """identify_culprits returns top rogues by score."""
     rogue = make_process_score(
-        pid=100, command="Chrome", score=30, dominant_metrics=["cpu:50%", "mem:100MB"]
+        pid=100, command="Chrome", score=30, dominant_resource="cpu", disproportionality=2.5
     )
     samples = make_process_samples(rogues=[rogue])
     ring_sample = RingSample(samples=samples)
@@ -279,8 +279,8 @@ def test_identify_culprits_from_buffer():
     assert culprits[0]["pid"] == 100
     assert culprits[0]["command"] == "Chrome"
     assert culprits[0]["score"] == 30
-    assert culprits[0]["dominant_category"] == "blocking"
-    assert culprits[0]["dominant_metrics"] == ["cpu:50%", "mem:100MB"]
+    assert culprits[0]["dominant_resource"] == "cpu"
+    assert culprits[0]["disproportionality"] == 2.5
 
 
 def test_identify_culprits_multiple_processes():

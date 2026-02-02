@@ -1,6 +1,5 @@
 """SQLite storage layer for rogue-hunter."""
 
-import json
 import sqlite3
 import time
 from contextlib import contextmanager
@@ -85,15 +84,16 @@ CREATE TABLE IF NOT EXISTS process_snapshots (
     -- State
     state TEXT NOT NULL,
     priority INTEGER NOT NULL,
-    -- Scoring (4-category system)
+    -- Scoring (resource-based system)
     score INTEGER NOT NULL,
     band TEXT NOT NULL,
-    blocking_score REAL NOT NULL,
-    contention_score REAL NOT NULL,
-    pressure_score REAL NOT NULL,
-    efficiency_score REAL NOT NULL,
-    dominant_category TEXT NOT NULL,
-    dominant_metrics TEXT NOT NULL,
+    cpu_share REAL NOT NULL,
+    gpu_share REAL NOT NULL,
+    mem_share REAL NOT NULL,
+    disk_share REAL NOT NULL,
+    wakeups_share REAL NOT NULL,
+    disproportionality REAL NOT NULL,
+    dominant_resource TEXT NOT NULL,
     FOREIGN KEY (event_id) REFERENCES process_events(id) ON DELETE CASCADE
 );
 
@@ -558,8 +558,8 @@ def insert_process_snapshot(
             gpu_time, gpu_time_rate,
             zombie_children,
             state, priority,
-            score, band, blocking_score, contention_score, pressure_score, efficiency_score,
-            dominant_category, dominant_metrics)
+            score, band, cpu_share, gpu_share, mem_share, disk_share,
+            wakeups_share, disproportionality, dominant_resource)
            VALUES (?, ?, ?,
                    ?, ?, ?, ?, ?, ?, ?,
                    ?, ?,
@@ -571,7 +571,7 @@ def insert_process_snapshot(
                    ?,
                    ?, ?,
                    ?, ?, ?, ?, ?, ?,
-                   ?, ?)""",
+                   ?, ?, ?)""",
         (
             event_id,
             snapshot_type,
@@ -621,12 +621,13 @@ def insert_process_snapshot(
             # Scoring
             score.score,
             score.band,
-            score.blocking_score,
-            score.contention_score,
-            score.pressure_score,
-            score.efficiency_score,
-            score.dominant_category,
-            json.dumps(score.dominant_metrics),
+            score.cpu_share,
+            score.gpu_share,
+            score.mem_share,
+            score.disk_share,
+            score.wakeups_share,
+            score.disproportionality,
+            score.dominant_resource,
         ),
     )
     conn.commit()
@@ -648,8 +649,8 @@ def get_snapshot(conn: sqlite3.Connection, snapshot_id: int) -> dict | None:
                   gpu_time, gpu_time_rate,
                   zombie_children,
                   state, priority,
-                  score, band, blocking_score, contention_score, pressure_score, efficiency_score,
-                  dominant_category, dominant_metrics
+                  score, band, cpu_share, gpu_share, mem_share, disk_share,
+                  wakeups_share, disproportionality, dominant_resource
            FROM process_snapshots WHERE id = ?""",
         (snapshot_id,),
     ).fetchone()
@@ -707,12 +708,13 @@ def get_snapshot(conn: sqlite3.Connection, snapshot_id: int) -> dict | None:
         # Scoring
         "score": row[36],
         "band": row[37],
-        "blocking_score": row[38],
-        "contention_score": row[39],
-        "pressure_score": row[40],
-        "efficiency_score": row[41],
-        "dominant_category": row[42],
-        "dominant_metrics": json.loads(row[43]) if row[43] else [],
+        "cpu_share": row[38],
+        "gpu_share": row[39],
+        "mem_share": row[40],
+        "disk_share": row[41],
+        "wakeups_share": row[42],
+        "disproportionality": row[43],
+        "dominant_resource": row[44],
     }
 
 
@@ -729,8 +731,8 @@ def get_process_snapshots(conn: sqlite3.Connection, event_id: int) -> list[dict]
                   gpu_time, gpu_time_rate,
                   zombie_children,
                   state, priority,
-                  score, band, blocking_score, contention_score, pressure_score, efficiency_score,
-                  dominant_category, dominant_metrics
+                  score, band, cpu_share, gpu_share, mem_share, disk_share,
+                  wakeups_share, disproportionality, dominant_resource
            FROM process_snapshots WHERE event_id = ?
            ORDER BY captured_at""",
         (event_id,),
@@ -786,12 +788,13 @@ def get_process_snapshots(conn: sqlite3.Connection, event_id: int) -> list[dict]
             # Scoring
             "score": r[36],
             "band": r[37],
-            "blocking_score": r[38],
-            "contention_score": r[39],
-            "pressure_score": r[40],
-            "efficiency_score": r[41],
-            "dominant_category": r[42],
-            "dominant_metrics": json.loads(r[43]) if r[43] else [],
+            "cpu_share": r[38],
+            "gpu_share": r[39],
+            "mem_share": r[40],
+            "disk_share": r[41],
+            "wakeups_share": r[42],
+            "disproportionality": r[43],
+            "dominant_resource": r[44],
         }
         for r in cursor.fetchall()
     ]

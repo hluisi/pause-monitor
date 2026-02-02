@@ -479,7 +479,8 @@ class Daemon:
                 for pid in current_pids - previous_pids:
                     rogue = next(r for r in samples.rogues if r.pid == pid)
                     if rogue.score > log_threshold:
-                        metrics = ", ".join(rogue.dominant_metrics)
+                        # Log dominant resource and disproportionality
+                        metrics = f"{rogue.dominant_resource}: {rogue.disproportionality:.1f}x"
                         rlog.rogue_enter(rogue.command, pid, rogue.score, metrics)
                         logged_rogues.add(pid)
 

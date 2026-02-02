@@ -505,9 +505,9 @@ def test_insert_process_snapshot(tmp_path):
     assert snap["score"] == 45
     assert snap["cpu"] == 30.5
     assert snap["mem"] == 200
-    # New 4-category scoring
-    assert snap["dominant_category"] == "blocking"
-    assert isinstance(snap["dominant_metrics"], list)
+    # Resource-based scoring
+    assert snap["dominant_resource"] == "cpu"
+    assert isinstance(snap["disproportionality"], float)
     conn.close()
 
 
