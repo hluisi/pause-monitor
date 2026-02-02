@@ -691,3 +691,175 @@ def test_calculate_resource_shares_all_resources():
     assert shares[1]["mem_share"] == 1.0
     assert shares[1]["disk_share"] == 1.0
     assert shares[1]["wakeups_share"] == 1.0
+
+
+# =============================================================================
+# Task 7: Disproportionate-share scoring tests
+# =============================================================================
+
+
+def test_score_from_shares_applies_weights():
+    """Score calculation applies resource weights from config."""
+    from rogue_hunter.collector import score_from_shares
+    from rogue_hunter.config import ResourceWeights
+
+    shares = {
+        "cpu_share": 10.0,  # 10x fair share
+        "gpu_share": 0.0,
+        "mem_share": 0.0,
+        "disk_share": 0.0,
+        "wakeups_share": 0.0,
+    }
+    weights = ResourceWeights(cpu=1.0, gpu=3.0, memory=1.0, disk_io=1.0, wakeups=2.0)
+
+    score, dominant, disproportionality = score_from_shares(shares, weights)
+
+    assert dominant == "cpu"
+    assert disproportionality == 10.0
+    assert score > 0
+
+
+def test_score_from_shares_gpu_weighted_higher():
+    """GPU share contributes more to score than equal CPU share."""
+    from rogue_hunter.collector import score_from_shares
+    from rogue_hunter.config import ResourceWeights
+
+    weights = ResourceWeights(cpu=1.0, gpu=3.0, memory=1.0, disk_io=1.0, wakeups=2.0)
+
+    cpu_shares = {
+        "cpu_share": 10.0,
+        "gpu_share": 0.0,
+        "mem_share": 0.0,
+        "disk_share": 0.0,
+        "wakeups_share": 0.0,
+    }
+    gpu_shares = {
+        "cpu_share": 0.0,
+        "gpu_share": 10.0,
+        "mem_share": 0.0,
+        "disk_share": 0.0,
+        "wakeups_share": 0.0,
+    }
+
+    cpu_score, _, _ = score_from_shares(cpu_shares, weights)
+    gpu_score, _, _ = score_from_shares(gpu_shares, weights)
+
+    assert gpu_score > cpu_score  # GPU weighted 3x, so higher score
+
+
+def test_score_from_shares_logarithmic_curve():
+    """Score uses logarithmic curve - diminishing returns at extremes."""
+    from rogue_hunter.collector import score_from_shares
+    from rogue_hunter.config import ResourceWeights
+
+    weights = ResourceWeights()
+
+    shares_10x = {
+        "cpu_share": 10.0,
+        "gpu_share": 0.0,
+        "mem_share": 0.0,
+        "disk_share": 0.0,
+        "wakeups_share": 0.0,
+    }
+    shares_100x = {
+        "cpu_share": 100.0,
+        "gpu_share": 0.0,
+        "mem_share": 0.0,
+        "disk_share": 0.0,
+        "wakeups_share": 0.0,
+    }
+    shares_1000x = {
+        "cpu_share": 1000.0,
+        "gpu_share": 0.0,
+        "mem_share": 0.0,
+        "disk_share": 0.0,
+        "wakeups_share": 0.0,
+    }
+
+    score_10x, _, _ = score_from_shares(shares_10x, weights)
+    score_100x, _, _ = score_from_shares(shares_100x, weights)
+    score_1000x, _, _ = score_from_shares(shares_1000x, weights)
+
+    increase_10_to_100 = score_100x - score_10x
+    increase_100_to_1000 = score_1000x - score_100x
+
+    assert increase_100_to_1000 < increase_10_to_100 * 2  # Diminishing returns
+
+
+def test_score_from_shares_critical_reachable():
+    """Critical band (70+) is reachable with extreme disproportionality."""
+    from rogue_hunter.collector import score_from_shares
+    from rogue_hunter.config import ResourceWeights
+
+    weights = ResourceWeights()
+    shares = {
+        "cpu_share": 200.0,
+        "gpu_share": 0.0,
+        "mem_share": 0.0,
+        "disk_share": 0.0,
+        "wakeups_share": 0.0,
+    }
+
+    score, _, _ = score_from_shares(shares, weights)
+
+    assert score >= 70  # Critical band
+
+
+def test_score_from_shares_high_reachable_under_load():
+    """High band (50-69) is reachable with moderate disproportionality."""
+    from rogue_hunter.collector import score_from_shares
+    from rogue_hunter.config import ResourceWeights
+
+    weights = ResourceWeights()
+    shares = {
+        "cpu_share": 75.0,
+        "gpu_share": 0.0,
+        "mem_share": 0.0,
+        "disk_share": 0.0,
+        "wakeups_share": 0.0,
+    }
+
+    score, _, _ = score_from_shares(shares, weights)
+
+    assert 50 <= score < 70  # High band
+
+
+def test_score_from_shares_dominant_resource():
+    """Dominant resource is the one with highest weighted share."""
+    from rogue_hunter.collector import score_from_shares
+    from rogue_hunter.config import ResourceWeights
+
+    weights = ResourceWeights(cpu=1.0, gpu=3.0, memory=1.0, disk_io=1.0, wakeups=2.0)
+    shares = {
+        "cpu_share": 10.0,
+        "gpu_share": 5.0,
+        "mem_share": 2.0,
+        "disk_share": 1.0,
+        "wakeups_share": 1.0,
+    }
+
+    _, dominant, disproportionality = score_from_shares(shares, weights)
+
+    # GPU: 5.0 * 3.0 = 15.0 weighted
+    # CPU: 10.0 * 1.0 = 10.0 weighted
+    assert dominant == "gpu"
+    assert disproportionality == 5.0  # Raw share of dominant resource
+
+
+def test_score_from_shares_clamped_to_100():
+    """Score is clamped to maximum of 100."""
+    from rogue_hunter.collector import score_from_shares
+    from rogue_hunter.config import ResourceWeights
+
+    weights = ResourceWeights()
+    shares = {
+        "cpu_share": 10000.0,
+        "gpu_share": 10000.0,
+        "mem_share": 10000.0,
+        "disk_share": 10000.0,
+        "wakeups_share": 10000.0,
+    }
+
+    score, _, _ = score_from_shares(shares, weights)
+
+    assert score == 100

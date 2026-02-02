@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import math
 import os
 import time
 from dataclasses import dataclass
@@ -10,7 +11,7 @@ from typing import Literal
 
 import structlog
 
-from rogue_hunter.config import Config, ScoringConfig
+from rogue_hunter.config import Config, ResourceWeights, ScoringConfig
 
 # Type alias for dominant resource values
 DominantResource = Literal["cpu", "gpu", "memory", "disk", "wakeups"]
@@ -376,6 +377,65 @@ def calculate_resource_shares(
         }
 
     return result
+
+
+def score_from_shares(
+    shares: dict[str, float],
+    weights: ResourceWeights,
+) -> tuple[int, DominantResource, float]:
+    """Calculate score from resource shares using Apple-style weighting.
+
+    Uses logarithmic curve to map disproportionality to 0-100 score:
+    - High band (50-69) reachable at ~50-100x fair share
+    - Critical band (70+) reachable at ~200x fair share
+
+    Args:
+        shares: Dict with cpu_share, gpu_share, mem_share, disk_share, wakeups_share
+        weights: ResourceWeights with weight multipliers for each resource
+
+    Returns:
+        Tuple of (score 0-100, dominant_resource, disproportionality)
+    """
+    # Calculate weighted contributions
+    weighted: dict[DominantResource, float] = {
+        "cpu": shares["cpu_share"] * weights.cpu,
+        "gpu": shares["gpu_share"] * weights.gpu,
+        "memory": shares["mem_share"] * weights.memory,
+        "disk": shares["disk_share"] * weights.disk_io,
+        "wakeups": shares["wakeups_share"] * weights.wakeups,
+    }
+
+    # Find dominant resource (highest weighted contribution)
+    dominant: DominantResource = max(weighted, key=lambda k: weighted[k])
+
+    # Map resource name to share key for disproportionality
+    share_key_map: dict[DominantResource, str] = {
+        "cpu": "cpu_share",
+        "gpu": "gpu_share",
+        "memory": "mem_share",
+        "disk": "disk_share",
+        "wakeups": "wakeups_share",
+    }
+    disproportionality = shares[share_key_map[dominant]]
+
+    # Sum weighted contributions
+    total_weighted = sum(weighted.values())
+
+    # Apply logarithmic curve
+    # log2(1) = 0, log2(2) = 1, log2(50) ≈ 5.6, log2(100) ≈ 6.6, log2(200) ≈ 7.6
+    # Scale: multiply by ~10 to get score range
+    # Target: 50x -> ~56, 100x -> ~66 (high band), 200x -> ~76 (critical)
+    if total_weighted <= 1.0:
+        # At or below fair share = score 0
+        raw_score = 0.0
+    else:
+        # Logarithmic scaling
+        raw_score = math.log2(total_weighted) * 10.0
+
+    # Clamp to 0-100
+    score = max(0, min(100, int(raw_score)))
+
+    return score, dominant, disproportionality
 
 
 @dataclass
