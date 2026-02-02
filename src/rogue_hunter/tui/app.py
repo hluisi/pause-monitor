@@ -92,6 +92,38 @@ def format_duration(seconds: float) -> str:
         return f"{hours}h{mins}m"
 
 
+def format_dominant_info(dominant_resource: str, disproportionality: float) -> str:
+    """Format dominant resource info for display.
+
+    Args:
+        dominant_resource: The resource type (cpu, gpu, memory, disk, wakeups).
+        disproportionality: The disproportionality multiplier.
+
+    Returns:
+        Formatted string like "CPU 10.5x" or "MEM 1.5x".
+    """
+    # Format disproportionality as multiplier (100x, 10.5x, 1.5x, 0.50x)
+    if disproportionality >= 100:
+        disprop_str = f"{int(disproportionality)}x"
+    elif disproportionality >= 10:
+        disprop_str = f"{disproportionality:.0f}x"
+    elif disproportionality >= 1:
+        disprop_str = f"{disproportionality:.1f}x"
+    else:
+        disprop_str = f"{disproportionality:.2f}x"
+
+    # Labels for resources
+    resource_labels = {
+        "cpu": "CPU",
+        "gpu": "GPU",
+        "memory": "MEM",
+        "disk": "DISK",
+        "wakeups": "WAKE",
+    }
+    label = resource_labels.get(dominant_resource, dominant_resource.upper())
+    return f"{label} {disprop_str}"
+
+
 def extract_time(timestamp_str: str) -> str:
     """Extract HH:MM:SS from various timestamp formats.
 
@@ -303,10 +335,10 @@ class HeaderBar(Static):
 
 
 class ProcessTable(Static):
-    """Table showing rogue processes with 4-category scoring.
+    """Table showing rogue processes with resource-based scoring.
 
     Uses DataTable with Rich Text objects for row-level styling.
-    Shows category breakdown: 🔴 blocking, 🟠 contention, 🟡 pressure, ⚪ efficiency.
+    Shows dominant resource and disproportionality for each process.
     Includes decay: processes stay visible (dimmed) for 10s after leaving rogues.
     """
 
@@ -327,14 +359,6 @@ class ProcessTable(Static):
     }
     """
 
-    # Category icons
-    CATEGORY_ICONS = {
-        "blocking": "🔴",
-        "contention": "🟠",
-        "pressure": "🟡",
-        "efficiency": "⚪",
-    }
-
     DECAY_SECONDS = 10.0
 
     def __init__(self, **kwargs: Any) -> None:
@@ -352,9 +376,7 @@ class ProcessTable(Static):
         """Set up table columns."""
         self.border_title = "TOP PROCESSES"
         self._table = self.query_one("#process-table", DataTable)
-        self._table.add_columns(
-            "", "PID", "Process", "Score", "Blk", "Ctn", "Prs", "Eff", "State", "Dominant"
-        )
+        self._table.add_columns("", "PID", "Process", "Score", "State", "Dominant")
         self.set_disconnected()
 
     def _get_band_style(self, score: int, decayed: bool) -> str:
@@ -410,75 +432,44 @@ class ProcessTable(Static):
         }
         return state_map.get(state, state_colors.unknown)
 
-    def _format_cat_score(self, score: float) -> str:
-        """Format a category score (0-100) compactly."""
-        s = int(score)
-        if s == 0:
-            return "·"
-        return str(s)
-
     def _make_row(
         self,
         trend: str,
         pid: str,
         command: str,
         score_val: int,
-        blocking: float,
-        contention: float,
-        pressure: float,
-        efficiency: float,
         state: str,
-        dominant_cat: str,
-        dominant_metrics: list[str],
+        dominant_resource: str,
+        disproportionality: float,
         decayed: bool = False,
     ) -> list[Text]:
         """Build styled row cells using Rich Text objects.
 
         Color scheme:
-        - Trend: Own colors based on direction (▲=red, ▽=green, ●=purple)
+        - Trend: Own colors based on direction
         - PID: Muted color (not competing with process name)
         - Process name: Band color based on score severity
         - Score: Bold band color
-        - Categories: Own distinct colors per category type
         - State: Own colors based on process state severity
-        - Dominant: Inherits band color (same as process name)
+        - Dominant: Shows resource and disproportionality
         """
         colors = self.app.config.tui.colors
-        cat_colors = colors.categories
 
         # Get styles for each element type
         band_style = self._get_band_style(score_val, decayed)
         trend_style = self._get_trend_style(trend, decayed)
         state_style = self._get_state_style(state, decayed)
         pid_style = "dim" if decayed else colors.pid.default
-
-        # Build dominant display with icon
-        icon = self.CATEGORY_ICONS.get(dominant_cat, "")
-        metrics_str = " ".join(dominant_metrics[:2])  # Show top 2 metrics
-        dominant_display = f"{icon} {metrics_str}" if metrics_str else icon
-
-        # Category columns: use config color if value > 0, else dim
-        def cat_style(value: float, color: str) -> str:
-            if decayed or not value:
-                return "dim"
-            return color
-
-        # Format category scores with their colors
-        blk_style = cat_style(blocking, cat_colors.blocking)
-        ctn_style = cat_style(contention, cat_colors.contention)
-        prs_style = cat_style(pressure, cat_colors.pressure)
-        eff_style = cat_style(efficiency, cat_colors.efficiency)
         score_style = f"bold {band_style}" if band_style else "bold"
+
+        # Build dominant display using format_dominant_info
+        dominant_display = format_dominant_info(dominant_resource, disproportionality)
 
         return [
             Text(trend, style=trend_style),
             Text(pid, style=pid_style),
             Text(command, style=band_style),
             Text(str(score_val), style=score_style),
-            Text(self._format_cat_score(blocking), style=blk_style),
-            Text(self._format_cat_score(contention), style=ctn_style),
-            Text(self._format_cat_score(pressure), style=prs_style),
-            Text(self._format_cat_score(efficiency), style=eff_style),
             Text(state, style=state_style),
             Text(dominant_display, style=band_style),
         ]
@@ -486,8 +477,7 @@ class ProcessTable(Static):
     def update_rogues(self, rogues: list[dict], now: float) -> None:
         """Update with rogue process list.
 
-        Rogues contain ProcessScore data serialized as dicts with MetricValue
-        fields (each has current/low/high).
+        Rogues contain ProcessScore data serialized as dicts.
         """
         self.remove_class("disconnected")
         if not self._table:
@@ -542,14 +532,9 @@ class ProcessTable(Static):
 
             self._prev_scores[pid] = score
 
-            # Extract category scores (plain values)
-            blocking = rogue.get("blocking_score", 0)
-            contention = rogue.get("contention_score", 0)
-            pressure = rogue.get("pressure_score", 0)
-            efficiency = rogue.get("efficiency_score", 0)
-            dominant_cat = rogue.get("dominant_category", "")
-            dominant_metrics = rogue.get("dominant_metrics", [])
-
+            # Extract resource-based scoring fields
+            dominant_resource = rogue.get("dominant_resource", "cpu")
+            disproportionality = rogue.get("disproportionality", 0.0)
             state = rogue["state"]
 
             self._table.add_row(
@@ -558,13 +543,9 @@ class ProcessTable(Static):
                     str(pid),
                     str(rogue.get("command", "?")),
                     score,
-                    blocking,
-                    contention,
-                    pressure,
-                    efficiency,
                     str(state),
-                    dominant_cat,
-                    dominant_metrics,
+                    dominant_resource,
+                    disproportionality,
                     decayed=is_decayed,
                 )
             )
@@ -574,9 +555,7 @@ class ProcessTable(Static):
         self.add_class("disconnected")
         if self._table:
             self._table.clear()
-            row = self._make_row(
-                "", "", "(not connected)", 0, 0, 0, 0, 0, "---", "", [], decayed=False
-            )
+            row = self._make_row("", "", "(not connected)", 0, "---", "cpu", 0.0, decayed=False)
             self._table.add_row(*row)
 
 
@@ -591,7 +570,8 @@ class DisplayTrackedProcess:
     command: str
     entry_time: float
     peak_score: int
-    dominant_category: str = ""  # blocking, contention, pressure, efficiency
+    dominant_resource: str = "cpu"  # cpu, gpu, memory, disk, wakeups
+    disproportionality: float = 0.0  # How much this process dominates the resource
     exit_time: float | None = None
     exit_reason: str = ""
 
@@ -651,7 +631,7 @@ class TrackedEventsPanel(Static):
         self._table.add_column("Process")
         self._table.add_column("Peak", width=4)
         self._table.add_column("Dur", width=6)
-        self._table.add_column("Cat", width=5)  # Category icon
+        self._table.add_column("Dominant", width=10)  # Resource and disproportionality
         self._table.add_column("Status", width=8)
         self._table.show_header = True
 
@@ -685,7 +665,8 @@ class TrackedEventsPanel(Static):
         # Check for new/updated active entries
         for cmd, rogue in current_above.items():
             score = self._extract_score(rogue)
-            dominant_cat = rogue.get("dominant_category", "")
+            dominant_resource = rogue.get("dominant_resource", "cpu")
+            disproportionality = rogue.get("disproportionality", 0.0)
 
             if cmd not in self._active:
                 # New tracking entry
@@ -693,14 +674,16 @@ class TrackedEventsPanel(Static):
                     command=cmd,
                     entry_time=now,
                     peak_score=score,
-                    dominant_category=dominant_cat,
+                    dominant_resource=dominant_resource,
+                    disproportionality=disproportionality,
                 )
             else:
                 # Update peak if higher
                 tracked = self._active[cmd]
                 if score > tracked.peak_score:
                     tracked.peak_score = score
-                    tracked.dominant_category = dominant_cat
+                    tracked.dominant_resource = dominant_resource
+                    tracked.disproportionality = disproportionality
 
         # Check for exits (commands that were active but no longer above threshold)
         for cmd in list(self._active.keys()):
@@ -733,14 +716,6 @@ class TrackedEventsPanel(Static):
 
         self._table.clear()
 
-        # Category icons for display
-        cat_icons = {
-            "blocking": "🔴",
-            "contention": "🟠",
-            "pressure": "🟡",
-            "efficiency": "⚪",
-        }
-
         # Get status colors from config
         status_colors = self.app.config.tui.colors.status
 
@@ -752,7 +727,9 @@ class TrackedEventsPanel(Static):
         )
         for tracked in active_sorted:
             time_str = datetime.fromtimestamp(tracked.entry_time).strftime("%H:%M:%S")
-            cat_icon = cat_icons.get(tracked.dominant_category, "")
+            dominant_display = format_dominant_info(
+                tracked.dominant_resource, tracked.disproportionality
+            )
             duration = format_duration(tracked.duration)
 
             self._table.add_row(
@@ -760,7 +737,7 @@ class TrackedEventsPanel(Static):
                 tracked.command[:15],
                 str(tracked.peak_score),
                 duration,
-                cat_icon,
+                dominant_display,
                 f"[{status_colors.active}]active[/]",
             )
 
@@ -772,7 +749,9 @@ class TrackedEventsPanel(Static):
         )
         for tracked in history_sorted:
             time_str = datetime.fromtimestamp(tracked.entry_time).strftime("%H:%M:%S")
-            cat_icon = cat_icons.get(tracked.dominant_category, "")
+            dominant_display = format_dominant_info(
+                tracked.dominant_resource, tracked.disproportionality
+            )
             duration = format_duration(tracked.duration)
 
             self._table.add_row(
@@ -780,7 +759,7 @@ class TrackedEventsPanel(Static):
                 tracked.command[:15],
                 str(tracked.peak_score),
                 duration,
-                cat_icon,
+                dominant_display,
                 f"[{status_colors.ended}]ended[/]",
             )
 
