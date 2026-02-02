@@ -8,9 +8,10 @@ from rogue_hunter.collector import (
     LibprocCollector,
     ProcessSamples,
     ProcessScore,
+    count_active_processes,
     get_core_count,
 )
-from rogue_hunter.config import Config
+from rogue_hunter.config import Config, ScoringConfig
 
 # =============================================================================
 # Task 3: Resource-based scoring tests
@@ -503,3 +504,61 @@ class TestLibprocCollectorIntegration:
             assert hasattr(rogue, "wakeups_share")
             assert hasattr(rogue, "disproportionality")
             assert hasattr(rogue, "dominant_resource")
+
+
+# =============================================================================
+# Task 5: Active process counting tests
+# =============================================================================
+
+
+def test_count_active_processes_excludes_idle():
+    """Idle processes are not counted as active."""
+    processes = [
+        {"state": "running", "cpu": 5.0, "mem": 100_000_000, "disk_io_rate": 0},
+        {"state": "idle", "cpu": 1.0, "mem": 50_000_000, "disk_io_rate": 0},  # idle = excluded
+        {"state": "sleeping", "cpu": 0.5, "mem": 200_000_000, "disk_io_rate": 100},
+    ]
+    config = ScoringConfig()
+
+    count = count_active_processes(processes, config)
+
+    assert count == 2  # idle process excluded
+
+
+def test_count_active_processes_excludes_no_resources():
+    """Processes using no resources are not counted as active."""
+    processes = [
+        {"state": "running", "cpu": 5.0, "mem": 100_000_000, "disk_io_rate": 0},
+        {"state": "sleeping", "cpu": 0.0, "mem": 0, "disk_io_rate": 0},  # no resources = excluded
+        {"state": "running", "cpu": 0.0, "mem": 0, "disk_io_rate": 1000},  # has disk I/O = included
+    ]
+    config = ScoringConfig()
+
+    count = count_active_processes(processes, config)
+
+    assert count == 2  # zero-resource process excluded
+
+
+def test_count_active_processes_respects_thresholds():
+    """Active thresholds from config are respected."""
+    processes = [
+        # Below all thresholds - not counted
+        {"state": "running", "cpu": 0.05, "mem": 5_000_000, "disk_io_rate": 0},
+        # CPU above threshold - counted
+        {"state": "running", "cpu": 0.2, "mem": 5_000_000, "disk_io_rate": 0},
+    ]
+    config = ScoringConfig(active_min_cpu=0.1, active_min_memory_mb=10.0, active_min_disk_io=0)
+
+    count = count_active_processes(processes, config)
+
+    assert count == 1  # only process with cpu > 0.1 counts
+
+
+def test_count_active_processes_minimum_one():
+    """Active process count is at least 1 to avoid division by zero."""
+    processes = []  # No processes
+    config = ScoringConfig()
+
+    count = count_active_processes(processes, config)
+
+    assert count == 1  # Minimum of 1

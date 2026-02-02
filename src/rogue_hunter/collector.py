@@ -10,7 +10,7 @@ from typing import Literal
 
 import structlog
 
-from rogue_hunter.config import Config
+from rogue_hunter.config import Config, ScoringConfig
 
 # Type alias for dominant resource values
 DominantResource = Literal["cpu", "gpu", "memory", "disk", "wakeups"]
@@ -296,6 +296,38 @@ class ProcessSamples:
 def get_core_count() -> int:
     """Get number of CPU cores."""
     return os.cpu_count() or 1
+
+
+def count_active_processes(processes: list[dict], config: ScoringConfig) -> int:
+    """Count processes that are considered 'active' for fair share calculation.
+
+    A process is active if:
+    1. State is NOT idle (running, sleeping, stopped, zombie, stuck all count)
+    2. AND using measurable resources (CPU > threshold OR memory > threshold OR disk I/O > 0)
+
+    Returns at least 1 to avoid division by zero in fair share calculation.
+    """
+    count = 0
+    mem_threshold_bytes = config.active_min_memory_mb * 1_000_000
+
+    for proc in processes:
+        # Must be non-idle
+        if proc.get("state") == "idle":
+            continue
+
+        # Must be using some resources
+        cpu = proc.get("cpu", 0)
+        mem = proc.get("mem", 0)
+        disk_io_rate = proc.get("disk_io_rate", 0)
+
+        uses_cpu = cpu >= config.active_min_cpu
+        uses_memory = mem >= mem_threshold_bytes
+        uses_disk = disk_io_rate > config.active_min_disk_io
+
+        if uses_cpu or uses_memory or uses_disk:
+            count += 1
+
+    return max(1, count)  # Minimum 1 to avoid division by zero
 
 
 @dataclass
