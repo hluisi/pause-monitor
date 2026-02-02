@@ -38,7 +38,7 @@ class BandsConfig:
     elevated: int = 40  # Score to enter "elevated" band
     high: int = 50  # Score to enter "high" band
     critical: int = 70  # Score to enter "critical" band
-    tracking_band: str = "medium"  # Changed: tracking now starts at medium
+    tracking_band: str = "medium"  # Tracking starts at medium band
     forensics_band: str = "critical"  # Only critical triggers forensics
     checkpoint_interval: int = 30  # Deprecated: kept for backwards compatibility
     # Sample-based checkpoint intervals (new)
@@ -493,6 +493,20 @@ def _load_bands_config(data: dict) -> BandsConfig:
             f"Invalid forensics_band: {forensics_band!r}. Must be one of {valid_bands}"
         )
 
+    medium_checkpoint_samples = data.get(
+        "medium_checkpoint_samples", defaults.medium_checkpoint_samples
+    )
+    elevated_checkpoint_samples = data.get(
+        "elevated_checkpoint_samples", defaults.elevated_checkpoint_samples
+    )
+
+    if medium_checkpoint_samples < 1:
+        raise ValueError(f"medium_checkpoint_samples must be >= 1, got {medium_checkpoint_samples}")
+    if elevated_checkpoint_samples < 1:
+        raise ValueError(
+            f"elevated_checkpoint_samples must be >= 1, got {elevated_checkpoint_samples}"
+        )
+
     return BandsConfig(
         medium=data.get("medium", defaults.medium),
         elevated=data.get("elevated", defaults.elevated),
@@ -501,12 +515,8 @@ def _load_bands_config(data: dict) -> BandsConfig:
         tracking_band=tracking_band,
         forensics_band=forensics_band,
         checkpoint_interval=data.get("checkpoint_interval", defaults.checkpoint_interval),
-        medium_checkpoint_samples=data.get(
-            "medium_checkpoint_samples", defaults.medium_checkpoint_samples
-        ),
-        elevated_checkpoint_samples=data.get(
-            "elevated_checkpoint_samples", defaults.elevated_checkpoint_samples
-        ),
+        medium_checkpoint_samples=medium_checkpoint_samples,
+        elevated_checkpoint_samples=elevated_checkpoint_samples,
     )
 
 

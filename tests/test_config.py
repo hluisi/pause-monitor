@@ -831,3 +831,73 @@ elevated_checkpoint_samples = 15
 
     assert config.bands.medium_checkpoint_samples == 30
     assert config.bands.elevated_checkpoint_samples == 15
+
+
+def test_checkpoint_samples_roundtrip(tmp_path):
+    """Config save/load preserves checkpoint sample values."""
+    config_path = tmp_path / "config.toml"
+
+    config = Config()
+    config.bands.medium_checkpoint_samples = 25
+    config.bands.elevated_checkpoint_samples = 12
+    config.save(config_path)
+
+    loaded = Config.load(config_path)
+    assert loaded.bands.medium_checkpoint_samples == 25
+    assert loaded.bands.elevated_checkpoint_samples == 12
+
+
+def test_checkpoint_samples_rejects_zero_medium(tmp_path):
+    """Config.load() raises ValueError for medium_checkpoint_samples = 0."""
+    import pytest
+
+    config_file = tmp_path / "config.toml"
+    config_file.write_text("""
+[bands]
+medium_checkpoint_samples = 0
+""")
+
+    with pytest.raises(ValueError, match="medium_checkpoint_samples must be >= 1"):
+        Config.load(config_file)
+
+
+def test_checkpoint_samples_rejects_zero_elevated(tmp_path):
+    """Config.load() raises ValueError for elevated_checkpoint_samples = 0."""
+    import pytest
+
+    config_file = tmp_path / "config.toml"
+    config_file.write_text("""
+[bands]
+elevated_checkpoint_samples = 0
+""")
+
+    with pytest.raises(ValueError, match="elevated_checkpoint_samples must be >= 1"):
+        Config.load(config_file)
+
+
+def test_checkpoint_samples_rejects_negative_medium(tmp_path):
+    """Config.load() raises ValueError for negative medium_checkpoint_samples."""
+    import pytest
+
+    config_file = tmp_path / "config.toml"
+    config_file.write_text("""
+[bands]
+medium_checkpoint_samples = -5
+""")
+
+    with pytest.raises(ValueError, match="medium_checkpoint_samples must be >= 1"):
+        Config.load(config_file)
+
+
+def test_checkpoint_samples_rejects_negative_elevated(tmp_path):
+    """Config.load() raises ValueError for negative elevated_checkpoint_samples."""
+    import pytest
+
+    config_file = tmp_path / "config.toml"
+    config_file.write_text("""
+[bands]
+elevated_checkpoint_samples = -3
+""")
+
+    with pytest.raises(ValueError, match="elevated_checkpoint_samples must be >= 1"):
+        Config.load(config_file)
