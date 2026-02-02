@@ -16,7 +16,7 @@ This is a **personal project** — one developer + AI assistants. No external us
 
 ## What This Project Is
 
-**Rogue Hunter** is a real-time process surveillance tool for macOS that identifies processes negatively affecting system performance. It continuously monitors all running processes, scoring each on four dimensions of "rogue behavior" (Blocking 40%, Contention 30%, Pressure 20%, Efficiency 10%). When processes cross thresholds, forensic data is captured automatically.
+**Rogue Hunter** is a real-time process surveillance tool for macOS that identifies processes consuming disproportionate system resources. It continuously monitors all running processes, calculating each process's share of CPU, GPU, memory, disk I/O, and wakeups. Processes with disproportionate resource usage (>15% of any resource) get elevated scores, and forensic data is captured automatically when thresholds are crossed.
 
 ## Quick Reference
 
@@ -43,7 +43,7 @@ This is a **personal project** — one developer + AI assistants. No external us
 ## Key Systems
 
 - **Configuration** (`config.py`): Hierarchical TOML config, XDG paths
-- **Storage** (`storage.py`): SQLite with WAL, schema v16
+- **Storage** (`storage.py`): SQLite with WAL, schema v18
 - **Collector** (`collector.py`): libproc-based metrics, `ProcessScore` schema
 - **Tracker** (`tracker.py`): Event lifecycle (entry/checkpoint/exit snapshots)
 - **Socket IPC** (`socket_server.py`): Real-time streaming to TUI

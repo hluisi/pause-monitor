@@ -1,11 +1,11 @@
 # Implementation Guide
 
-**Last updated:** 2026-01-31
-**Schema version:** 14
+**Last updated:** 2026-02-02
+**Schema version:** 18
 
 ## Overview
 
-**Rogue Hunter** is a real-time process surveillance tool for macOS that identifies processes negatively affecting system performance. It scores all processes on four dimensions of rogue behavior (blocking, contention, pressure, efficiency) and tracks those that cross configurable thresholds.
+**Rogue Hunter** is a real-time process surveillance tool for macOS that identifies processes consuming disproportionate system resources. It calculates each process's share of CPU, GPU, memory, disk I/O, and wakeups, then scores them based on how disproportionate their resource usage is. Processes crossing configurable thresholds are tracked and forensic data is captured.
 
 ## Architecture
 
@@ -150,7 +150,7 @@ class MetricValue:
 
 **State:** `state` (MetricValueStr), `priority` (MetricValue)
 
-**Scoring:** `score`, `blocking_score`, `contention_score`, `pressure_score`, `efficiency_score` (5 MetricValue), `band` (MetricValueStr), `dominant_category` (str), `dominant_metrics` (list[str])
+**Scoring:** `score` (int), `band` (str), `cpu_share`, `gpu_share`, `mem_share`, `disk_share`, `wakeups_share`, `disproportionality` (floats), `dominant_resource` (DominantResource enum)
 
 ### Key Methods
 | Method | Purpose |
@@ -162,63 +162,31 @@ class MetricValue:
 | `_normalize_state()` | Convert state name to 0-1 severity |
 | `_get_band()` | Map score to band name (low/medium/elevated/high/critical) |
 
-### Scoring Algorithm (4-Category System)
+### Scoring Algorithm (Disproportionate-Share System)
 
-The scoring system uses 4 categories to identify different types of process stress:
+The scoring system calculates each process's share of system resources, then scores based on disproportionality.
 
-```
-final_score = blocking × 0.40 + contention × 0.30 + pressure × 0.20 + efficiency × 0.10
-```
+**Resource Share Calculations:**
+- **CPU share**: `cpu / (active_processes * fair_share)` where fair_share = 100% / core_count
+- **GPU share**: `gpu_time_rate / system_gpu_total`
+- **Memory share**: `mem / system_mem_total`
+- **Disk share**: `disk_io_rate / system_disk_total`
+- **Wakeups share**: `wakeups_rate / system_wakeups_total`
 
-**Blocking Score (40% of final) — Causes pauses:**
-```
-if state == "stuck": 100.0
-else:
-  pageins_rate / 100 × 35 +
-  disk_io_rate / 100M × 35 +
-  faults_rate / 10k × 30
-```
+**Disproportionality:** `max(cpu_share, gpu_share, mem_share, disk_share, wakeups_share)`
 
-**Contention Score (30% of final) — Fighting for resources:**
-```
-runnable_time_rate / 100 × 30 +
-csw_rate / 10k × 30 +
-cpu / 100 × 25 +
-qos_interactive_rate / 100 × 15
-```
+**Graduated Score Thresholds:**
+| Disproportionality | Band | Score Range |
+|--------------------|------|-------------|
+| 0-15% | low | 0-20 |
+| 15-25% | medium | 20-40 |
+| 25-40% | elevated | 40-50 |
+| 40-55% | high | 50-70 |
+| 55%+ | critical | 70-100 |
 
-**Pressure Score (20% of final) — Stressing system:**
-```
-mem / 8GB × 35 +
-wakeups_rate / 1k × 25 +
-syscalls_rate / 100k × 20 +
-mach_msgs_rate / 10k × 20
-```
+The score increases linearly within each band based on disproportionality.
 
-**Efficiency Score (10% of final) — Wasting resources:**
-```
-ipc_penalty × has_cycles × 60 +
-threads / 100 × 40
-
-where ipc_penalty = max(0, 1 - ipc/0.5) if ipc < 0.5 else 0
-```
-
-**Normalization Thresholds (rate-based):**
-| Metric | Threshold | Unit |
-|--------|-----------|------|
-| cpu | 100 | % |
-| mem | 8 | GB |
-| disk_io_rate | 100,000,000 | bytes/sec |
-| pageins_rate | 100 | page-ins/sec |
-| faults_rate | 10,000 | faults/sec |
-| csw_rate | 10,000 | switches/sec |
-| syscalls_rate | 100,000 | syscalls/sec |
-| mach_msgs_rate | 10,000 | msgs/sec |
-| wakeups_rate | 1,000 | wakeups/sec |
-| runnable_time_rate | 100 | ms/sec (10% contention) |
-| qos_interactive_rate | 100 | ms/sec |
-| threads | 100 | count |
-| ipc_min | 0.5 | IPC (below is penalty) |
+**Dominant Resource:** The `dominant_resource` field indicates which share is highest (cpu/gpu/mem/disk/wakeups/none).
 
 **State Multipliers (post-score):**
 | State | Multiplier |
@@ -230,8 +198,6 @@ where ipc_penalty = max(0, 1 - ipc/0.5) if ipc < 0.5 else 0
 | zombie | 0.9 |
 | running | 1.0 |
 | stuck | 1.0 |
-
-**Dominant Category:** The category with the highest score becomes `dominant_category`, and the top metrics in that category become `dominant_metrics` (formatted as "metric:value/s").
 
 ---
 
@@ -385,7 +351,7 @@ class TrackedProcess:
 ### Constants
 | Constant | Value | Purpose |
 |----------|-------|---------|
-| `SCHEMA_VERSION` | 14 | Current schema version |
+| `SCHEMA_VERSION` | 18 | Current schema version |
 
 ### Tables
 
@@ -417,15 +383,16 @@ runnable_time, runnable_time_low, runnable_time_high,
 runnable_time_rate, runnable_time_rate_low, runnable_time_rate_high,
 qos_interactive, qos_interactive_low, qos_interactive_high,
 qos_interactive_rate, qos_interactive_rate_low, qos_interactive_rate_high,
--- Scoring section (expanded in v14):
-score, score_low, score_high,
-band, band_low, band_high,
-blocking_score, blocking_score_low, blocking_score_high,
-contention_score, contention_score_low, contention_score_high,
-pressure_score, pressure_score_low, pressure_score_high,
-efficiency_score, efficiency_score_low, efficiency_score_high,
-dominant_category TEXT,
-dominant_metrics TEXT (JSON array)
+-- Scoring section (resource-based in v18):
+score INTEGER,
+band TEXT,
+cpu_share REAL,
+gpu_share REAL,
+mem_share REAL,
+disk_share REAL,
+wakeups_share REAL,
+disproportionality REAL,
+dominant_resource TEXT
 ```
 
 **forensic_captures** - Forensics capture metadata:
@@ -780,7 +747,7 @@ TUI automatically reconnects when daemon restarts:
 |----------|-----|
 | libproc over top | Direct API: ~10-50ms vs ~2s, no subprocess overhead |
 | Per-process scoring | Identify specific rogue processes, not just "system stressed" |
-| 4-category scoring | Blocking/Contention/Pressure/Efficiency captures different rogue behaviors |
+| Disproportionate-share scoring | Resource shares identify which process is hogging what resource |
 | Always show top N | TUI always has data; threshold only affects persistence |
 | Score ALL, then select | All 500 processes scored, top N selected for display |
 | Separate display vs tracking | Collector shows top rogues; ProcessTracker decides what to persist |

@@ -6,16 +6,26 @@
 >
 > **DO NOT create alternative representations.** If you need process data anywhere in the application, use ProcessScore. No subsetting, no reshaping, no "simplified versions." One schema, everywhere.
 
-**Last updated:** 2026-01-31
-**Schema version:** 14
+**Last updated:** 2026-02-02
+**Schema version:** 18
 
 ## Rogue Hunter Scoring
 
-ProcessScore includes a 4-category scoring system that identifies different types of rogue behavior:
-- **Blocking (40%)**: Causes I/O bottlenecks, memory thrashing
-- **Contention (30%)**: Fights for CPU, scheduler pressure
-- **Pressure (20%)**: Stresses memory, kernel resources
-- **Efficiency (10%)**: Wastes resources through poor execution
+ProcessScore uses a **disproportionate-share** scoring system that identifies processes consuming disproportionate system resources:
+
+- **CPU share**: Percentage of total system CPU this process uses
+- **GPU share**: Percentage of total system GPU this process uses  
+- **Memory share**: Percentage of total system memory this process uses
+- **Disk share**: Percentage of total system disk I/O this process uses
+- **Wakeups share**: Percentage of total system wakeups this process causes
+
+The **disproportionality** is the highest share value, and **dominant_resource** identifies which resource the process dominates.
+
+Score is calculated using graduated thresholds:
+- 15-25% share = medium band (20+ score)
+- 25-40% share = elevated band (40+ score)
+- 40-55% share = high band (50+ score)
+- 55%+ share = critical band (70+ score)
 
 ---
 
@@ -118,16 +128,17 @@ class ProcessScore:
     priority: MetricValue       # Task priority (pti_priority)
     
     # ─────────────────────────────────────────────────────────────
-    # Scoring (4-category system)
+    # Scoring (disproportionate-share system)
     # ─────────────────────────────────────────────────────────────
-    score: MetricValue              # Final weighted score 0-100
-    band: MetricValueStr            # low/medium/elevated/high/critical
-    blocking_score: MetricValue     # 0-100, causes pauses (40% of final)
-    contention_score: MetricValue   # 0-100, fighting for resources (30% of final)
-    pressure_score: MetricValue     # 0-100, stressing system (20% of final)
-    efficiency_score: MetricValue   # 0-100, wasting resources (10% of final)
-    dominant_category: str          # "blocking" | "contention" | "pressure" | "efficiency"
-    dominant_metrics: list[str]     # ["pageins:847/s", "disk:42M/s"]
+    score: int                      # Final score 0-100 from disproportionality
+    band: str                       # low/medium/elevated/high/critical
+    cpu_share: float                # Share of system CPU (0.0-1.0)
+    gpu_share: float                # Share of system GPU (0.0-1.0)
+    mem_share: float                # Share of system memory (0.0-1.0)
+    disk_share: float               # Share of system disk I/O (0.0-1.0)
+    wakeups_share: float            # Share of system wakeups (0.0-1.0)
+    disproportionality: float       # Highest share value (max of above)
+    dominant_resource: DominantResource  # cpu/gpu/mem/disk/wakeups/none
 ```
 
 ---
@@ -145,7 +156,7 @@ class ProcessScore:
 | **Power** | energy, energy_rate, wakeups, wakeups_rate | 4 MetricValue |
 | **Contention** | runnable_time, runnable_time_rate, qos_interactive, qos_interactive_rate | 4 MetricValue |
 | **State** | state, priority | MetricValueStr + MetricValue |
-| **Scoring** | score, band, blocking_score, contention_score, pressure_score, efficiency_score, dominant_category, dominant_metrics | 6 MetricValue + MetricValueStr + str + list |
+| **Scoring** | score, band, cpu_share, gpu_share, mem_share, disk_share, wakeups_share, disproportionality, dominant_resource | int + str + 6 float + DominantResource |
 
 ---
 
@@ -182,14 +193,15 @@ class ProcessScore:
 | qos_interactive_rate | Calculated | Delta → ms interactive per second |
 | state | pbi_status | Mapped to string |
 | priority | pti_priority | |
-| score | Calculated | 4-category weighted formula |
+| score | Calculated | From disproportionality via graduated thresholds |
 | band | Derived | From score via band thresholds |
-| blocking_score | Calculated | Weighted: pageins_rate, disk_io_rate, faults_rate |
-| contention_score | Calculated | Weighted: runnable_time_rate, csw_rate, cpu, qos_interactive_rate |
-| pressure_score | Calculated | Weighted: mem, wakeups_rate, syscalls_rate, mach_msgs_rate |
-| efficiency_score | Calculated | Weighted: IPC penalty, threads |
-| dominant_category | Derived | Category with highest score |
-| dominant_metrics | Derived | Top metrics in dominant category |
+| cpu_share | Calculated | cpu / (active_processes * fair_share) |
+| gpu_share | Calculated | gpu_time_rate / system_gpu_total |
+| mem_share | Calculated | mem / system_mem_total |
+| disk_share | Calculated | disk_io_rate / system_disk_total |
+| wakeups_share | Calculated | wakeups_rate / system_wakeups_total |
+| disproportionality | Derived | max(cpu_share, gpu_share, mem_share, disk_share, wakeups_share) |
+| dominant_resource | Derived | Which share is highest |
 
 ---
 
@@ -218,38 +230,38 @@ All rate fields are computed as `(current - previous) / time_delta`:
 | Field | Calculation |
 |-------|-------------|
 | ipc | instructions / cycles |
-| blocking_score | Weighted sum (see Scoring Algorithm) |
-| contention_score | Weighted sum |
-| pressure_score | Weighted sum |
-| efficiency_score | Weighted sum with IPC penalty |
-| score | 0.4×blocking + 0.3×contention + 0.2×pressure + 0.1×efficiency |
+| cpu_share | cpu / (active_processes * 100 / core_count) |
+| gpu_share | gpu_time_rate / system_gpu_total |
+| mem_share | mem / system_mem_total |
+| disk_share | disk_io_rate / system_disk_total |
+| wakeups_share | wakeups_rate / system_wakeups_total |
+| disproportionality | max(cpu_share, gpu_share, mem_share, disk_share, wakeups_share) |
+| dominant_resource | argmax of shares (cpu/gpu/mem/disk/wakeups) |
+| score | Graduated from disproportionality |
 | band | Score → threshold mapping |
-| dominant_category | argmax(blocking, contention, pressure, efficiency) |
-| dominant_metrics | Top 3 metrics in dominant category |
 
-### Scoring Algorithm (4-category system)
+### Scoring Algorithm (Disproportionate-Share System)
 
-**Blocking Score (40% of final) — Causes pauses:**
+Each resource share is calculated relative to system totals:
+- **CPU share**: Process CPU / (active_processes * fair_share_per_process)
+- **GPU share**: Process GPU rate / system GPU rate total
+- **Memory share**: Process memory / system memory total
+- **Disk share**: Process disk I/O rate / system disk I/O total
+- **Wakeups share**: Process wakeups rate / system wakeups total
+
+The **disproportionality** is simply the highest share value.
+
+**Graduated Score Thresholds:**
 ```
-if state == "stuck": 100.0
-else: pageins_rate/100 × 35 + disk_io_rate/100M × 35 + faults_rate/10k × 30
+if disproportionality >= 0.55: score = 70 + (disprop - 0.55) / 0.45 * 30  # critical
+elif disproportionality >= 0.40: score = 50 + (disprop - 0.40) / 0.15 * 20  # high
+elif disproportionality >= 0.25: score = 40 + (disprop - 0.25) / 0.15 * 10  # elevated
+elif disproportionality >= 0.15: score = 20 + (disprop - 0.15) / 0.10 * 20  # medium
+else: score = disproportionality / 0.15 * 20  # low
 ```
 
-**Contention Score (30% of final) — Fighting for resources:**
-```
-runnable_time_rate/100 × 30 + csw_rate/10k × 30 + cpu/100 × 25 + qos_interactive_rate/100 × 15
-```
-
-**Pressure Score (20% of final) — Stressing system:**
-```
-mem/8GB × 35 + wakeups_rate/1k × 25 + syscalls_rate/100k × 20 + mach_msgs_rate/10k × 20
-```
-
-**Efficiency Score (10% of final) — Wasting resources:**
-```
-ipc_penalty × has_cycles × 60 + threads/100 × 40
-(ipc_penalty = max(0, 1 - ipc/0.5) if ipc < 0.5 else 0)
-```
+**State Multipliers (post-score):**
+Processes in non-running states get discounted scores since they're not actively causing issues.
 
 ---
 
@@ -352,14 +364,15 @@ def from_dict(cls, data: dict) -> "ProcessScore":
   "state": {"current": "running", "low": "idle", "high": "running"},
   "priority": {"current": 31, "low": 20, "high": 47},
   
-  "score": {"current": 65, "low": 30, "high": 85},
-  "band": {"current": "elevated", "low": "low", "high": "high"},
-  "blocking_score": {"current": 58.0, "low": 10.0, "high": 72.0},
-  "contention_score": {"current": 42.0, "low": 15.0, "high": 55.0},
-  "pressure_score": {"current": 28.0, "low": 8.0, "high": 35.0},
-  "efficiency_score": {"current": 12.0, "low": 5.0, "high": 18.0},
-  "dominant_category": "blocking",
-  "dominant_metrics": ["pageins:12/s", "disk:1.0M/s"]
+  "score": 65,
+  "band": "elevated",
+  "cpu_share": 0.35,
+  "gpu_share": 0.0,
+  "mem_share": 0.12,
+  "disk_share": 0.28,
+  "wakeups_share": 0.15,
+  "disproportionality": 0.35,
+  "dominant_resource": "cpu"
 }
 ```
 

@@ -192,14 +192,14 @@ def events_show(ctx, event_id: int, forensics: bool, threads: bool, logs: bool) 
         if snapshots:
             click.echo(f"\nSnapshots: {len(snapshots)}")
             for snap in snapshots:
-                dominant = snap.get("dominant_category", "unknown")
-                metrics = ", ".join(snap.get("dominant_metrics", [])) or "none"
+                dominant = snap.get("dominant_resource", "unknown")
+                disprop = snap.get("disproportionality", 0.0)
                 score_val = snap["score"]
                 cpu_val = snap["cpu"]
                 mem_val = snap["mem"]
                 click.echo(
                     f"  [{snap['snapshot_type']}] score={score_val} "
-                    f"cpu={cpu_val:.1f} mem={mem_val} [{dominant}: {metrics}]"
+                    f"cpu={cpu_val:.1f} mem={mem_val} [dominant: {dominant} ({disprop:.1%})]"
                 )
 
         # Show forensic captures
@@ -223,12 +223,12 @@ def events_show(ctx, event_id: int, forensics: bool, threads: bool, logs: bool) 
                         try:
                             culprits = json.loads(context["culprits"])
                             for culprit in culprits[:5]:
-                                dominant = culprit.get("dominant_category", "unknown")
-                                metrics = ", ".join(culprit.get("dominant_metrics", []))
+                                dominant = culprit.get("dominant_resource", "unknown")
+                                disprop = culprit.get("disproportionality", 0.0)
                                 score_val = culprit.get("score", 0)
                                 click.echo(
                                     f"      - {culprit['command']} ({score_val}) "
-                                    f"[{dominant}: {metrics}]"
+                                    f"[dominant: {dominant} ({disprop:.1%})]"
                                 )
                         except json.JSONDecodeError:
                             pass
