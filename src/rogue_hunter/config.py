@@ -125,9 +125,10 @@ class ResourceWeights:
 class NormalizationConfig:
     """Maximum values for normalizing metrics to 0-1 scale.
 
-    Each value represents what counts as "maxed out" for that metric.
-    A process at this value scores 1.0 for that metric component.
+    Note: Not currently used by the disproportionate-share scoring system.
+    Retained for potential custom scoring implementations.
 
+    Each value represents what counts as "maxed out" for that metric.
     Rate thresholds are per-second values, NOT cumulative totals.
     """
 
@@ -135,7 +136,7 @@ class NormalizationConfig:
     cpu: float = 100.0  # CPU percentage (natural max)
     mem_gb: float = 8.0  # Memory in gigabytes
 
-    # Rate thresholds (per second) - used for 4-category scoring
+    # Rate thresholds (per second) - available for custom scoring if needed
     pageins_rate: float = 100.0  # 100 page-ins/sec = serious thrashing
     faults_rate: float = 10_000.0  # 10k faults/sec
     csw_rate: float = 10_000.0  # 10k context switches/sec

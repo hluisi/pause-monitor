@@ -21,11 +21,11 @@ ProcessScore uses a **disproportionate-share** scoring system that identifies pr
 
 The **disproportionality** is the highest share value, and **dominant_resource** identifies which resource the process dominates.
 
-Score is calculated using graduated thresholds:
-- 15-25% share = medium band (20+ score)
-- 25-40% share = elevated band (40+ score)
-- 40-55% share = high band (50+ score)
-- 55%+ share = critical band (70+ score)
+Score is calculated using a logarithmic curve based on multiples of fair share:
+- 1.0x fair share = score 0 (using exactly your fair share)
+- 50x fair share = score ~56 (high band)
+- 100x fair share = score ~66 (high band)
+- 200x fair share = score ~76 (critical band)
 
 ---
 
@@ -132,11 +132,11 @@ class ProcessScore:
     # ─────────────────────────────────────────────────────────────
     score: int                      # Final score 0-100 from disproportionality
     band: str                       # low/medium/elevated/high/critical
-    cpu_share: float                # Share of system CPU (0.0-1.0)
-    gpu_share: float                # Share of system GPU (0.0-1.0)
-    mem_share: float                # Share of system memory (0.0-1.0)
-    disk_share: float               # Share of system disk I/O (0.0-1.0)
-    wakeups_share: float            # Share of system wakeups (0.0-1.0)
+    cpu_share: float                # Multiple of fair CPU share (1.0 = fair share, 10.0 = 10x fair share)
+    gpu_share: float                # Multiple of fair GPU share (can be well above 1.0)
+    mem_share: float                # Multiple of fair memory share (can be well above 1.0)
+    disk_share: float               # Multiple of fair disk I/O share (can be well above 1.0)
+    wakeups_share: float            # Multiple of fair wakeups share (can be well above 1.0)
     disproportionality: float       # Highest share value (max of above)
     dominant_resource: DominantResource  # cpu/gpu/mem/disk/wakeups/none
 ```
@@ -242,22 +242,36 @@ All rate fields are computed as `(current - previous) / time_delta`:
 
 ### Scoring Algorithm (Disproportionate-Share System)
 
-Each resource share is calculated relative to system totals:
-- **CPU share**: Process CPU / (active_processes * fair_share_per_process)
-- **GPU share**: Process GPU rate / system GPU rate total
-- **Memory share**: Process memory / system memory total
-- **Disk share**: Process disk I/O rate / system disk I/O total
-- **Wakeups share**: Process wakeups rate / system wakeups total
+Each resource share is calculated as a multiple of fair share:
+- **CPU share**: Process CPU / (100% / active_processes) - how many times fair share
+- **GPU share**: Process GPU rate / (system GPU total / active_processes)
+- **Memory share**: Process memory / (system memory / active_processes)
+- **Disk share**: Process disk I/O rate / (system disk total / active_processes)
+- **Wakeups share**: Process wakeups rate / (system wakeups / active_processes)
 
-The **disproportionality** is simply the highest share value.
+Values are multiples: 1.0 = exactly fair share, 10.0 = using 10x your fair share.
 
-**Graduated Score Thresholds:**
-```
-if disproportionality >= 0.55: score = 70 + (disprop - 0.55) / 0.45 * 30  # critical
-elif disproportionality >= 0.40: score = 50 + (disprop - 0.40) / 0.15 * 20  # high
-elif disproportionality >= 0.25: score = 40 + (disprop - 0.25) / 0.15 * 10  # elevated
-elif disproportionality >= 0.15: score = 20 + (disprop - 0.15) / 0.10 * 20  # medium
-else: score = disproportionality / 0.15 * 20  # low
+**Logarithmic Score Calculation:**
+```python
+# Weight each resource share by its ResourceWeight
+weighted = {
+    "cpu": cpu_share * weights.cpu,
+    "gpu": gpu_share * weights.gpu,
+    "memory": mem_share * weights.memory,
+    "disk": disk_share * weights.disk_io,
+    "wakeups": wakeups_share * weights.wakeups,
+}
+total_weighted = sum(weighted.values())
+
+# Logarithmic curve: log2(weighted) * 10
+# At fair share (1.0): score = 0
+# At 50x fair share: score ≈ 56 (high band)
+# At 100x fair share: score ≈ 66 (high band)
+# At 200x fair share: score ≈ 76 (critical band)
+if total_weighted <= 1.0:
+    score = 0
+else:
+    score = log2(total_weighted) * 10
 ```
 
 **State Multipliers (post-score):**
@@ -366,12 +380,12 @@ def from_dict(cls, data: dict) -> "ProcessScore":
   
   "score": 65,
   "band": "elevated",
-  "cpu_share": 0.35,
+  "cpu_share": 3.5,
   "gpu_share": 0.0,
-  "mem_share": 0.12,
-  "disk_share": 0.28,
-  "wakeups_share": 0.15,
-  "disproportionality": 0.35,
+  "mem_share": 1.2,
+  "disk_share": 2.8,
+  "wakeups_share": 1.5,
+  "disproportionality": 3.5,
   "dominant_resource": "cpu"
 }
 ```
