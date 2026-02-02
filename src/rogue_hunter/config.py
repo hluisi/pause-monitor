@@ -132,9 +132,9 @@ class ResourceWeights:
     """
 
     cpu: float = 1.0
-    gpu: float = 3.0  # GPU work is intensive
-    memory: float = 1.0
-    disk_io: float = 1.0
+    gpu: float = 2.0
+    memory: float = 1.1
+    disk_io: float = 1.2
     wakeups: float = 1.0
 
 

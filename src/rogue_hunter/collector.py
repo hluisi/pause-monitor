@@ -295,6 +295,9 @@ class ProcessSamples:
 
 def calculate_resource_shares(
     processes: list[dict],
+    share_min_cpu: float = 0.01,
+    share_min_memory_bytes: int = 268_435_456,
+    share_min_wakeups: float = 10.0,
 ) -> dict[int, dict[str, float]]:
     """Calculate resource shares for each process using per-resource fair share.
 
@@ -310,6 +313,12 @@ def calculate_resource_shares(
 
     A share of 1.0 means the process uses exactly its fair share among users.
     A share of 2.0 means the process uses 2x its fair share (in a 2-user pool).
+
+    Args:
+        processes: List of process dicts with resource metrics
+        share_min_cpu: CPU % threshold to count as resource user
+        share_min_memory_bytes: Memory bytes threshold for resource user
+        share_min_wakeups: Wakeups/sec threshold for resource user
 
     Returns dict mapping PID to dict of resource shares.
     """
@@ -339,16 +348,16 @@ def calculate_resource_shares(
         total_wakeups += wakeups
 
         # Count processes with non-trivial usage of each resource
-        # Using small thresholds to filter measurement noise
-        if cpu > 0.01:  # 0.01% CPU
+        # Using configurable thresholds to filter measurement noise
+        if cpu > share_min_cpu:
             cpu_users += 1
         if gpu > 0:  # Any GPU usage
             gpu_users += 1
-        if mem > 268_435_456:  # 256 MiB memory
+        if mem > share_min_memory_bytes:
             mem_users += 1
         if disk > 0:  # Any disk I/O
             disk_users += 1
-        if wakeups > 0:  # Any wakeups
+        if wakeups > share_min_wakeups:
             wakeups_users += 1
 
     # Fair share per resource (minimum 1 to avoid division by zero)
@@ -385,6 +394,7 @@ def calculate_resource_shares(
 def score_from_shares(
     shares: dict[str, float],
     weights: ResourceWeights,
+    curve_multiplier: float = 10.0,
 ) -> tuple[int, DominantResource, float]:
     """Calculate score from resource shares using Apple-style weighting.
 
@@ -395,6 +405,7 @@ def score_from_shares(
     Args:
         shares: Dict with cpu_share, gpu_share, mem_share, disk_share, wakeups_share
         weights: ResourceWeights with weight multipliers for each resource
+        curve_multiplier: Multiplier for log2 scoring curve (default 10.0)
 
     Returns:
         Tuple of (score 0-100, dominant_resource, disproportionality)
@@ -426,14 +437,14 @@ def score_from_shares(
 
     # Apply logarithmic curve
     # log2(1) = 0, log2(2) = 1, log2(50) ≈ 5.6, log2(100) ≈ 6.6, log2(200) ≈ 7.6
-    # Scale: multiply by ~10 to get score range
-    # Target: 50x -> ~56, 100x -> ~66 (high band), 200x -> ~76 (critical)
+    # Scale: multiply by curve_multiplier to get score range
+    # Target with multiplier=10: 50x -> ~56, 100x -> ~66 (high band), 200x -> ~76 (critical)
     if total_weighted <= 1.0:
         # At or below fair share = score 0
         raw_score = 0.0
     else:
         # Logarithmic scaling
-        raw_score = math.log2(total_weighted) * 10.0
+        raw_score = math.log2(total_weighted) * curve_multiplier
 
     # Clamp to 0-100
     score = max(0, min(100, int(raw_score)))
@@ -730,7 +741,13 @@ class LibprocCollector:
             proc["zombie_children"] = zombie_count.get(proc["pid"], 0)
 
         # Calculate fair shares for resource-based scoring (per-resource active counts)
-        shares_by_pid = calculate_resource_shares(all_processes)
+        scoring = self.config.scoring
+        shares_by_pid = calculate_resource_shares(
+            all_processes,
+            share_min_cpu=scoring.share_min_cpu,
+            share_min_memory_bytes=scoring.share_min_memory_bytes,
+            share_min_wakeups=scoring.share_min_wakeups,
+        )
 
         # Score ALL processes first (cheap - just math), then select
         all_scored = [
@@ -814,7 +831,10 @@ class LibprocCollector:
         shares = shares if shares else default_shares
 
         # Calculate score from resource shares
-        base_score, dominant_resource, disproportionality = score_from_shares(shares, weights)
+        curve_multiplier = self.config.scoring.score_curve_multiplier
+        base_score, dominant_resource, disproportionality = score_from_shares(
+            shares, weights, curve_multiplier
+        )
 
         # Apply state multiplier (discount for currently-inactive processes)
         state_mult = multipliers.get(proc["state"])

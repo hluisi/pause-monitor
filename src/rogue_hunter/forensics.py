@@ -301,17 +301,25 @@ class ForensicsCapture:
     Temp files are cleaned up after processing.
     """
 
-    def __init__(self, conn: sqlite3.Connection, event_id: int, runtime_dir: Path):
+    def __init__(
+        self,
+        conn: sqlite3.Connection,
+        event_id: int,
+        runtime_dir: Path,
+        log_seconds: int = 60,
+    ):
         """Initialize forensics capture.
 
         Args:
             conn: Database connection
             event_id: The process event ID this capture is associated with
             runtime_dir: Directory for tailspin captures (must match sudoers rule)
+            log_seconds: Seconds of logs to capture (default 60)
         """
         self.conn = conn
         self.event_id = event_id
         self._runtime_dir = runtime_dir
+        self._log_seconds = log_seconds
         self._temp_dir: Path | None = None
 
     async def capture_and_store(
@@ -435,7 +443,7 @@ class ForensicsCapture:
             "--style",
             "ndjson",
             "--last",
-            "60s",
+            f"{self._log_seconds}s",
             "--predicate",
             'subsystem == "com.apple.powerd" OR '
             'subsystem == "com.apple.kernel" OR '

@@ -132,7 +132,12 @@ class Daemon:
 
         try:
             contents = self.ring_buffer.freeze()
-            capture = ForensicsCapture(self._conn, event_id, self.config.runtime_dir)
+            capture = ForensicsCapture(
+                self._conn,
+                event_id,
+                self.config.runtime_dir,
+                log_seconds=self.config.system.forensics_log_seconds,
+            )
             capture_id = await capture.capture_and_store(contents, trigger)
             rlog.forensics_captured(event_id, capture_id)
         except Exception as e:
@@ -415,13 +420,14 @@ class Daemon:
             return True
 
     async def _auto_prune(self) -> None:
-        """Run automatic data pruning daily."""
+        """Run automatic data pruning periodically."""
+        prune_interval_seconds = self.config.system.auto_prune_interval_hours * 3600
         while not self._shutdown_event.is_set():
             try:
-                # Wait for 24 hours or shutdown
+                # Wait for configured interval or shutdown
                 await asyncio.wait_for(
                     self._shutdown_event.wait(),
-                    timeout=86400,  # 24 hours
+                    timeout=prune_interval_seconds,
                 )
                 break
             except asyncio.TimeoutError:
@@ -448,8 +454,8 @@ class Daemon:
         Sample rate is controlled by config.system.sample_interval (default 0.2s = 5Hz).
         The loop runs until shutdown event is set.
         """
-        # Heartbeat tracking (log every 60 samples = ~1 minute)
-        heartbeat_interval = 60
+        # Heartbeat tracking (log every N samples, configurable)
+        heartbeat_interval = self.config.system.heartbeat_samples
         heartbeat_count = 0
         heartbeat_max_score = 0
         heartbeat_score_sum = 0
@@ -463,7 +469,7 @@ class Daemon:
         # We log entry only after N consecutive samples at new higher band
         tracked_bands: dict[int, tuple[str, str, str, int, int]] = {}
         sample_count = 0
-        stability_threshold = 3  # Require 3 consecutive samples (~0.6s) before logging
+        stability_threshold = self.config.system.log_stability_samples
         stale_threshold = 1500  # Prune entries not seen in ~5 minutes
 
         sample_interval = self.config.system.sample_interval
