@@ -207,7 +207,7 @@ class MetricValue:
 - Power: `energy`, `energy_rate`, `wakeups`, `wakeups_rate`
 - Contention: `runnable_time`, `runnable_time_rate`, `qos_interactive`, `qos_interactive_rate`
 - State: `state` (MetricValueStr), `priority`
-- Scoring: `score`, `band` (MetricValueStr), `blocking_score`, `contention_score`, `pressure_score`, `efficiency_score`, `dominant_category`, `dominant_metrics`
+- Scoring: `score`, `band` (MetricValueStr), `cpu_share`, `gpu_share`, `mem_share`, `disk_share`, `wakeups_share`, `disproportionality`, `dominant_resource`
 
 ### ProcessSamples (collector.py)
 ```python

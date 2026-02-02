@@ -384,7 +384,7 @@ def from_dict(cls, data: dict) -> "ProcessScore":
 |-------|--------|
 | cmprs | Not available from libproc, was always 0 |
 | sysbsd | Renamed to `syscalls`, now includes mach + unix |
-| categories | Replaced by `dominant_category` + `dominant_metrics` in v14 |
+| categories | Replaced by `dominant_resource` + `disproportionality` in v18 |
 
 ---
 

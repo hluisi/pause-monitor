@@ -260,8 +260,6 @@ def test_tracker_inserts_entry_snapshot(tmp_path):
         csw=20,
         syscalls=10,
         threads=4,
-        dominant_category="blocking",
-        dominant_metrics=["cpu:60%", "mem:2KB"],
     )
     tracker.update([score])
 
