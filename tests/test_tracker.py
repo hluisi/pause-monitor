@@ -445,11 +445,13 @@ def test_tracker_handles_multiple_simultaneous_processes(tmp_path):
 
 
 def test_tracker_inserts_checkpoint_snapshots(tmp_path):
-    """ProcessTracker inserts periodic checkpoint snapshots while tracking.
+    """ProcessTracker inserts checkpoint snapshots based on sample count.
 
     Note: Peak updates also insert checkpoint snapshots (since the peak snapshot
     is stored by ID), so we use scores that don't exceed the entry peak to
     isolate the periodic checkpoint behavior.
+
+    Uses sample-based checkpointing: elevated_checkpoint_samples=3.
     """
     from rogue_hunter.config import BandsConfig
     from rogue_hunter.storage import get_connection, init_database
@@ -459,18 +461,18 @@ def test_tracker_inserts_checkpoint_snapshots(tmp_path):
     init_database(db_path)
     conn = get_connection(db_path)
 
-    # Use short checkpoint interval for testing
-    bands = BandsConfig(checkpoint_interval=10)  # 10 seconds
+    # Use elevated_checkpoint_samples=3 for testing
+    bands = BandsConfig(elevated_checkpoint_samples=3)
     tracker = ProcessTracker(conn, bands, boot_time=1706000000)
 
-    # Enter bad state at t=100 with score=50
-    tracker.update([make_score(pid=123, score=50, captured_at=1706000100.0)])
+    # Enter elevated band with score=50
+    tracker.update([make_score(pid=123, score=50, band="elevated", captured_at=1706000100.0)])
     event_id = tracker.tracked[123].event_id
 
-    # Update at t=105 with same score (no peak update, no checkpoint yet)
-    tracker.update([make_score(pid=123, score=50, captured_at=1706000105.0)])
+    # Sample 2: No checkpoint yet (only 1 sample since entry)
+    tracker.update([make_score(pid=123, score=50, band="elevated", captured_at=1706000105.0)])
 
-    # Check only entry snapshot exists (no checkpoint yet - only 5 seconds)
+    # Check only entry snapshot exists (no checkpoint yet)
     rows = conn.execute(
         "SELECT snapshot_type FROM process_snapshots WHERE event_id = ?",
         (event_id,),
@@ -478,8 +480,11 @@ def test_tracker_inserts_checkpoint_snapshots(tmp_path):
     types = [row[0] for row in rows]
     assert types == [SNAPSHOT_ENTRY]
 
-    # Update at t=115 with same score (15 seconds since entry - checkpoint triggers)
-    tracker.update([make_score(pid=123, score=50, captured_at=1706000115.0)])
+    # Sample 3: Still no checkpoint (only 2 samples since entry)
+    tracker.update([make_score(pid=123, score=50, band="elevated", captured_at=1706000110.0)])
+
+    # Sample 4: Checkpoint triggers (3 samples since entry)
+    tracker.update([make_score(pid=123, score=50, band="elevated", captured_at=1706000115.0)])
 
     # Now we should have entry + 1 checkpoint
     checkpoint_count = conn.execute(
@@ -488,13 +493,223 @@ def test_tracker_inserts_checkpoint_snapshots(tmp_path):
     ).fetchone()[0]
     assert checkpoint_count == 1
 
-    # Another update at t=130 (25 seconds since last checkpoint - another checkpoint)
-    tracker.update([make_score(pid=123, score=50, captured_at=1706000130.0)])
+    # Samples 5-7: After 3 more samples, another checkpoint
+    for i in range(3):
+        score = make_score(pid=123, score=50, band="elevated", captured_at=1706000120.0 + i)
+        tracker.update([score])
 
     checkpoint_count = conn.execute(
         "SELECT COUNT(*) FROM process_snapshots WHERE event_id = ? AND snapshot_type = ?",
         (event_id, SNAPSHOT_CHECKPOINT),
     ).fetchone()[0]
     assert checkpoint_count == 2
+
+    conn.close()
+
+
+# --- Graduated Capture Frequency Tests ---
+
+
+def test_low_band_not_tracked(tmp_path):
+    """Processes in low band are not tracked."""
+    from rogue_hunter.config import BandsConfig
+    from rogue_hunter.storage import get_connection, init_database
+    from rogue_hunter.tracker import ProcessTracker
+
+    db_path = tmp_path / "test.db"
+    init_database(db_path)
+    conn = get_connection(db_path)
+
+    bands = BandsConfig()  # Default tracking_band="medium", threshold=20
+    tracker = ProcessTracker(conn, bands, boot_time=1706000000)
+
+    # Low band process (score=15, band="low") should not be tracked
+    tracker.update([make_score(pid=123, score=15, band="low", captured_at=1706000100.0)])
+
+    assert 123 not in tracker.tracked
+    assert len(tracker.tracked) == 0
+
+    conn.close()
+
+
+def test_medium_band_checkpoints_every_n_samples(tmp_path):
+    """Medium band checkpoints every N samples.
+
+    With medium_checkpoint_samples=3:
+    - Sample 1: Creates event + entry snapshot, samples_since_checkpoint=0
+    - Sample 2: No checkpoint, samples_since_checkpoint=1
+    - Sample 3: No checkpoint, samples_since_checkpoint=2
+    - Sample 4: Checkpoint (3 samples since last), samples_since_checkpoint=0 (reset)
+    """
+    from rogue_hunter.config import BandsConfig
+    from rogue_hunter.storage import get_connection, init_database
+    from rogue_hunter.tracker import SNAPSHOT_CHECKPOINT, SNAPSHOT_ENTRY, ProcessTracker
+
+    db_path = tmp_path / "test.db"
+    init_database(db_path)
+    conn = get_connection(db_path)
+
+    # Use medium_checkpoint_samples=3 for testing
+    bands = BandsConfig(medium_checkpoint_samples=3)
+    tracker = ProcessTracker(conn, bands, boot_time=1706000000)
+
+    # Sample 1: Enter medium band - creates entry snapshot
+    tracker.update([make_score(pid=123, score=25, band="medium", captured_at=1706000100.0)])
+    event_id = tracker.tracked[123].event_id
+
+    # Verify entry snapshot only
+    rows = conn.execute(
+        "SELECT snapshot_type FROM process_snapshots WHERE event_id = ?",
+        (event_id,),
+    ).fetchall()
+    assert [r[0] for r in rows] == [SNAPSHOT_ENTRY]
+    assert tracker.tracked[123].samples_since_checkpoint == 0
+
+    # Sample 2: No checkpoint yet
+    tracker.update([make_score(pid=123, score=25, band="medium", captured_at=1706000101.0)])
+    assert tracker.tracked[123].samples_since_checkpoint == 1
+
+    # Sample 3: Still no checkpoint
+    tracker.update([make_score(pid=123, score=25, band="medium", captured_at=1706000102.0)])
+    assert tracker.tracked[123].samples_since_checkpoint == 2
+
+    # Sample 4: Checkpoint triggers (3 samples since entry)
+    tracker.update([make_score(pid=123, score=25, band="medium", captured_at=1706000103.0)])
+    assert tracker.tracked[123].samples_since_checkpoint == 0  # Reset after checkpoint
+
+    checkpoint_count = conn.execute(
+        "SELECT COUNT(*) FROM process_snapshots WHERE event_id = ? AND snapshot_type = ?",
+        (event_id, SNAPSHOT_CHECKPOINT),
+    ).fetchone()[0]
+    assert checkpoint_count == 1
+
+    conn.close()
+
+
+def test_elevated_band_checkpoints_more_frequently(tmp_path):
+    """Elevated band checkpoints more frequently than medium.
+
+    With medium_checkpoint_samples=20 and elevated_checkpoint_samples=10:
+    - After 10 samples, elevated should checkpoint but medium should not
+    """
+    from rogue_hunter.config import BandsConfig
+    from rogue_hunter.storage import get_connection, init_database
+    from rogue_hunter.tracker import SNAPSHOT_CHECKPOINT, ProcessTracker
+
+    db_path = tmp_path / "test.db"
+    init_database(db_path)
+    conn = get_connection(db_path)
+
+    bands = BandsConfig(medium_checkpoint_samples=20, elevated_checkpoint_samples=10)
+    tracker = ProcessTracker(conn, bands, boot_time=1706000000)
+
+    # Start tracking both processes
+    tracker.update(
+        [
+            make_score(pid=100, score=25, band="medium", captured_at=1706000100.0),
+            make_score(pid=200, score=45, band="elevated", captured_at=1706000100.0),
+        ]
+    )
+    medium_event_id = tracker.tracked[100].event_id
+    elevated_event_id = tracker.tracked[200].event_id
+
+    # Send 10 more samples (total 11 including entry)
+    for i in range(1, 11):
+        tracker.update(
+            [
+                make_score(pid=100, score=25, band="medium", captured_at=1706000100.0 + i),
+                make_score(pid=200, score=45, band="elevated", captured_at=1706000100.0 + i),
+            ]
+        )
+
+    # Elevated should have checkpoint (10 samples reached)
+    # samples_since_checkpoint should be 0 (just reset after checkpoint)
+    assert tracker.tracked[200].samples_since_checkpoint == 0
+
+    # Medium should NOT have checkpoint yet (only 10 samples, need 20)
+    # samples_since_checkpoint should be 10
+    assert tracker.tracked[100].samples_since_checkpoint == 10
+
+    # Verify checkpoint counts
+    elevated_checkpoints = conn.execute(
+        "SELECT COUNT(*) FROM process_snapshots WHERE event_id = ? AND snapshot_type = ?",
+        (elevated_event_id, SNAPSHOT_CHECKPOINT),
+    ).fetchone()[0]
+    assert elevated_checkpoints == 1
+
+    medium_checkpoints = conn.execute(
+        "SELECT COUNT(*) FROM process_snapshots WHERE event_id = ? AND snapshot_type = ?",
+        (medium_event_id, SNAPSHOT_CHECKPOINT),
+    ).fetchone()[0]
+    assert medium_checkpoints == 0
+
+    conn.close()
+
+
+def test_high_band_checkpoints_every_sample(tmp_path):
+    """High band checkpoints every sample."""
+    from rogue_hunter.config import BandsConfig
+    from rogue_hunter.storage import get_connection, init_database
+    from rogue_hunter.tracker import SNAPSHOT_CHECKPOINT, ProcessTracker
+
+    db_path = tmp_path / "test.db"
+    init_database(db_path)
+    conn = get_connection(db_path)
+
+    bands = BandsConfig()
+    tracker = ProcessTracker(conn, bands, boot_time=1706000000)
+
+    # Enter high band (score >= 50)
+    tracker.update([make_score(pid=123, score=55, band="high", captured_at=1706000100.0)])
+    event_id = tracker.tracked[123].event_id
+
+    # Each subsequent update should trigger a checkpoint
+    for i in range(1, 4):
+        tracker.update([make_score(pid=123, score=55, band="high", captured_at=1706000100.0 + i)])
+
+    # Should have 3 checkpoints (one per sample after entry)
+    checkpoint_count = conn.execute(
+        "SELECT COUNT(*) FROM process_snapshots WHERE event_id = ? AND snapshot_type = ?",
+        (event_id, SNAPSHOT_CHECKPOINT),
+    ).fetchone()[0]
+    assert checkpoint_count == 3
+
+    # samples_since_checkpoint should always reset to 0 for high band
+    assert tracker.tracked[123].samples_since_checkpoint == 0
+
+    conn.close()
+
+
+def test_critical_band_checkpoints_every_sample(tmp_path):
+    """Critical band checkpoints every sample."""
+    from rogue_hunter.config import BandsConfig
+    from rogue_hunter.storage import get_connection, init_database
+    from rogue_hunter.tracker import SNAPSHOT_CHECKPOINT, ProcessTracker
+
+    db_path = tmp_path / "test.db"
+    init_database(db_path)
+    conn = get_connection(db_path)
+
+    bands = BandsConfig()
+    tracker = ProcessTracker(conn, bands, boot_time=1706000000)
+
+    # Enter critical band (score >= 70)
+    tracker.update([make_score(pid=123, score=75, band="critical", captured_at=1706000100.0)])
+    event_id = tracker.tracked[123].event_id
+
+    # Each subsequent update should trigger a checkpoint
+    for i in range(1, 4):
+        score = make_score(pid=123, score=75, band="critical", captured_at=1706000100.0 + i)
+        tracker.update([score])
+
+    # Should have 3 checkpoints (one per sample after entry)
+    checkpoint_count = conn.execute(
+        "SELECT COUNT(*) FROM process_snapshots WHERE event_id = ? AND snapshot_type = ?",
+        (event_id, SNAPSHOT_CHECKPOINT),
+    ).fetchone()[0]
+    assert checkpoint_count == 3
+
+    # samples_since_checkpoint should always reset to 0 for critical band
+    assert tracker.tracked[123].samples_since_checkpoint == 0
 
     conn.close()

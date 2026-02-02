@@ -38,6 +38,7 @@ class TrackedProcess:
     peak_score: int
     peak_snapshot_id: int
     last_checkpoint: float = 0.0  # Timestamp of last checkpoint snapshot
+    samples_since_checkpoint: int = 0  # Samples since last checkpoint
 
 
 class ProcessTracker:
@@ -78,6 +79,28 @@ class ProcessTracker:
                 peak_snapshot_id=event["peak_snapshot_id"],
             )
 
+    def _get_checkpoint_samples(self, band: str) -> int:
+        """Return checkpoint frequency (in samples) for a band.
+
+        Args:
+            band: Process band (low/medium/elevated/high/critical)
+
+        Returns:
+            Number of samples between checkpoints:
+            - 0 for low (no checkpoints)
+            - medium_checkpoint_samples for medium
+            - elevated_checkpoint_samples for elevated
+            - 1 for high/critical (every sample)
+        """
+        if band in ("high", "critical"):
+            return 1
+        if band == "elevated":
+            return self.bands.elevated_checkpoint_samples
+        if band == "medium":
+            return self.bands.medium_checkpoint_samples
+        # low band
+        return 0
+
     def update(self, scores: list[ProcessScore]) -> None:
         """Update tracking with new scores."""
         current_pids = {s.pid for s in scores}
@@ -94,6 +117,10 @@ class ProcessTracker:
 
         # Process each score
         for score in scores:
+            # Low band processes are never tracked
+            if score.band == "low":
+                continue
+
             in_bad_state = score.score >= threshold
 
             if score.pid in self.tracked:
@@ -102,10 +129,18 @@ class ProcessTracker:
                 if in_bad_state:
                     if score.score > tracked.peak_score:
                         self._update_peak(score)
-                    # Checkpoint: periodic snapshot while in bad state
-                    checkpoint_interval = self.bands.checkpoint_interval
-                    if score.captured_at - tracked.last_checkpoint >= checkpoint_interval:
+
+                    # Sample-based checkpoint logic
+                    tracked.samples_since_checkpoint += 1
+                    checkpoint_samples = self._get_checkpoint_samples(score.band)
+
+                    # Checkpoint when: high/critical (every sample) OR interval reached
+                    if checkpoint_samples == 1 or (
+                        checkpoint_samples > 0
+                        and tracked.samples_since_checkpoint >= checkpoint_samples
+                    ):
                         self._insert_checkpoint(score, tracked)
+                        tracked.samples_since_checkpoint = 0
                 else:
                     # Score dropped below threshold — capture exit state
                     self._close_event(score.pid, score.captured_at, exit_score=score)
