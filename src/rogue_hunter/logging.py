@@ -47,6 +47,7 @@ class Icon:
     WAIT = "⏳"
     CAPTURE = "📸"
     PRUNE = "🧹"
+    SAVE = "💾"
     HEARTBEAT = "[magenta]♡[/]"
     ROGUE_ENTER = "[bright_green]▲[/]"
     ROGUE_EXIT = "[bright_red]▼[/]"
@@ -229,9 +230,17 @@ def auto_prune_started() -> None:
     info("[dim]Auto-pruning...[/]", Icon.PRUNE)
 
 
-def auto_prune_complete(events_deleted: int) -> None:
+def auto_prune_complete(events_deleted: int, snapshots_deleted: int = 0) -> None:
     """Log auto-prune complete."""
-    info(f"[dim]Pruned {events_deleted} old events[/]")
+    parts = [f"{events_deleted} events"]
+    if snapshots_deleted > 0:
+        parts.append(f"{snapshots_deleted} snapshots")
+    info(f"[dim]Pruned {', '.join(parts)}[/]")
+
+
+def machine_snapshot_saved(process_count: int, max_score: int) -> None:
+    """Log machine snapshot saved."""
+    info(f"[dim]Snapshot saved: {process_count} processes, max score {max_score}[/]", Icon.SAVE)
 
 
 def sample_failed(error_msg: str) -> None:
@@ -252,9 +261,12 @@ def already_running(pid: int | None = None) -> None:
         error("Another daemon already running", Icon.FAIL)
 
 
-def database_status(status: str, restored_count: int) -> None:
+def database_status(status: str, stale_closed: int) -> None:
     """Log database initialization status."""
-    info(f"Database {status}, [cyan]{restored_count}[/] processes tracked")
+    if stale_closed > 0:
+        info(f"Database {status}, closed [cyan]{stale_closed}[/] stale events")
+    else:
+        info(f"Database {status}")
 
 
 def config_created(path: str) -> None:

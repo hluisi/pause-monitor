@@ -449,37 +449,47 @@ class TestLibprocCollectorAsync:
             assert rogue.score >= 0
 
 
-class TestLibprocCollectorRogueSelection:
-    """Test LibprocCollector rogue selection logic."""
+class TestLibprocCollectorDisplaySelection:
+    """Test LibprocCollector display selection logic."""
 
-    def test_select_rogues_stuck_always_included(self):
-        """Stuck processes are always selected regardless of score."""
+    def test_select_for_display_returns_top_by_score(self):
+        """Display selection returns top N processes sorted by score."""
         from tests.conftest import make_process_score
 
         config = Config()
         collector = LibprocCollector(config)
 
-        # Create a stuck process with low score
-        stuck = make_process_score(
-            pid=2,
-            command="stuck_process",
-            score=5,  # Below threshold
-            state="stuck",
-        )
-        # Create a normal sleeping process with high score
-        normal = make_process_score(
-            pid=1,
-            command="normal",
-            score=50,  # Above threshold
-            state="sleeping",
-        )
+        # Create processes with different scores
+        low = make_process_score(pid=1, command="low", score=5, state="running")
+        medium = make_process_score(pid=2, command="medium", score=30, state="running")
+        high = make_process_score(pid=3, command="high", score=50, state="sleeping")
 
-        # _select_rogues now takes ProcessScore objects
-        selected = collector._select_rogues([stuck, normal])
+        selected = collector._select_for_display([low, medium, high])
 
-        # Stuck process should be included despite low score
-        stuck_found = [r for r in selected if r.command == "stuck_process"]
-        assert len(stuck_found) == 1
+        # Should be sorted by score descending
+        assert selected[0].command == "high"
+        assert selected[1].command == "medium"
+        assert selected[2].command == "low"
+
+    def test_select_for_display_respects_max_count(self):
+        """Display selection limits to max_count."""
+        from tests.conftest import make_process_score
+
+        config = Config()
+        config.rogue_selection.max_count = 2
+        collector = LibprocCollector(config)
+
+        procs = [
+            make_process_score(pid=i, command=f"proc{i}", score=i * 10, state="running")
+            for i in range(5)
+        ]
+
+        selected = collector._select_for_display(procs)
+
+        # Should only return top 2
+        assert len(selected) == 2
+        assert selected[0].score == 40  # proc4
+        assert selected[1].score == 30  # proc3
 
 
 class TestLibprocCollectorIntegration:
@@ -730,8 +740,9 @@ def test_score_from_shares_gpu_weighted_higher():
 
     weights = ResourceWeights(cpu=1.0, gpu=3.0, memory=1.0, disk_io=1.0, wakeups=2.0)
 
+    # Use small values to avoid hitting the 100 cap
     cpu_shares = {
-        "cpu_share": 10.0,
+        "cpu_share": 2.0,
         "gpu_share": 0.0,
         "mem_share": 0.0,
         "disk_share": 0.0,
@@ -739,7 +750,7 @@ def test_score_from_shares_gpu_weighted_higher():
     }
     gpu_shares = {
         "cpu_share": 0.0,
-        "gpu_share": 10.0,
+        "gpu_share": 2.0,
         "mem_share": 0.0,
         "disk_share": 0.0,
         "wakeups_share": 0.0,
@@ -748,16 +759,33 @@ def test_score_from_shares_gpu_weighted_higher():
     cpu_score, _, _ = score_from_shares(cpu_shares, weights)
     gpu_score, _, _ = score_from_shares(gpu_shares, weights)
 
+    # CPU: 2.0 * 1.0 * 10 = 20
+    # GPU: 2.0 * 3.0 * 10 = 60
     assert gpu_score > cpu_score  # GPU weighted 3x, so higher score
 
 
-def test_score_from_shares_logarithmic_curve():
-    """Score uses logarithmic curve - diminishing returns at extremes."""
+def test_score_from_shares_linear_scaling():
+    """Score uses linear scaling with cap at 100."""
     from rogue_hunter.collector import score_from_shares
     from rogue_hunter.config import ResourceWeights
 
-    weights = ResourceWeights()
+    # Use explicit weight=1.0 to isolate test from config changes
+    weights = ResourceWeights(cpu=1.0, gpu=1.0, memory=1.0, disk_io=1.0, wakeups=1.0)
 
+    shares_1x = {
+        "cpu_share": 1.0,
+        "gpu_share": 0.0,
+        "mem_share": 0.0,
+        "disk_share": 0.0,
+        "wakeups_share": 0.0,
+    }
+    shares_5x = {
+        "cpu_share": 5.0,
+        "gpu_share": 0.0,
+        "mem_share": 0.0,
+        "disk_share": 0.0,
+        "wakeups_share": 0.0,
+    }
     shares_10x = {
         "cpu_share": 10.0,
         "gpu_share": 0.0,
@@ -765,39 +793,26 @@ def test_score_from_shares_logarithmic_curve():
         "disk_share": 0.0,
         "wakeups_share": 0.0,
     }
-    shares_100x = {
-        "cpu_share": 100.0,
-        "gpu_share": 0.0,
-        "mem_share": 0.0,
-        "disk_share": 0.0,
-        "wakeups_share": 0.0,
-    }
-    shares_1000x = {
-        "cpu_share": 1000.0,
-        "gpu_share": 0.0,
-        "mem_share": 0.0,
-        "disk_share": 0.0,
-        "wakeups_share": 0.0,
-    }
 
+    score_1x, _, _ = score_from_shares(shares_1x, weights)
+    score_5x, _, _ = score_from_shares(shares_5x, weights)
     score_10x, _, _ = score_from_shares(shares_10x, weights)
-    score_100x, _, _ = score_from_shares(shares_100x, weights)
-    score_1000x, _, _ = score_from_shares(shares_1000x, weights)
 
-    increase_10_to_100 = score_100x - score_10x
-    increase_100_to_1000 = score_1000x - score_100x
-
-    assert increase_100_to_1000 < increase_10_to_100 * 2  # Diminishing returns
+    # Linear scaling: share × weight × multiplier(10) = score
+    # 1x × 1.0 × 10 = 10, 5x × 1.0 × 10 = 50, 10x × 1.0 × 10 = 100 (capped)
+    assert score_1x == 10
+    assert score_5x == 50
+    assert score_10x == 100  # Capped at 100
 
 
 def test_score_from_shares_critical_reachable():
-    """Critical band (70+) is reachable with extreme disproportionality."""
+    """Critical band (70+) is reachable with linear scaling."""
     from rogue_hunter.collector import score_from_shares
     from rogue_hunter.config import ResourceWeights
 
     weights = ResourceWeights()
     shares = {
-        "cpu_share": 200.0,
+        "cpu_share": 7.0,  # 7x fair share × 10 = 70
         "gpu_share": 0.0,
         "mem_share": 0.0,
         "disk_share": 0.0,
@@ -816,7 +831,7 @@ def test_score_from_shares_high_reachable_under_load():
 
     weights = ResourceWeights()
     shares = {
-        "cpu_share": 75.0,
+        "cpu_share": 5.5,  # 5.5x fair share × 10 = 55
         "gpu_share": 0.0,
         "mem_share": 0.0,
         "disk_share": 0.0,

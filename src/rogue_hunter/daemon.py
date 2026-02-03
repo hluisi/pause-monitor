@@ -22,7 +22,13 @@ from rogue_hunter.config import Config
 from rogue_hunter.forensics import ForensicsCapture
 from rogue_hunter.ringbuffer import RingBuffer
 from rogue_hunter.socket_server import SocketServer
-from rogue_hunter.storage import init_database, prune_old_data
+from rogue_hunter.storage import (
+    close_stale_open_events,
+    init_database,
+    insert_machine_snapshot,
+    prune_machine_snapshots,
+    prune_old_data,
+)
 from rogue_hunter.tracker import ProcessTracker
 
 log = rlog.get_structlog()
@@ -106,6 +112,7 @@ class Daemon:
         self._auto_prune_task: asyncio.Task | None = None
         self._socket_server: SocketServer | None = None
         self._last_forensics_time: float = 0.0  # For debouncing
+        self._last_machine_snapshot: float = 0.0  # For 60s interval snapshots
 
     async def _forensics_callback(self, event_id: int, trigger: str) -> None:
         """Forensics callback for tracker band transitions.
@@ -164,6 +171,10 @@ class Daemon:
 
         # Create connection and tracker AFTER init_database validates/recreates schema
         self._conn = sqlite3.connect(self.config.db_path)
+
+        # Close any events left open from previous daemon run
+        stale_closed = close_stale_open_events(self._conn, time.time())
+
         self.tracker = ProcessTracker(
             self._conn,
             self.config.bands,
@@ -172,9 +183,8 @@ class Daemon:
         )
 
         # Log database state
-        restored_count = len(self.tracker.tracked) if self.tracker else 0
-        status = "restored" if db_existed else "initialized"
-        rlog.database_status(status, restored_count)
+        status = "initialized" if not db_existed else "ready"
+        rlog.database_status(status, stale_closed)
 
     async def start(self) -> None:
         """Start the daemon."""
@@ -437,7 +447,9 @@ class Daemon:
                         self._conn,
                         events_days=self.config.retention.events_days,
                     )
-                    rlog.auto_prune_complete(events_deleted)
+                    # Also prune machine snapshots (12 hour retention)
+                    snapshots_deleted = prune_machine_snapshots(self._conn, max_age_hours=12.0)
+                    rlog.auto_prune_complete(events_deleted, snapshots_deleted)
 
     async def _main_loop(self) -> None:
         """Main loop collecting process samples at configured interval.
@@ -465,10 +477,9 @@ class Daemon:
         # - current_band: the band the process is currently at
         # - consecutive: samples at current_band (for stability filter)
         # - last_seen: sample count when last seen (for staleness pruning)
-        # We log entry only after N consecutive samples at new higher band
+        # Track band transitions for logging
         tracked_bands: dict[int, tuple[str, str, str, int, int]] = {}
         sample_count = 0
-        stability_threshold = self.config.system.log_stability_samples
         stale_threshold = 1500  # Prune entries not seen in ~5 minutes
 
         sample_interval = self.config.system.sample_interval
@@ -502,24 +513,30 @@ class Daemon:
                     else:
                         consecutive = 1  # Band changed, reset counter
 
-                    # Check for escalation: band is higher than what we logged AND stable
+                    # Check for escalation: score at/above logging threshold
+                    # Log immediately when crossing into a higher band (no stability delay)
+                    logging_threshold = self.config.bands.logging_threshold
                     if (
                         BAND_SEVERITY.get(band, 0) > BAND_SEVERITY.get(logged_band, 0)
-                        and band in ("medium", "elevated", "high", "critical")
-                        and consecutive >= stability_threshold
+                        and rogue.score >= logging_threshold
                     ):
                         metrics = f"{rogue.dominant_resource}: {rogue.disproportionality:.1f}x"
                         rlog.rogue_enter(rogue.command, pid, rogue.score, metrics)
                         logged_band = band  # Update logged band
 
-                    # Check for exit: dropped to "low" AND stable AND we had logged something
-                    if (
-                        band == "low"
-                        and logged_band != "low"
-                        and consecutive >= stability_threshold
-                    ):
-                        rlog.rogue_exit(rogue.command, pid)
-                        logged_band = "low"
+                    # Track de-escalation: when band drops below logged_band, update state
+                    # This ensures future escalations will be detected and logged
+                    logging_band_name = self.config.bands.logging_band
+                    logging_band_severity = BAND_SEVERITY.get(logging_band_name, 0)
+                    current_band_severity = BAND_SEVERITY.get(band, 0)
+                    logged_band_severity = BAND_SEVERITY.get(logged_band, 0)
+
+                    if current_band_severity < logged_band_severity:
+                        # Log exit if dropping below the configured logging band
+                        if current_band_severity < logging_band_severity:
+                            rlog.rogue_exit(rogue.command, pid)
+                        # Always update logged_band on de-escalation so future escalations log
+                        logged_band = band
 
                     # Update tracked state
                     tracked_bands[pid] = (
@@ -553,6 +570,16 @@ class Daemon:
                         if score.score >= threshold or score.pid in tracked_pids
                     ]
                     self.tracker.update(tracker_input)
+
+                # Machine snapshot: on startup and every 60 seconds
+                now = time.time()
+                if self._conn and (
+                    self._last_machine_snapshot == 0.0 or now - self._last_machine_snapshot >= 60.0
+                ):
+                    all_processes = list(samples.all_by_pid.values())
+                    insert_machine_snapshot(self._conn, now, all_processes)
+                    self._last_machine_snapshot = now
+                    rlog.machine_snapshot_saved(len(all_processes), samples.max_score)
 
                 # Update heartbeat stats
                 heartbeat_count += 1

@@ -306,17 +306,18 @@ normal_interval = 5
 
 
 def test_state_multipliers_defaults():
-    """StateMultipliers has self-consistent defaults."""
+    """StateMultipliers has tuned defaults for anomaly detection."""
     mult = StateMultipliers()
-    # Running/stuck should have highest multiplier (1.0)
+    # Running is the baseline
     assert mult.running == 1.0
-    assert mult.stuck == 1.0
-    # Other states should be less than running
-    assert mult.idle < mult.running
-    assert mult.sleeping < mult.running
-    assert mult.stopped < mult.running
-    # Zombie = 0.0 (dead, metrics are stale)
-    assert mult.zombie == 0.0
+    # Stuck processes are highly suspicious - elevated multiplier
+    assert mult.stuck > mult.running
+    # Idle/sleeping/stopped with high resource use is anomalous - elevated multiplier
+    assert mult.idle > mult.running
+    assert mult.sleeping > mult.running
+    assert mult.stopped > mult.running
+    # Zombie processes indicate reaping issues - elevated multiplier to flag them
+    assert mult.zombie > mult.running
 
 
 # =============================================================================

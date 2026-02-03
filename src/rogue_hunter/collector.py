@@ -2,7 +2,6 @@
 
 import asyncio
 import json
-import math
 import time
 from dataclasses import dataclass
 from datetime import datetime
@@ -126,7 +125,7 @@ class ProcessScore:
     # ─────────────────────────────────────────────────────────────
     # Scoring (resource-based system)
     # ─────────────────────────────────────────────────────────────
-    score: int  # Final weighted score 0-100
+    score: float  # Final weighted score (0-100 or 0.0-1.0 based on config)
     band: str  # low/medium/elevated/high/critical
     cpu_share: float  # Share of system CPU this process uses
     gpu_share: float  # Share of system GPU this process uses
@@ -265,7 +264,7 @@ class ProcessSamples:
     timestamp: datetime
     elapsed_ms: int
     process_count: int
-    max_score: int
+    max_score: float
     rogues: list[ProcessScore]  # Top-N for TUI display
     all_by_pid: dict[int, ProcessScore]  # All scored processes by PID
 
@@ -299,7 +298,9 @@ class ProcessSamples:
 def calculate_resource_shares(
     processes: list[dict],
     share_min_cpu: float = 0.01,
+    share_min_gpu: float = 1.0,
     share_min_memory_bytes: int = 268_435_456,
+    share_min_disk: float = 1024.0,
     share_min_wakeups: float = 10.0,
 ) -> dict[int, dict[str, float]]:
     """Calculate resource shares for each process using per-resource fair share.
@@ -320,7 +321,9 @@ def calculate_resource_shares(
     Args:
         processes: List of process dicts with resource metrics
         share_min_cpu: CPU % threshold to count as resource user
+        share_min_gpu: GPU ms/sec threshold to count as resource user
         share_min_memory_bytes: Memory bytes threshold for resource user
+        share_min_disk: Disk I/O bytes/sec threshold to count as resource user
         share_min_wakeups: Wakeups/sec threshold for resource user
 
     Returns dict mapping PID to dict of resource shares.
@@ -354,11 +357,11 @@ def calculate_resource_shares(
         # Using configurable thresholds to filter measurement noise
         if cpu > share_min_cpu:
             cpu_users += 1
-        if gpu > 0:  # Any GPU usage
+        if gpu > share_min_gpu:
             gpu_users += 1
         if mem > share_min_memory_bytes:
             mem_users += 1
-        if disk > 0:  # Any disk I/O
+        if disk > share_min_disk:
             disk_users += 1
         if wakeups > share_min_wakeups:
             wakeups_users += 1
@@ -394,24 +397,39 @@ def calculate_resource_shares(
     return result
 
 
+def _map_score(raw: float, multiplier: float, max_score: float) -> float:
+    """Map raw weighted value to score range.
+
+    Args:
+        raw: Raw weighted sum of resource shares
+        multiplier: Scaling multiplier
+        max_score: Maximum score (100.0 for 0-100, 1.0 for 0.0-1.0)
+
+    Returns:
+        Score clamped to [0, max_score]
+    """
+    scaled = raw * multiplier * (max_score / 100.0)
+    return max(0.0, min(max_score, scaled))
+
+
 def score_from_shares(
     shares: dict[str, float],
     weights: ResourceWeights,
-    curve_multiplier: float = 10.0,
-) -> tuple[int, DominantResource, float]:
-    """Calculate score from resource shares using Apple-style weighting.
+    score_multiplier: float = 10.0,
+    score_max: float = 100.0,
+) -> tuple[float, DominantResource, float]:
+    """Calculate score from resource shares using linear weighting.
 
-    Uses logarithmic curve to map disproportionality to 0-100 score:
-    - High band (50-69) reachable at ~50-100x fair share
-    - Critical band (70+) reachable at ~200x fair share
+    Linear scoring: score = total_weighted_shares * multiplier, capped at score_max.
 
     Args:
         shares: Dict with cpu_share, gpu_share, mem_share, disk_share, wakeups_share
         weights: ResourceWeights with weight multipliers for each resource
-        curve_multiplier: Multiplier for log2 scoring curve (default 10.0)
+        score_multiplier: Multiplier for linear scoring (default 10.0)
+        score_max: Maximum score value (default 100.0, use 1.0 for 0.0-1.0 range)
 
     Returns:
-        Tuple of (score 0-100, dominant_resource, disproportionality)
+        Tuple of (score, dominant_resource, disproportionality)
     """
     # Calculate weighted contributions
     weighted: dict[DominantResource, float] = {
@@ -438,19 +456,8 @@ def score_from_shares(
     # Sum weighted contributions
     total_weighted = sum(weighted.values())
 
-    # Apply logarithmic curve
-    # log2(1) = 0, log2(2) = 1, log2(50) ≈ 5.6, log2(100) ≈ 6.6, log2(200) ≈ 7.6
-    # Scale: multiply by curve_multiplier to get score range
-    # Target with multiplier=10: 50x -> ~56, 100x -> ~66 (high band), 200x -> ~76 (critical)
-    if total_weighted <= 1.0:
-        # At or below fair share = score 0
-        raw_score = 0.0
-    else:
-        # Logarithmic scaling
-        raw_score = math.log2(total_weighted) * curve_multiplier
-
-    # Clamp to 0-100
-    score = max(0, min(100, int(raw_score)))
+    # Map to score range
+    score = _map_score(total_weighted, score_multiplier, score_max)
 
     return score, dominant, disproportionality
 
@@ -748,7 +755,9 @@ class LibprocCollector:
         shares_by_pid = calculate_resource_shares(
             all_processes,
             share_min_cpu=scoring.share_min_cpu,
+            share_min_gpu=scoring.share_min_gpu,
             share_min_memory_bytes=scoring.share_min_memory_bytes,
+            share_min_disk=scoring.share_min_disk,
             share_min_wakeups=scoring.share_min_wakeups,
         )
 
@@ -760,8 +769,8 @@ class LibprocCollector:
         # All scores by PID (daemon uses this to build tracker input)
         all_by_pid = {p.pid: p for p in all_scored}
 
-        # Rogues: top-N for TUI display
-        rogues = self._select_rogues(all_scored)
+        # Top processes for TUI display (named "rogues" for ProcessSamples compatibility)
+        rogues = self._select_for_display(all_scored)
 
         elapsed_ms = int((time.monotonic() - start) * 1000)
         # Hybrid: max(peak, rms) - bad actors visible, cumulative stress can push higher
@@ -789,34 +798,23 @@ class LibprocCollector:
 
     # ─────────────────────────────────────────────────────────────────────────
 
-    def _select_rogues(self, scored: list[ProcessScore]) -> list[ProcessScore]:
-        """Select top processes for display.
+    def _select_for_display(self, scored: list[ProcessScore]) -> list[ProcessScore]:
+        """Select top processes for TUI display.
 
-        Selection priority:
-        1. Stuck processes (always first - these are critical)
-        2. Remaining slots filled by highest-scoring processes
+        Returns top N processes sorted by score descending.
+        This shows the current state of the machine — what's consuming resources.
 
-        Always returns up to max_count processes, ensuring TUI always has data.
-        ProcessTracker independently decides which to persist based on tracking_threshold.
+        "Rogue" classification (for tracking/persistence) is separate — determined
+        by the tracker based on tracking_threshold.
         """
-        cfg = self.config.rogue_selection
-        stuck: list[ProcessScore] = []
-        rest: list[ProcessScore] = []
+        # Sort by score descending
+        sorted_procs = sorted(scored, key=lambda p: p.score, reverse=True)
 
-        for p in scored:
-            if p.state == "stuck":
-                stuck.append(p)
-            else:
-                rest.append(p)
+        # Return top N for display (TUI has limited space)
+        max_display = self.config.rogue_selection.max_count
+        return sorted_procs[:max_display]
 
-        # Sort each group by score descending
-        stuck.sort(key=lambda p: p.score, reverse=True)
-        rest.sort(key=lambda p: p.score, reverse=True)
-
-        # Combine: stuck first, then top scorers
-        return (stuck + rest)[: cfg.max_count]
-
-    def _get_band(self, score: int) -> str:
+    def _get_band(self, score: float) -> str:
         """Derive band name from score using config thresholds."""
         return self.config.bands.get_band(score)
 
@@ -840,9 +838,10 @@ class LibprocCollector:
         shares = shares if shares else default_shares
 
         # Calculate score from resource shares
-        curve_multiplier = self.config.scoring.score_curve_multiplier
+        score_multiplier = self.config.scoring.score_multiplier
+        score_max = self.config.scoring.score_max
         base_score, dominant_resource, disproportionality = score_from_shares(
-            shares, weights, curve_multiplier
+            shares, weights, score_multiplier, score_max
         )
 
         # Apply state multiplier (discount for currently-inactive processes)

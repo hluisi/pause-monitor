@@ -302,11 +302,11 @@ def test_schema_has_process_snapshots_table(tmp_path):
     conn.close()
 
 
-def test_schema_version_is_18():
-    """Schema version is 18 for resource-based scoring."""
+def test_schema_version_is_19():
+    """Schema version is 19 for machine snapshots."""
     from rogue_hunter.storage import SCHEMA_VERSION
 
-    assert SCHEMA_VERSION == 18
+    assert SCHEMA_VERSION == 19
 
 
 def test_process_snapshots_has_resource_shares():

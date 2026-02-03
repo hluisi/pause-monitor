@@ -13,7 +13,7 @@ if TYPE_CHECKING:
 
 log = structlog.get_logger()
 
-SCHEMA_VERSION = 18  # Resource-based scoring: cpu/gpu/mem/disk/wakeups shares
+SCHEMA_VERSION = 19  # Machine snapshots: periodic full-system state capture
 
 
 SCHEMA = """
@@ -178,6 +178,77 @@ CREATE INDEX IF NOT EXISTS idx_spindump_processes_capture ON spindump_processes(
 CREATE INDEX IF NOT EXISTS idx_spindump_threads_process ON spindump_threads(process_id);
 CREATE INDEX IF NOT EXISTS idx_log_entries_capture ON log_entries(capture_id);
 CREATE INDEX IF NOT EXISTS idx_buffer_context_capture ON buffer_context(capture_id);
+
+-- Machine snapshots: periodic full-system state (every 60s, retained 12h)
+CREATE TABLE IF NOT EXISTS machine_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    captured_at REAL NOT NULL,
+    process_count INTEGER NOT NULL,
+    max_score INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS machine_snapshot_processes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    snapshot_id INTEGER NOT NULL,
+    pid INTEGER NOT NULL,
+    command TEXT NOT NULL,
+    -- CPU
+    cpu REAL NOT NULL,
+    -- Memory
+    mem INTEGER NOT NULL,
+    mem_peak INTEGER NOT NULL,
+    pageins INTEGER NOT NULL,
+    pageins_rate REAL NOT NULL,
+    faults INTEGER NOT NULL,
+    faults_rate REAL NOT NULL,
+    -- Disk I/O
+    disk_io INTEGER NOT NULL,
+    disk_io_rate REAL NOT NULL,
+    -- Activity
+    csw INTEGER NOT NULL,
+    csw_rate REAL NOT NULL,
+    syscalls INTEGER NOT NULL,
+    syscalls_rate REAL NOT NULL,
+    threads INTEGER NOT NULL,
+    mach_msgs INTEGER NOT NULL,
+    mach_msgs_rate REAL NOT NULL,
+    -- Efficiency
+    instructions INTEGER NOT NULL,
+    cycles INTEGER NOT NULL,
+    ipc REAL NOT NULL,
+    -- Power
+    energy INTEGER NOT NULL,
+    energy_rate REAL NOT NULL,
+    wakeups INTEGER NOT NULL,
+    wakeups_rate REAL NOT NULL,
+    -- Contention
+    runnable_time INTEGER NOT NULL,
+    runnable_time_rate REAL NOT NULL,
+    qos_interactive INTEGER NOT NULL,
+    qos_interactive_rate REAL NOT NULL,
+    -- GPU
+    gpu_time INTEGER NOT NULL,
+    gpu_time_rate REAL NOT NULL,
+    -- Zombie children
+    zombie_children INTEGER NOT NULL,
+    -- State
+    state TEXT NOT NULL,
+    priority INTEGER NOT NULL,
+    -- Scoring
+    score INTEGER NOT NULL,
+    band TEXT NOT NULL,
+    cpu_share REAL NOT NULL,
+    gpu_share REAL NOT NULL,
+    mem_share REAL NOT NULL,
+    disk_share REAL NOT NULL,
+    wakeups_share REAL NOT NULL,
+    disproportionality REAL NOT NULL,
+    dominant_resource TEXT NOT NULL,
+    FOREIGN KEY (snapshot_id) REFERENCES machine_snapshots(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_machine_snapshots_time ON machine_snapshots(captured_at);
+CREATE INDEX IF NOT EXISTS idx_msp_snapshot ON machine_snapshot_processes(snapshot_id);
 """
 
 
@@ -413,6 +484,30 @@ def get_open_events(conn: sqlite3.Connection, boot_time: int) -> list[dict]:
         }
         for r in cursor.fetchall()
     ]
+
+
+def close_stale_open_events(conn: sqlite3.Connection, exit_time: float) -> int:
+    """Close all open events (daemon restart cleanup).
+
+    Called on daemon startup to close any events that were left open
+    from a previous daemon run (crash, restart, etc.).
+
+    Args:
+        conn: Database connection
+        exit_time: Timestamp to use as exit_time for closed events
+
+    Returns:
+        Number of events closed
+    """
+    cursor = conn.execute(
+        "UPDATE process_events SET exit_time = ? WHERE exit_time IS NULL",
+        (exit_time,),
+    )
+    count = cursor.rowcount
+    if count > 0:
+        conn.commit()
+        log.info("stale_events_closed", count=count)
+    return count
 
 
 def get_process_events(
@@ -1076,3 +1171,168 @@ def get_buffer_context(conn: sqlite3.Connection, capture_id: int) -> dict | None
         "peak_score": row[3],
         "culprits": row[4],
     }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Machine Snapshots (periodic full-system state)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def insert_machine_snapshot(
+    conn: sqlite3.Connection,
+    captured_at: float,
+    processes: list["ProcessScore"],
+) -> int:
+    """Insert a full machine snapshot with all process data.
+
+    Args:
+        conn: Database connection
+        captured_at: Timestamp of the snapshot
+        processes: All scored processes at this moment
+
+    Returns:
+        The snapshot ID
+    """
+    max_score = max((p.score for p in processes), default=0)
+
+    # Insert snapshot header
+    cursor = conn.execute(
+        """INSERT INTO machine_snapshots (captured_at, process_count, max_score)
+           VALUES (?, ?, ?)""",
+        (captured_at, len(processes), max_score),
+    )
+    snapshot_id = cursor.lastrowid
+    assert snapshot_id is not None
+
+    # Insert all processes
+    conn.executemany(
+        """INSERT INTO machine_snapshot_processes
+           (snapshot_id, pid, command,
+            cpu, mem, mem_peak, pageins, pageins_rate, faults, faults_rate,
+            disk_io, disk_io_rate,
+            csw, csw_rate, syscalls, syscalls_rate, threads, mach_msgs, mach_msgs_rate,
+            instructions, cycles, ipc,
+            energy, energy_rate, wakeups, wakeups_rate,
+            runnable_time, runnable_time_rate, qos_interactive, qos_interactive_rate,
+            gpu_time, gpu_time_rate,
+            zombie_children,
+            state, priority,
+            score, band, cpu_share, gpu_share, mem_share, disk_share,
+            wakeups_share, disproportionality, dominant_resource)
+           VALUES (?, ?, ?,
+                   ?, ?, ?, ?, ?, ?, ?,
+                   ?, ?,
+                   ?, ?, ?, ?, ?, ?, ?,
+                   ?, ?, ?,
+                   ?, ?, ?, ?,
+                   ?, ?, ?, ?,
+                   ?, ?,
+                   ?,
+                   ?, ?,
+                   ?, ?, ?, ?, ?, ?,
+                   ?, ?, ?)""",
+        [
+            (
+                snapshot_id,
+                p.pid,
+                p.command,
+                # CPU
+                p.cpu,
+                # Memory
+                p.mem,
+                p.mem_peak,
+                p.pageins,
+                p.pageins_rate,
+                p.faults,
+                p.faults_rate,
+                # Disk I/O
+                p.disk_io,
+                p.disk_io_rate,
+                # Activity
+                p.csw,
+                p.csw_rate,
+                p.syscalls,
+                p.syscalls_rate,
+                p.threads,
+                p.mach_msgs,
+                p.mach_msgs_rate,
+                # Efficiency
+                p.instructions,
+                p.cycles,
+                p.ipc,
+                # Power
+                p.energy,
+                p.energy_rate,
+                p.wakeups,
+                p.wakeups_rate,
+                # Contention
+                p.runnable_time,
+                p.runnable_time_rate,
+                p.qos_interactive,
+                p.qos_interactive_rate,
+                # GPU
+                p.gpu_time,
+                p.gpu_time_rate,
+                # Zombie children
+                p.zombie_children,
+                # State
+                p.state,
+                p.priority,
+                # Scoring
+                p.score,
+                p.band,
+                p.cpu_share,
+                p.gpu_share,
+                p.mem_share,
+                p.disk_share,
+                p.wakeups_share,
+                p.disproportionality,
+                p.dominant_resource,
+            )
+            for p in processes
+        ],
+    )
+
+    conn.commit()
+    log.debug(
+        "machine_snapshot_inserted",
+        snapshot_id=snapshot_id,
+        process_count=len(processes),
+        max_score=max_score,
+    )
+    return snapshot_id
+
+
+def prune_machine_snapshots(conn: sqlite3.Connection, max_age_hours: float = 12.0) -> int:
+    """Delete machine snapshots older than max_age_hours.
+
+    Args:
+        conn: Database connection
+        max_age_hours: Maximum age in hours (default 12)
+
+    Returns:
+        Number of snapshots deleted
+    """
+    cutoff = time.time() - (max_age_hours * 3600)
+
+    # Get count before deletion
+    count = conn.execute(
+        "SELECT COUNT(*) FROM machine_snapshots WHERE captured_at < ?",
+        (cutoff,),
+    ).fetchone()[0]
+
+    if count > 0:
+        # CASCADE will delete associated processes
+        conn.execute(
+            "DELETE FROM machine_snapshots WHERE captured_at < ?",
+            (cutoff,),
+        )
+        conn.commit()
+        log.info("machine_snapshots_pruned", count=count, max_age_hours=max_age_hours)
+
+    return count
+
+
+def get_machine_snapshot_count(conn: sqlite3.Connection) -> int:
+    """Get the number of machine snapshots in the database."""
+    return conn.execute("SELECT COUNT(*) FROM machine_snapshots").fetchone()[0]

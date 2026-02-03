@@ -564,9 +564,11 @@ async def test_daemon_main_loop_collects_samples(patched_config_paths, monkeypat
     so tracker remains None. The main loop should still work without tracker.update().
     Tracker integration is tested separately in test_daemon_main_loop_updates_tracker.
     """
+    from rogue_hunter import logging as rlog
     from rogue_hunter.storage import init_database
 
     config = Config.load()
+    rlog.configure(config)  # Required for band transition logging
     daemon = Daemon(config)
 
     # Verify tracker is None (DB didn't exist at daemon init time)

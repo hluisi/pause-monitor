@@ -17,13 +17,13 @@ class RetentionConfig:
 class SystemConfig:
     """System monitoring configuration."""
 
-    ring_buffer_size: int = 60  # Number of samples to keep in ring buffer
+    ring_buffer_size: int = 90  # Number of samples to keep in ring buffer
     sample_interval: float = 1 / 3  # Seconds between samples (~0.333s = 3Hz)
     forensics_debounce: float = 2.0  # Min seconds between forensics captures
     # Daemon heartbeat and logging
     heartbeat_samples: int = 60  # Log heartbeat every N samples (~20s at 3Hz)
     log_stability_samples: int = 3  # Samples before logging band transitions
-    auto_prune_interval_hours: int = 24  # Hours between auto-prune runs
+    auto_prune_interval_hours: int = 8  # Hours between auto-prune runs
     # Log file rotation
     log_max_bytes: int = 5 * 1024 * 1024  # Max log file size (5MB)
     log_backup_count: int = 3  # Number of backup log files to keep
@@ -43,21 +43,18 @@ class BandsConfig:
     - Critical (critical to 100): Every sample + full forensics
     """
 
-    medium: int = 35  # Score to enter "medium" band (~11x fair share)
-    elevated: int = 45  # Score to enter "elevated" band (22x fair share)
-    high: int = 60  # Score to enter "high" band (64x fair share)
-    critical: int = 80  # Score to enter "critical" band (256x fair share)
+    medium: int = 40  # Score to enter "medium" band
+    elevated: int = 50  # Score to enter "elevated" band
+    high: int = 60  # Score to enter "high" band
+    critical: int = 70  # Score to enter "critical" band
     tracking_band: str = "medium"  # Tracking starts at medium band
-    forensics_band: str = "high"  # High band triggers forensics
+    forensics_band: str = "critical"  # Critical band triggers forensics
     logging_band: str = "medium"  # Log entry at this band or higher, exit when dropping below
     # Sample-based checkpoint intervals
-    medium_checkpoint_samples: int = 60  # ~20s at 3 samples/sec
-    elevated_checkpoint_samples: int = 30  # ~10s at 3 samples/sec
-    # Event debouncing to reduce noise from processes bouncing above/below threshold
-    event_cooldown_seconds: float = 60.0  # Don't create new event for same PID within this time
-    exit_stability_samples: int = 30  # Must be below threshold for ~10s before closing
+    medium_checkpoint_samples: int = 30  # ~10s at 3 samples/sec
+    elevated_checkpoint_samples: int = 15  # ~5s at 3 samples/sec
 
-    def get_band(self, score: int) -> str:
+    def get_band(self, score: float) -> str:
         """Return band name for a given score."""
         if score >= self.critical:
             return "critical"
@@ -110,12 +107,12 @@ class StateMultipliers:
     - zombie (0.0): Dead. Metrics are stale history. Cannot cause problems.
     """
 
-    idle: float = 0.3
-    sleeping: float = 0.75
-    stopped: float = 0.2
-    zombie: float = 0.0
+    idle: float = 3.0
+    sleeping: float = 2.0
+    stopped: float = 2.0
+    zombie: float = 5.0
     running: float = 1.0
-    stuck: float = 1.0
+    stuck: float = 5.0
 
     def get(self, state: str) -> float:
         """Get multiplier for a state, defaulting to 1.0 for unknown states."""
@@ -130,11 +127,11 @@ class ResourceWeights:
     GPU weighted higher because GPU work is intensive.
     """
 
-    cpu: float = 1.0
-    gpu: float = 2.0
-    memory: float = 1.1
-    disk_io: float = 1.2
-    wakeups: float = 1.0
+    cpu: float = 1.1
+    gpu: float = 1.2
+    memory: float = 1.333333333
+    disk_io: float = 1.0
+    wakeups: float = 1.4
 
 
 @dataclass
@@ -146,12 +143,15 @@ class ScoringConfig:
 
     resource_weights: ResourceWeights = field(default_factory=ResourceWeights)
     state_multipliers: StateMultipliers = field(default_factory=StateMultipliers)
-    # Thresholds for fair share resource user counting (affects scoring)
-    share_min_cpu: float = 0.01  # CPU % threshold to count as resource user (0.01%)
-    share_min_memory_bytes: int = 268_435_456  # Memory threshold (256 MiB)
-    share_min_wakeups: float = 10.0  # Wakeups/sec threshold for resource user
-    # Score curve tuning
-    score_curve_multiplier: float = 10.0  # Multiplier for log2 scoring curve
+    # Normalization: thresholds for counting as a resource user (affects fair share)
+    share_min_cpu: float = 0.1  # CPU % (0.1%)
+    share_min_gpu: float = 0.25  # GPU ms/sec
+    share_min_memory_bytes: int = 10_000_000  # Memory bytes (~10 MB)
+    share_min_disk: float = 64.0  # Disk I/O bytes/sec
+    share_min_wakeups: float = 5.0  # Wakeups/sec
+    # Score tuning
+    score_multiplier: float = 1.0  # Multiplier for linear scoring
+    score_max: float = 100.0  # Maximum score (100 for 0-100, or 1.0 for 0.0-1.0)
 
 
 @dataclass
@@ -315,8 +315,6 @@ class TUIConfig:
     # Display settings
     decay_seconds: float = 10.0  # Seconds to show dimmed processes after leaving rogues
     tracked_max_history: int = 15  # Max entries in tracked events panel
-    activity_max_entries: int = 15  # Max entries in activity log
-    command_truncate_length: int = 15  # Max chars for command in tracked panel
     # Reconnection settings
     reconnect_initial_delay: float = 1.0  # Initial reconnect delay (seconds)
     reconnect_max_delay: float = 30.0  # Max reconnect delay (seconds)
@@ -511,14 +509,6 @@ def _load_bands_config(data: dict) -> BandsConfig:
             f"elevated_checkpoint_samples must be >= 1, got {elevated_checkpoint_samples}"
         )
 
-    event_cooldown_seconds = data.get("event_cooldown_seconds", defaults.event_cooldown_seconds)
-    exit_stability_samples = data.get("exit_stability_samples", defaults.exit_stability_samples)
-
-    if event_cooldown_seconds < 0:
-        raise ValueError(f"event_cooldown_seconds must be >= 0, got {event_cooldown_seconds}")
-    if exit_stability_samples < 1:
-        raise ValueError(f"exit_stability_samples must be >= 1, got {exit_stability_samples}")
-
     return BandsConfig(
         medium=data.get("medium", defaults.medium),
         elevated=data.get("elevated", defaults.elevated),
@@ -529,8 +519,6 @@ def _load_bands_config(data: dict) -> BandsConfig:
         logging_band=logging_band,
         medium_checkpoint_samples=medium_checkpoint_samples,
         elevated_checkpoint_samples=elevated_checkpoint_samples,
-        event_cooldown_seconds=event_cooldown_seconds,
-        exit_stability_samples=exit_stability_samples,
     )
 
 
@@ -561,9 +549,15 @@ def _load_scoring_config(data: dict) -> ScoringConfig:
             stuck=state_mult_data.get("stuck", m.stuck),
         ),
         share_min_cpu=data.get("share_min_cpu", defaults.share_min_cpu),
+        share_min_gpu=data.get("share_min_gpu", defaults.share_min_gpu),
         share_min_memory_bytes=data.get("share_min_memory_bytes", defaults.share_min_memory_bytes),
+        share_min_disk=data.get("share_min_disk", defaults.share_min_disk),
         share_min_wakeups=data.get("share_min_wakeups", defaults.share_min_wakeups),
-        score_curve_multiplier=data.get("score_curve_multiplier", defaults.score_curve_multiplier),
+        score_multiplier=data.get(
+            "score_multiplier",
+            data.get("score_curve_multiplier", defaults.score_multiplier),  # backwards compat
+        ),
+        score_max=data.get("score_max", defaults.score_max),
     )
 
 
@@ -653,10 +647,6 @@ def _load_tui_config(data: dict) -> TUIConfig:
         # TUI display settings
         decay_seconds=data.get("decay_seconds", tui_defaults.decay_seconds),
         tracked_max_history=data.get("tracked_max_history", tui_defaults.tracked_max_history),
-        activity_max_entries=data.get("activity_max_entries", tui_defaults.activity_max_entries),
-        command_truncate_length=data.get(
-            "command_truncate_length", tui_defaults.command_truncate_length
-        ),
         reconnect_initial_delay=data.get(
             "reconnect_initial_delay", tui_defaults.reconnect_initial_delay
         ),

@@ -23,7 +23,6 @@ from rogue_hunter.socket_client import SocketClient
 from rogue_hunter.storage import (
     get_connection,
     get_forensic_captures,
-    get_open_events,
     get_process_events,
 )
 from rogue_hunter.tui.sparkline import (
@@ -603,9 +602,9 @@ class ProcessTable(Static):
         - PID: Muted color (not competing with process name)
         - Process name: Band color based on score severity
         - Score: Bold band color
-        - Resource columns: Raw metric values only
+        - Resource columns: Each resource has its own Dracula theme color
         - State: Own colors based on process state severity
-        - Dominant: Shows highest weighted resource with share multiplier
+        - Dominant: Colored by dominant resource type
         """
         colors = self.app.config.tui.colors
 
@@ -616,6 +615,23 @@ class ProcessTable(Static):
         pid_style = colors.pid.default
         score_style = f"bold {band_style}" if band_style else "bold"
 
+        # Resource column colors - each gets its own Dracula theme color
+        cpu_style = "#8be9fd"  # Dracula cyan
+        gpu_style = "#bd93f9"  # Dracula purple
+        mem_style = "#f1fa8c"  # Dracula yellow
+        disk_style = "#ffb86c"  # Dracula orange
+        wake_style = "#2ee8bb"  # Aqua (green-leaning)
+
+        # Dominant column color based on which resource is dominant
+        dominant_colors = {
+            "cpu": cpu_style,
+            "gpu": gpu_style,
+            "memory": mem_style,
+            "disk": disk_style,
+            "wakeups": wake_style,
+        }
+        dominant_style = dominant_colors.get(dominant_resource, band_style)
+
         # Build dominant display using format_dominant_info
         dominant_display = format_dominant_info(dominant_resource, disproportionality)
 
@@ -624,13 +640,13 @@ class ProcessTable(Static):
             Text(str(pid).rjust(6), style=pid_style),
             Text(command, style=band_style),
             Text(str(score_val).rjust(3), style=score_style),
-            Text(format_cpu_column(cpu), style=band_style),
-            Text(format_gpu_column(gpu_rate), style=band_style),
-            Text(format_mem_column(mem), style=band_style),
-            Text(format_disk_column(disk_rate), style=band_style),
-            Text(format_wake_column(wake_rate), style=band_style),
+            Text(format_cpu_column(cpu), style=cpu_style),
+            Text(format_gpu_column(gpu_rate), style=gpu_style),
+            Text(format_mem_column(mem), style=mem_style),
+            Text(format_disk_column(disk_rate), style=disk_style),
+            Text(format_wake_column(wake_rate), style=wake_style),
             Text(state, style=state_style),
-            Text(dominant_display, style=band_style),
+            Text(dominant_display, style=dominant_style),
         ]
 
     def update_rogues(self, rogues: list[dict]) -> None:
@@ -732,6 +748,7 @@ class RecentlyCalmPanel(Static):
     RecentlyCalmPanel DataTable {
         width: 100%;
         height: 100%;
+        scrollbar-size: 0 0;
     }
     """
 
@@ -748,7 +765,7 @@ class RecentlyCalmPanel(Static):
 
     def on_mount(self) -> None:
         """Set up table columns."""
-        self.border_title = "RECENTLY CALM"
+        self.border_title = "RECENTLY ROGUE"
         self._table = self.query_one("#calm-table", DataTable)
         self._table.add_columns(
             Text("PID", justify="center"),
@@ -929,31 +946,20 @@ class EventHistoryPanel(Static):
         status_colors = self.app.config.tui.colors.status
         max_events = self.app.config.tui.tracked_max_history
 
-        # Get open events first (currently tracking)
-        open_events = []
-        if self._boot_time:
-            open_events = get_open_events(self._db_conn, self._boot_time)
-
-        # Get recent closed events
-        recent_events = get_process_events(
+        # Get recent events (includes both open and closed)
+        events = get_process_events(
             self._db_conn,
             boot_time=self._boot_time if self._boot_time else None,
             limit=max_events,
         )
 
-        # Build combined list: open events first, then recent (excluding open)
-        open_ids = {e["id"] for e in open_events}
-        combined = list(open_events)
-        for event in recent_events:
-            if event["id"] not in open_ids:
-                combined.append(event)
-
-        # Limit total
-        combined = combined[:max_events]
+        # Sort by: tracking first, then by peak score descending
+        # exit_time is None for tracking (False sorts before True)
+        events.sort(key=lambda e: (e.get("exit_time") is not None, -e.get("peak_score", 0)))
 
         now = time.time()
 
-        for event in combined:
+        for event in events:
             entry_time = event.get("entry_time", 0)
             exit_time = event.get("exit_time")
             peak_score = event.get("peak_score", 0)
@@ -1024,11 +1030,11 @@ class RogueHunterApp(App):
     }
 
     #recently-calm {
-        width: 25%;
+        width: 1fr;
     }
 
     #event-history {
-        width: 75%;
+        width: 2fr;
     }
     """
 
