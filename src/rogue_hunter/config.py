@@ -43,19 +43,19 @@ class BandsConfig:
     - Critical (critical to 100): Every sample + full forensics
     """
 
-    medium: int = 30  # Score to enter "medium" band (8x fair share)
+    medium: int = 35  # Score to enter "medium" band (~11x fair share)
     elevated: int = 45  # Score to enter "elevated" band (22x fair share)
     high: int = 60  # Score to enter "high" band (64x fair share)
     critical: int = 80  # Score to enter "critical" band (256x fair share)
     tracking_band: str = "medium"  # Tracking starts at medium band
-    forensics_band: str = "critical"  # Only critical triggers forensics
+    forensics_band: str = "high"  # High band triggers forensics
     logging_band: str = "medium"  # Log entry at this band or higher, exit when dropping below
     # Sample-based checkpoint intervals
     medium_checkpoint_samples: int = 60  # ~20s at 3 samples/sec
     elevated_checkpoint_samples: int = 30  # ~10s at 3 samples/sec
     # Event debouncing to reduce noise from processes bouncing above/below threshold
     event_cooldown_seconds: float = 60.0  # Don't create new event for same PID within this time
-    exit_stability_samples: int = 15  # Process must be below threshold for N samples before closing
+    exit_stability_samples: int = 30  # Must be below threshold for ~10s before closing
 
     def get_band(self, score: int) -> str:
         """Return band name for a given score."""

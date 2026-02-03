@@ -736,16 +736,16 @@ async def test_forensics_only_at_configured_band(tmp_path):
     async def on_forensics_trigger(event_id: int, reason: str) -> None:
         forensics_calls.append((event_id, reason))
 
-    # Default forensics_band="critical" (threshold=70)
-    bands = BandsConfig()
+    # Explicitly set forensics_band="critical" for this test
+    bands = BandsConfig(forensics_band="critical")
     tracker = ProcessTracker(
         conn, bands, boot_time=1706000000, on_forensics_trigger=on_forensics_trigger
     )
 
-    # High band (score=55, threshold=50) should NOT trigger forensics
+    # High band (score=55, threshold=50) should NOT trigger forensics when forensics_band=critical
     tracker.update([make_score(pid=123, score=55, band="high", captured_at=1706000100.0)])
     await asyncio.sleep(0)  # Let tasks run
-    assert len(forensics_calls) == 0, "High band should not trigger forensics"
+    assert len(forensics_calls) == 0, "High band shouldn't trigger (forensics=critical)"
 
     # Critical band (score=75, threshold=70) SHOULD trigger forensics
     tracker.update([make_score(pid=456, score=75, band="critical", captured_at=1706000101.0)])
@@ -774,16 +774,16 @@ async def test_forensics_on_escalation_to_configured_band(tmp_path):
     async def on_forensics_trigger(event_id: int, reason: str) -> None:
         forensics_calls.append((event_id, reason))
 
-    # Default forensics_band="critical"
-    bands = BandsConfig()
+    # Explicitly set forensics_band="critical" for this test
+    bands = BandsConfig(forensics_band="critical")
     tracker = ProcessTracker(
         conn, bands, boot_time=1706000000, on_forensics_trigger=on_forensics_trigger
     )
 
-    # Start at high band (score=55) - no forensics
+    # Start at high band (score=55) - no forensics when forensics_band=critical
     tracker.update([make_score(pid=123, score=55, band="high", captured_at=1706000100.0)])
     await asyncio.sleep(0)
-    assert len(forensics_calls) == 0, "Starting at high band should not trigger forensics"
+    assert len(forensics_calls) == 0, "High band shouldn't trigger (forensics=critical)"
 
     # Escalate to critical (score=75) - forensics triggered
     tracker.update([make_score(pid=123, score=75, band="critical", captured_at=1706000101.0)])

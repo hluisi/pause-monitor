@@ -141,10 +141,6 @@ class ProcessTracker:
 
         # Process each score
         for score in scores:
-            # Low band processes are never tracked
-            if score.band == "low":
-                continue
-
             in_bad_state = score.score >= threshold
 
             if score.pid in self.tracked:
