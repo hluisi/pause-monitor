@@ -596,7 +596,7 @@ def test_tui_colors_roundtrip(tmp_path):
 def test_sparkline_config_defaults():
     """SparklineConfig has correct defaults."""
     config = SparklineConfig()
-    assert config.height == 2
+    assert config.height == 3
     assert config.orientation == "normal"
     assert config.direction == "rtl"
 

@@ -172,11 +172,13 @@ class Sparkline(Static):
         ```
     """
 
-    # Braille character sets (9 levels: empty + 8 filled)
-    # Normal: fills from bottom to top (for top half of mirrored, or normal/inverted modes)
-    CHARS_NORMAL = " ⡀⣀⣄⣤⣦⣶⣷⣿"
-    # Inverted visual: fills from top to bottom (for bottom half of mirrored mode)
-    CHARS_INVERTED = " ⠁⠉⠋⠛⠟⠿⡿⣿"
+    # Character sets (9 levels: empty + 8 filled)
+    # Block elements: solid bars, clearest visual (NORMAL orientation only)
+    CHARS_BLOCKS = " ▁▂▃▄▅▆▇█"
+    # Braille normal: fills from bottom to top (fallback for inverted/mirrored)
+    CHARS_BRAILLE_NORMAL = " ⡀⣀⣄⣤⣦⣶⣷⣿"
+    # Braille inverted: fills from top to bottom (for inverted and mirrored bottom half)
+    CHARS_BRAILLE_INVERTED = " ⠁⠉⠋⠛⠟⠿⡿⣿"
     LEVELS_PER_ROW = 8
 
     DEFAULT_CSS = """
@@ -341,14 +343,27 @@ class Sparkline(Static):
     def _level_to_char(self, remaining: int, inverted_visual: bool = False) -> str:
         """Convert a remaining level count to the appropriate character.
 
+        Uses solid block elements for NORMAL orientation (clearest visual),
+        falls back to braille for INVERTED/MIRRORED (which need top-down fill).
+
         Args:
             remaining: Levels remaining for this row (can be negative, 0, partial, or full).
             inverted_visual: If True, use chars that fill from top-to-bottom visually.
 
         Returns:
-            Braille character for the level.
+            Character for the level.
         """
-        chars = self.CHARS_INVERTED if inverted_visual else self.CHARS_NORMAL
+        # Choose character set based on orientation and visual direction
+        if inverted_visual:
+            # Inverted visual (top-down fill) - must use braille
+            chars = self.CHARS_BRAILLE_INVERTED
+        elif self._orientation == SparklineOrientation.NORMAL:
+            # Normal orientation - use solid blocks for clearest visual
+            chars = self.CHARS_BLOCKS
+        else:
+            # Mirrored top half or other cases - use braille
+            chars = self.CHARS_BRAILLE_NORMAL
+
         if remaining <= 0:
             return chars[0]  # Empty
         elif remaining >= self.LEVELS_PER_ROW:

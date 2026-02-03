@@ -218,7 +218,7 @@ class HeaderBar(Static):
 
     DEFAULT_CSS = """
     HeaderBar {
-        height: 5;
+        height: 6;
         padding: 0 1;
         border: solid green;
         border-title-align: left;
@@ -240,7 +240,7 @@ class HeaderBar(Static):
 
     HeaderBar Sparkline {
         width: 1fr;
-        height: 2;
+        height: 3;
     }
     """
 
@@ -286,7 +286,8 @@ class HeaderBar(Static):
 
         sparkline = Sparkline(
             height=sp_config.height,
-            max_value=100,
+            min_value=sp_config.min_value,
+            max_value=sp_config.max_value,
             orientation=orientation,
             direction=direction,
             color_func=self._get_sparkline_color,
@@ -344,6 +345,82 @@ class HeaderBar(Static):
 
         self.styles.border = ("solid", color)
 
+    def _render_stress_bar(self, score: int, width: int = 30) -> Text:
+        """Render a colored stress bar with gradient and overflow indicator.
+
+        The bar scales to the critical threshold (not 100). Scores above critical
+        show an overflow indicator. Uses partial block characters for smooth fill
+        and gradient coloring matching the sparkline.
+
+        Args:
+            score: Current stress score.
+            width: Bar width in characters.
+
+        Returns:
+            Rich Text object with styled bar.
+        """
+        bands = self.app.config.bands
+        critical = bands.critical
+
+        # Partial block characters for sub-character precision (8 levels)
+        # Index 0 = empty, 1-7 = partial fills, 8 = full
+        blocks = " ▏▎▍▌▋▊▉█"
+
+        # Calculate fill level (0.0 to 1.0+, can exceed 1.0 for overflow)
+        fill_ratio = score / critical if critical > 0 else 0
+        # Clamp for bar rendering (overflow shown separately)
+        clamped_ratio = min(1.0, fill_ratio)
+
+        # Total sub-character units
+        total_units = width * 8
+        filled_units = int(clamped_ratio * total_units)
+
+        result = Text()
+
+        # Ensure gradient is initialized
+        if self._gradient is None:
+            colors = self.app.config.tui.colors.bands
+            self._gradient = GradientColor(
+                [
+                    (0, colors.low),
+                    (bands.medium, colors.medium),
+                    (bands.elevated, colors.elevated),
+                    (bands.high, colors.high),
+                    (bands.critical, colors.critical),
+                ]
+            )
+
+        # Render each character position
+        for i in range(width):
+            char_start_unit = i * 8
+            char_end_unit = (i + 1) * 8
+
+            if filled_units >= char_end_unit:
+                # Fully filled character
+                char = blocks[8]
+            elif filled_units <= char_start_unit:
+                # Empty character
+                char = "░"
+            else:
+                # Partially filled
+                partial_units = filled_units - char_start_unit
+                char = blocks[partial_units]
+
+            # Calculate what score this position represents (for coloring)
+            position_score = (i / width) * critical
+            color = self._gradient(position_score)
+
+            if filled_units > char_start_unit:
+                result.append(char, style=color)
+            else:
+                result.append(char, style="dim")
+
+        # Add overflow indicator when score exceeds critical
+        if fill_ratio > 1.0:
+            result.append(">>>", style="bold red")
+
+        return result
+
     def _update_gauge(self) -> None:
         """Update the gauge line display."""
         try:
@@ -352,19 +429,28 @@ class HeaderBar(Static):
         except NoMatches:
             return
 
+        bands = self.app.config.bands
+
         if not self.connected:
-            gauge_left.update("STRESS ░░░░░░░░░░░░░░░░░░░░ ---/100   DISCONNECTED")
+            empty_bar = Text("░" * 30, style="dim")
+            gauge_text = Text("STRESS ")
+            gauge_text.append_text(empty_bar)
+            gauge_text.append(f" ---/{bands.critical}   DISCONNECTED")
+            gauge_left.update(gauge_text)
             gauge_right.update("Run: rogue-hunter daemon")
             return
 
-        filled = self.score // 5
-        bar = "█" * filled + "░" * (20 - filled)
-        bands = self.app.config.bands
         tier = get_tier_name(self.score, bands.elevated, bands.critical)
         uptime = format_duration(time.time() - self._start_time)
-        gauge_left.update(
-            f"STRESS {bar} {self.score:3d}/100   {tier}   {self._timestamp} ({uptime})"
+
+        # Build the gauge line with colored bar
+        gauge_text = Text("STRESS ")
+        gauge_text.append_text(self._render_stress_bar(self.score))
+        gauge_text.append(
+            f" {self.score:3d}/{bands.critical}   {tier}   {self._timestamp} ({uptime})"
         )
+
+        gauge_left.update(gauge_text)
         gauge_right.update(f"{self._process_count} procs   #{self._sample_count}")
 
     def update_from_sample(

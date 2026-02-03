@@ -295,10 +295,13 @@ class TUIColorsConfig:
 class SparklineConfig:
     """Configuration for the sparkline widget in the header.
 
-    The sparkline shows stress history as a mini chart using Braille characters.
+    The sparkline shows stress history as a mini chart. Uses solid block characters
+    for NORMAL orientation, braille for INVERTED/MIRRORED.
     """
 
-    height: int = 2  # Number of character rows (1-4). Each row adds 8 vertical levels.
+    height: int = 3  # Number of character rows (1-4). Each row adds 8 vertical levels.
+    min_value: int = 10  # Scores at or below this show as empty
+    max_value: int = 60  # Scores at or above this show as full
     orientation: str = "normal"  # "normal" (up), "inverted" (down), "mirrored" (waveform)
     direction: str = "rtl"  # "rtl" (newest right, scrolls left), "ltr" (newest left, scrolls right)
 

@@ -51,9 +51,9 @@ class TestSparklineScaling:
 
 
 class TestSparklineColumnRendering:
-    """Tests for single column rendering with Braille characters."""
+    """Tests for single column rendering with block characters (NORMAL mode)."""
 
-    # Normal Braille chars: " ⡀⣀⣄⣤⣦⣶⣷⣿"
+    # Block chars for NORMAL: " ▁▂▃▄▅▆▇█"
 
     def test_render_column_empty(self) -> None:
         """Level 0 renders as space in all rows."""
@@ -66,29 +66,29 @@ class TestSparklineColumnRendering:
         sparkline = Sparkline(height=2)
         chars = sparkline._render_column(8)
         # chars[0] is bottom row, chars[1] is top row
-        assert chars[0] == "⣿"  # Bottom full
+        assert chars[0] == "█"  # Bottom full
         assert chars[1] == " "  # Top empty
 
     def test_render_column_partial_bottom(self) -> None:
         """Partial level fills bottom row partially."""
         sparkline = Sparkline(height=2)
         chars = sparkline._render_column(4)
-        assert chars[0] == "⣤"  # Half filled braille
+        assert chars[0] == "▄"  # Half filled block
         assert chars[1] == " "
 
     def test_render_column_overflow_to_top(self) -> None:
         """Level > 8 overflows to top row."""
         sparkline = Sparkline(height=2)
         chars = sparkline._render_column(12)
-        assert chars[0] == "⣿"  # Bottom full
-        assert chars[1] == "⣤"  # Top partial (level 4)
+        assert chars[0] == "█"  # Bottom full
+        assert chars[1] == "▄"  # Top partial (level 4)
 
     def test_render_column_full_both_rows(self) -> None:
         """Max level fills both rows."""
         sparkline = Sparkline(height=2)
         chars = sparkline._render_column(16)
-        assert chars[0] == "⣿"
-        assert chars[1] == "⣿"
+        assert chars[0] == "█"
+        assert chars[1] == "█"
 
 
 class TestSparklineInvertedMode:
@@ -112,37 +112,37 @@ class TestSparklineInvertedMode:
         assert chars[1] == "⠛"  # Bottom partial (inverted braille)
 
 
-class TestSparklineBrailleChars:
-    """Tests for Braille character sets."""
+class TestSparklineCharacterSets:
+    """Tests for character set selection (blocks for NORMAL, braille for others)."""
 
-    def test_normal_braille_chars(self) -> None:
-        """Normal mode uses bottom-to-top braille chars."""
+    def test_normal_uses_block_chars(self) -> None:
+        """Normal mode uses solid block characters."""
         sparkline = Sparkline(height=1)
-        # Level 4 should be half-filled braille (bottom to top)
+        # Level 4 should be half-filled block
         chars = sparkline._render_column(4)
-        assert chars[0] == "⣤"
+        assert chars[0] == "▄"
 
-    def test_normal_braille_empty(self) -> None:
+    def test_normal_block_empty(self) -> None:
         """Normal mode uses space for empty."""
         sparkline = Sparkline(height=1)
         chars = sparkline._render_column(0)
         assert chars[0] == " "
 
-    def test_normal_braille_full(self) -> None:
-        """Normal mode uses full braille for max."""
+    def test_normal_block_full(self) -> None:
+        """Normal mode uses full block for max."""
         sparkline = Sparkline(height=1)
         chars = sparkline._render_column(8)
-        assert chars[0] == "⣿"
+        assert chars[0] == "█"
 
-    def test_inverted_braille_chars(self) -> None:
-        """Inverted mode uses top-to-bottom braille chars."""
+    def test_inverted_uses_braille_chars(self) -> None:
+        """Inverted mode uses top-to-bottom braille chars (no block equivalent)."""
         sparkline = Sparkline(height=1, orientation=SparklineOrientation.INVERTED)
         # Level 4 should be half-filled inverted braille (top to bottom)
         chars = sparkline._render_column(4)
         assert chars[0] == "⠛"
 
     def test_inverted_braille_full(self) -> None:
-        """Inverted mode uses full braille for max (same as normal)."""
+        """Inverted mode uses full braille for max."""
         sparkline = Sparkline(height=1, orientation=SparklineOrientation.INVERTED)
         chars = sparkline._render_column(8)
         assert chars[0] == "⣿"
@@ -266,9 +266,9 @@ class TestSparklineRender:
         """Single value renders correctly."""
         sparkline = Sparkline(height=1, max_value=100)
         sparkline._width = 10
-        sparkline.data = [100]  # Max value = full braille
+        sparkline.data = [100]  # Max value = full block
         result = sparkline.render()
-        assert "⣿" in str(result)
+        assert "█" in str(result)
 
     def test_render_multirow_joins_with_newlines(self) -> None:
         """Multi-row render joins rows with newlines."""
@@ -492,8 +492,8 @@ class TestSparklineDirection:
         sparkline._width = 5
         sparkline.data = [100, 100]  # 2 values, width 5
         result = sparkline.render()
-        # Should be "   ⣿⣿" (3 spaces, then 2 full chars)
-        assert str(result) == "   ⣿⣿"
+        # Should be "   ██" (3 spaces, then 2 full blocks)
+        assert str(result) == "   ██"
 
     def test_ltr_left_aligns_during_fill(self) -> None:
         """LTR mode left-aligns data during fill phase (pads right)."""
@@ -501,29 +501,29 @@ class TestSparklineDirection:
         sparkline._width = 5
         sparkline.data = [100, 100]  # 2 values, width 5
         result = sparkline.render()
-        # Should be "⣿⣿   " (2 full chars, then 3 spaces)
+        # Should be "██   " (2 full blocks, then 3 spaces)
         # Note: LTR reverses data order, so newest is on left
-        assert str(result) == "⣿⣿   "
+        assert str(result) == "██   "
 
     def test_rtl_data_order_oldest_left(self) -> None:
         """RTL mode: oldest data on left, newest on right."""
         sparkline = Sparkline(height=1, max_value=100, direction=SparklineDirection.RTL)
         sparkline._width = 3
-        # Values: 25% → level 2 (⣀), 50% → level 4 (⣤), 100% → level 8 (⣿)
+        # Values: 25% → level 2 (▂), 50% → level 4 (▄), 100% → level 8 (█)
         sparkline.data = [25, 50, 100]
         result = sparkline.render()
         # Oldest (25) on left, newest (100) on right
-        assert str(result) == "⣀⣤⣿"
+        assert str(result) == "▂▄█"
 
     def test_ltr_data_order_newest_left(self) -> None:
         """LTR mode: newest data on left, oldest on right."""
         sparkline = Sparkline(height=1, max_value=100, direction=SparklineDirection.LTR)
         sparkline._width = 3
-        # Values: 25% → level 2 (⣀), 50% → level 4 (⣤), 100% → level 8 (⣿)
+        # Values: 25% → level 2 (▂), 50% → level 4 (▄), 100% → level 8 (█)
         sparkline.data = [25, 50, 100]
         result = sparkline.render()
         # Newest (100) on left, oldest (25) on right (reversed)
-        assert str(result) == "⣿⣤⣀"
+        assert str(result) == "█▄▂"
 
     def test_default_direction_is_rtl(self) -> None:
         """Default direction is RTL."""
