@@ -118,6 +118,7 @@ def test_tui_handle_socket_data_updates_widgets():
     # Create mock widgets
     mock_header = MagicMock()
     mock_process_table = MagicMock()
+    mock_recently_calm = MagicMock()
     mock_event_history = MagicMock()
 
     # Patch query_one to return our mocks
@@ -126,6 +127,8 @@ def test_tui_handle_socket_data_updates_widgets():
             return mock_header
         elif selector == "#main-area":
             return mock_process_table
+        elif selector == "#recently-calm":
+            return mock_recently_calm
         elif selector == "#event-history":
             return mock_event_history
         raise ValueError(f"Unknown selector: {selector}")
@@ -167,11 +170,16 @@ def test_tui_handle_socket_data_updates_widgets():
     assert call_args[0][1] == 500  # process_count
     assert call_args[0][2] == 10  # sample_count
 
-    # Verify process table was updated with rogues
+    # Verify process table was updated with rogues (no timestamp arg anymore)
     mock_process_table.update_rogues.assert_called_once()
     rogues_arg = mock_process_table.update_rogues.call_args[0][0]
     assert len(rogues_arg) == 1
     assert rogues_arg[0]["command"] == "test_proc"
+
+    # Verify recently calm panel was updated with rogues and timestamp
+    mock_recently_calm.update_rogues.assert_called_once()
+    calm_rogues_arg = mock_recently_calm.update_rogues.call_args[0][0]
+    assert len(calm_rogues_arg) == 1
 
     # Verify event history was refreshed (every 10 samples)
     mock_event_history.refresh_from_db.assert_called_once()

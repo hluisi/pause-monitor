@@ -486,7 +486,7 @@ class ProcessTable(Static):
 
     Uses DataTable with Rich Text objects for row-level styling.
     Shows dominant resource and disproportionality for each process.
-    Includes decay: processes stay visible (dimmed) for 10s after leaving rogues.
+    Displays exactly what's in the current sample — no decay logic.
     """
 
     DEFAULT_CSS = """
@@ -510,8 +510,6 @@ class ProcessTable(Static):
         super().__init__(**kwargs)
         self._table: DataTable | None = None
         self._prev_scores: dict[int, int] = {}
-        self._cached_rogues: dict[int, dict] = {}
-        self._last_seen: dict[int, float] = {}
 
     def compose(self) -> ComposeResult:
         """Create the process table using DataTable."""
@@ -537,7 +535,7 @@ class ProcessTable(Static):
         )
         self.set_disconnected()
 
-    def _get_band_style(self, score: int, decayed: bool) -> str:
+    def _get_band_style(self, score: int) -> str:
         """Map score to Rich style string using config colors."""
         bands = self.app.config.bands
         colors = self.app.config.tui.colors.bands
@@ -557,27 +555,20 @@ class ProcessTable(Static):
         if score >= bands.elevated and style:
             style = f"bold {style}"
 
-        return f"{style} dim" if decayed else style
+        return style
 
-    def _get_trend_style(self, trend: str, decayed: bool) -> str:
+    def _get_trend_style(self, trend: str) -> str:
         """Get style for trend indicator based on config colors."""
-        if decayed:
-            return self.app.config.tui.colors.trends.decayed
-
         trends = self.app.config.tui.colors.trends
         trend_colors = {
             "▲": trends.worsening,
             "▽": trends.improving,
             "●": trends.stable,
-            "○": trends.decayed,
         }
         return trend_colors.get(trend, "")
 
-    def _get_state_style(self, state: str, decayed: bool) -> str:
+    def _get_state_style(self, state: str) -> str:
         """Get style for process state based on config colors."""
-        if decayed:
-            return "dim"
-
         state_colors = self.app.config.tui.colors.process_state
         state_map = {
             "running": state_colors.running,
@@ -604,7 +595,6 @@ class ProcessTable(Static):
         state: str,
         dominant_resource: str,
         disproportionality: float,
-        decayed: bool = False,
     ) -> list[Text]:
         """Build styled row cells using Rich Text objects.
 
@@ -620,10 +610,10 @@ class ProcessTable(Static):
         colors = self.app.config.tui.colors
 
         # Get styles for each element type
-        band_style = self._get_band_style(score_val, decayed)
-        trend_style = self._get_trend_style(trend, decayed)
-        state_style = self._get_state_style(state, decayed)
-        pid_style = "dim" if decayed else colors.pid.default
+        band_style = self._get_band_style(score_val)
+        trend_style = self._get_trend_style(trend)
+        state_style = self._get_state_style(state)
+        pid_style = colors.pid.default
         score_style = f"bold {band_style}" if band_style else "bold"
 
         # Build dominant display using format_dominant_info
@@ -643,56 +633,28 @@ class ProcessTable(Static):
             Text(dominant_display, style=band_style),
         ]
 
-    def update_rogues(self, rogues: list[dict], now: float) -> None:
+    def update_rogues(self, rogues: list[dict]) -> None:
         """Update with rogue process list.
 
         Rogues contain ProcessScore data serialized as dicts.
+        Displays exactly what's in the current sample — no decay logic.
         """
         self.remove_class("disconnected")
         if not self._table:
             return
 
-        # Update cache with current rogues
-        current_pids: set[int] = set()
-        for rogue in rogues:
-            pid = rogue.get("pid")
-            if pid is not None:
-                current_pids.add(pid)
-                self._cached_rogues[pid] = rogue.copy()
-                self._last_seen[pid] = now
-
-        # Build display list: current + decayed
-        display_list: list[tuple[dict, bool]] = []
-
-        for rogue in rogues:
-            display_list.append((rogue, False))
-
-        for pid, cached in list(self._cached_rogues.items()):
-            if pid not in current_pids:
-                age = now - self._last_seen.get(pid, 0)
-                if age < self.app.config.tui.decay_seconds:
-                    display_list.append((cached, True))
-                else:
-                    del self._cached_rogues[pid]
-                    self._last_seen.pop(pid, None)
-
-        # Sort by score (plain int value)
-        display_list.sort(
-            key=lambda x: x[0]["score"],
-            reverse=True,
-        )
+        # Sort by score descending
+        sorted_rogues = sorted(rogues, key=lambda x: x["score"], reverse=True)
 
         self._table.clear()
 
-        for rogue, is_decayed in display_list:
+        for rogue in sorted_rogues:
             pid = rogue.get("pid", 0)
             score = rogue["score"]
 
+            # Trend based on previous score
             prev_score = self._prev_scores.get(pid, score)
-
-            if is_decayed:
-                trend = "○"
-            elif score > prev_score:
+            if score > prev_score:
                 trend = "▲"
             elif score < prev_score:
                 trend = "▽"
@@ -726,7 +688,6 @@ class ProcessTable(Static):
                     str(state),
                     dominant_resource,
                     disproportionality,
-                    decayed=is_decayed,
                 )
             )
 
@@ -748,9 +709,123 @@ class ProcessTable(Static):
                 "---",  # state
                 "cpu",  # dominant_resource
                 0.0,  # disproportionality
-                decayed=False,
             )
             self._table.add_row(*row)
+
+
+class RecentlyCalmPanel(Static):
+    """Panel showing processes that recently dropped out of the rogues list.
+
+    Tracks processes that were in the rogues list but aren't anymore.
+    Shows them dimmed for decay_seconds before removing.
+    Displays: PID, Process, Score (frozen at last-seen values).
+    """
+
+    DEFAULT_CSS = """
+    RecentlyCalmPanel {
+        width: 25%;
+        height: 100%;
+        border: solid $primary;
+        border-title-align: left;
+    }
+
+    RecentlyCalmPanel DataTable {
+        width: 100%;
+        height: 100%;
+    }
+    """
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self._table: DataTable | None = None
+        self._cached_rogues: dict[int, dict] = {}
+        self._last_seen: dict[int, float] = {}
+        self._current_pids: set[int] = set()
+
+    def compose(self) -> ComposeResult:
+        """Create the panel."""
+        yield DataTable(id="calm-table", zebra_stripes=True, cursor_type="none")
+
+    def on_mount(self) -> None:
+        """Set up table columns."""
+        self.border_title = "RECENTLY CALM"
+        self._table = self.query_one("#calm-table", DataTable)
+        self._table.add_columns(
+            Text("PID", justify="center"),
+            Text("Process", justify="center"),
+            Text("Score", justify="center"),
+        )
+
+    def _get_band_style(self, score: int) -> str:
+        """Map score to dimmed Rich style string."""
+        bands = self.app.config.bands
+        colors = self.app.config.tui.colors.bands
+
+        if score >= bands.critical:
+            style = colors.critical
+        elif score >= bands.high:
+            style = colors.high
+        elif score >= bands.elevated:
+            style = colors.elevated
+        elif score >= bands.medium:
+            style = colors.medium
+        else:
+            style = colors.low
+
+        return f"{style} dim"
+
+    def update_rogues(self, rogues: list[dict], now: float) -> None:
+        """Update with current rogues to detect what dropped out.
+
+        Args:
+            rogues: Current rogues list from daemon.
+            now: Current timestamp for decay timing.
+        """
+        if not self._table:
+            return
+
+        # Track current PIDs
+        current_pids = {r.get("pid") for r in rogues if r.get("pid") is not None}
+
+        # Cache any new rogues (so we have their data when they drop)
+        for rogue in rogues:
+            pid = rogue.get("pid")
+            if pid is not None:
+                self._cached_rogues[pid] = rogue.copy()
+                self._last_seen[pid] = now
+
+        # Find processes that dropped out (were cached but not in current)
+        decay_seconds = self.app.config.tui.decay_seconds
+        dropped: list[tuple[int, dict]] = []
+
+        for pid, cached in list(self._cached_rogues.items()):
+            if pid not in current_pids:
+                age = now - self._last_seen.get(pid, 0)
+                if age < decay_seconds:
+                    dropped.append((pid, cached))
+                else:
+                    # Expired — remove from cache
+                    del self._cached_rogues[pid]
+                    self._last_seen.pop(pid, None)
+
+        # Sort by score descending
+        dropped.sort(key=lambda x: x[1].get("score", 0), reverse=True)
+
+        # Rebuild table
+        self._table.clear()
+
+        for pid, cached in dropped:
+            score = cached.get("score", 0)
+            command = str(cached.get("command", "?"))
+            style = self._get_band_style(score)
+
+            self._table.add_row(
+                Text(str(pid).rjust(6), style="dim"),
+                Text(command, style=style),
+                Text(str(score).rjust(3), style=style),
+            )
+
+        self._current_pids = current_pids
 
 
 class EventHistoryPanel(Static):
@@ -943,8 +1018,17 @@ class RogueHunterApp(App):
         height: 1fr;
     }
 
-    #event-history {
+    #bottom-panels {
         height: 12;
+        layout: horizontal;
+    }
+
+    #recently-calm {
+        width: 25%;
+    }
+
+    #event-history {
+        width: 75%;
     }
     """
 
@@ -968,7 +1052,11 @@ class RogueHunterApp(App):
         """Create the TUI layout."""
         yield HeaderBar(id="header")
         yield ProcessTable(id="main-area")
-        yield EventHistoryPanel(id="event-history")
+        yield Horizontal(
+            RecentlyCalmPanel(id="recently-calm"),
+            EventHistoryPanel(id="event-history"),
+            id="bottom-panels",
+        )
         yield Footer()
 
     def on_mount(self) -> None:
@@ -1163,9 +1251,15 @@ class RogueHunterApp(App):
         except NoMatches:
             pass
 
-        # Update process table
+        # Update process table (pure current sample)
         try:
-            self.query_one("#main-area", ProcessTable).update_rogues(rogues, now)
+            self.query_one("#main-area", ProcessTable).update_rogues(rogues)
+        except NoMatches:
+            pass
+
+        # Update recently calm panel (tracks what dropped out)
+        try:
+            self.query_one("#recently-calm", RecentlyCalmPanel).update_rogues(rogues, now)
         except NoMatches:
             pass
 
