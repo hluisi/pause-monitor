@@ -544,7 +544,15 @@ class Daemon:
 
                 # Update per-process tracking
                 if self.tracker is not None:
-                    self.tracker.update(samples.rogues)
+                    # Build tracker input: above threshold + tracked PIDs (for exit scores)
+                    threshold = self.config.bands.tracking_threshold
+                    tracked_pids = set(self.tracker.tracked.keys())
+                    tracker_input = [
+                        score
+                        for score in samples.all_by_pid.values()
+                        if score.score >= threshold or score.pid in tracked_pids
+                    ]
+                    self.tracker.update(tracker_input)
 
                 # Update heartbeat stats
                 heartbeat_count += 1

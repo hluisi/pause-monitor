@@ -132,6 +132,97 @@ def test_tracker_closes_event_when_score_drops(tmp_path):
     conn.close()
 
 
+def test_tracker_writes_exit_snapshot_on_score_drop(tmp_path):
+    """ProcessTracker writes exit snapshot with final metrics when score drops below threshold."""
+    from rogue_hunter.config import BandsConfig
+    from rogue_hunter.storage import (
+        get_connection,
+        get_open_events,
+        get_process_events,
+        get_process_snapshots,
+        init_database,
+    )
+    from rogue_hunter.tracker import SNAPSHOT_ENTRY, SNAPSHOT_EXIT, ProcessTracker
+
+    db_path = tmp_path / "test.db"
+    init_database(db_path)
+    conn = get_connection(db_path)
+
+    # exit_stability_samples=1 means closes on first sample below threshold
+    bands = BandsConfig(tracking_band="elevated", exit_stability_samples=1)
+    tracker = ProcessTracker(conn, bands, boot_time=1706000000)
+
+    # Enter bad state with high CPU
+    tracker.update([make_score(pid=123, score=50, cpu=80.0, captured_at=1706000100.0)])
+    assert len(get_open_events(conn, 1706000000)) == 1
+
+    # Get event_id before it closes
+    events = get_process_events(conn, boot_time=1706000000)
+    event_id = events[0]["id"]
+
+    # Exit bad state with lower CPU
+    tracker.update([make_score(pid=123, score=30, cpu=15.0, captured_at=1706000200.0)])
+    assert len(get_open_events(conn, 1706000000)) == 0
+
+    # Verify snapshots: should have entry + exit
+    snapshots = get_process_snapshots(conn, event_id)
+    assert len(snapshots) == 2
+
+    entry_snap = next(s for s in snapshots if s["snapshot_type"] == SNAPSHOT_ENTRY)
+    exit_snap = next(s for s in snapshots if s["snapshot_type"] == SNAPSHOT_EXIT)
+
+    # Entry snapshot has high score/cpu from when we entered
+    assert entry_snap["score"] == 50
+    assert entry_snap["cpu"] == 80.0
+
+    # Exit snapshot has dropped score/cpu from when we exited
+    assert exit_snap["score"] == 30
+    assert exit_snap["cpu"] == 15.0
+    assert exit_snap["captured_at"] == 1706000200.0
+
+    conn.close()
+
+
+def test_tracker_no_exit_snapshot_when_pid_disappears(tmp_path):
+    """ProcessTracker closes event without exit snapshot when PID is no longer present."""
+    from rogue_hunter.config import BandsConfig
+    from rogue_hunter.storage import (
+        get_connection,
+        get_open_events,
+        get_process_events,
+        get_process_snapshots,
+        init_database,
+    )
+    from rogue_hunter.tracker import SNAPSHOT_ENTRY, ProcessTracker
+
+    db_path = tmp_path / "test.db"
+    init_database(db_path)
+    conn = get_connection(db_path)
+
+    bands = BandsConfig(tracking_band="elevated")
+    tracker = ProcessTracker(conn, bands, boot_time=1706000000)
+
+    # Enter bad state
+    tracker.update([make_score(pid=123, score=50, captured_at=1706000100.0)])
+    assert len(get_open_events(conn, 1706000000)) == 1
+
+    # Get event_id before it closes
+    events = get_process_events(conn, boot_time=1706000000)
+    event_id = events[0]["id"]
+
+    # PID disappears entirely (not in update list)
+    tracker.update([make_score(pid=999, score=50, captured_at=1706000200.0)])
+    assert len(get_open_events(conn, 1706000000)) == 1  # 999 is now tracked
+    assert 123 not in tracker.tracked  # 123 was closed
+
+    # Verify snapshots: only entry, no exit (we don't have exit data)
+    snapshots = get_process_snapshots(conn, event_id)
+    assert len(snapshots) == 1
+    assert snapshots[0]["snapshot_type"] == SNAPSHOT_ENTRY
+
+    conn.close()
+
+
 def test_tracker_updates_peak(tmp_path):
     """ProcessTracker updates peak when score increases."""
     from rogue_hunter.config import BandsConfig

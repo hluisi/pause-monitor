@@ -8,7 +8,6 @@ Philosophy: TUI = Real-time window into daemon state. Nothing more.
 
 import asyncio
 import time
-from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
@@ -17,10 +16,16 @@ from textual.app import App, ComposeResult, ScreenStackError
 from textual.containers import Horizontal
 from textual.css.query import NoMatches
 from textual.reactive import reactive
-from textual.widgets import DataTable, Footer, Label, RichLog, Static
+from textual.widgets import DataTable, Footer, Label, Static
 
 from rogue_hunter.config import Config
 from rogue_hunter.socket_client import SocketClient
+from rogue_hunter.storage import (
+    get_connection,
+    get_forensic_captures,
+    get_open_events,
+    get_process_events,
+)
 from rogue_hunter.tui.sparkline import (
     GradientColor,
     Sparkline,
@@ -662,49 +667,21 @@ class ProcessTable(Static):
             self._table.add_row(*row)
 
 
-@dataclass
-class DisplayTrackedProcess:
-    """A process being tracked in the TUI display.
+class EventHistoryPanel(Static):
+    """Panel showing process events from the database.
 
-    Note: This is distinct from tracker.py's TrackedProcess which manages
-    database event lifecycle. This class is purely for TUI display state.
-    """
-
-    command: str
-    entry_time: float
-    peak_score: int
-    dominant_resource: str = "cpu"  # cpu, gpu, memory, disk, wakeups
-    disproportionality: float = 0.0  # How much this process dominates the resource
-    exit_time: float | None = None
-    exit_reason: str = ""
-
-    @property
-    def duration(self) -> float:
-        """Duration in seconds."""
-        end = self.exit_time if self.exit_time else time.time()
-        return end - self.entry_time
-
-    @property
-    def is_active(self) -> bool:
-        """Whether still being tracked."""
-        return self.exit_time is None
-
-
-class TrackedEventsPanel(Static):
-    """Panel showing tracked processes - active and historical.
-
-    Deduplicates by command name: shows ONE entry per process (highest peak).
-    Active processes shown first, then history sorted by peak score.
+    Displays recent tracking events with forensics indicators.
+    Reads directly from the database for persistence across reconnects.
     """
 
     DEFAULT_CSS = """
-    TrackedEventsPanel {
+    EventHistoryPanel {
         height: 100%;
         border: solid $primary;
         border-title-align: left;
     }
 
-    TrackedEventsPanel DataTable {
+    EventHistoryPanel DataTable {
         width: 100%;
         height: 100%;
     }
@@ -713,232 +690,155 @@ class TrackedEventsPanel(Static):
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self._table: DataTable | None = None
-        # command -> DisplayTrackedProcess for active tracking (by command name, not PID)
-        self._active: dict[str, DisplayTrackedProcess] = {}
-        # command -> DisplayTrackedProcess for history (one entry per command, highest peak)
-        self._history: dict[str, DisplayTrackedProcess] = {}
-        # Track PIDs currently above threshold
-        self._tracked_pids: set[int] = set()
+        self._db_conn: Any | None = None
+        self._boot_time: int = 0
+        # Cache forensics status: event_id -> bool (has captures)
+        self._forensics_cache: dict[int, bool] = {}
 
     def compose(self) -> ComposeResult:
         """Create the panel."""
-        yield DataTable(id="tracked-table", zebra_stripes=True, cursor_type="none")
+        yield DataTable(id="events-table", zebra_stripes=True, cursor_type="none")
 
     def on_mount(self) -> None:
-        """Set up table."""
-        self.border_title = "TRACKED"
-        self._table = self.query_one("#tracked-table", DataTable)
+        """Set up table and database connection."""
+        self.border_title = "EVENT HISTORY"
+        self._table = self.query_one("#events-table", DataTable)
         self._table.add_column("Time", width=8)
-        self._table.add_column("Process")
+        self._table.add_column("Process", width=15)
         self._table.add_column("Peak", width=4)
-        self._table.add_column("Dur", width=6)
-        self._table.add_column("Dominant", width=10)  # Resource and disproportionality
-        self._table.add_column("Status", width=8)
+        self._table.add_column("Band", width=8)
+        self._table.add_column("Dur", width=7)
+        self._table.add_column("Status", width=10)
+        self._table.add_column("📸", width=2)  # Forensics indicator
         self._table.show_header = True
 
-    def _extract_score(self, rogue: dict) -> int:
-        """Extract score value from rogue dict."""
-        return rogue["score"]
+        # Open read-only database connection
+        db_path = self.app.config.db_path
+        if db_path.exists():
+            self._db_conn = get_connection(db_path)
+            # Get boot time from daemon_state if available
+            try:
+                row = self._db_conn.execute(
+                    "SELECT value FROM daemon_state WHERE key = 'boot_time'"
+                ).fetchone()
+                if row:
+                    self._boot_time = int(row[0])
+            except Exception:
+                pass
+            self.refresh_from_db()
 
-    def update_tracking(self, rogues: list[dict], now: float) -> None:
-        """Update tracking based on current rogues.
+    def on_unmount(self) -> None:
+        """Close database connection."""
+        if self._db_conn:
+            self._db_conn.close()
+            self._db_conn = None
 
-        Tracks by COMMAND NAME (not PID) to deduplicate.
-        """
-        # Build current state: command -> best rogue for processes above threshold
-        current_above: dict[str, dict] = {}
-        current_pids: set[int] = set()
-        tracking_threshold = self.app.config.bands.elevated
+    def _has_forensics(self, event_id: int) -> bool:
+        """Check if event has forensic captures (cached)."""
+        if event_id in self._forensics_cache:
+            return self._forensics_cache[event_id]
 
-        for r in rogues:
-            score = self._extract_score(r)
-            if score >= tracking_threshold:
-                cmd = r.get("command", "?")
-                current_pids.add(r.get("pid", 0))
-                # Keep the highest scoring entry per command
-                if cmd in current_above:
-                    existing_score = self._extract_score(current_above[cmd])
-                else:
-                    existing_score = 0
-                if cmd not in current_above or score > existing_score:
-                    current_above[cmd] = r
+        if not self._db_conn:
+            return False
 
-        # Check for new/updated active entries
-        for cmd, rogue in current_above.items():
-            score = self._extract_score(rogue)
-            dominant_resource = rogue.get("dominant_resource", "cpu")
-            disproportionality = rogue.get("disproportionality", 0.0)
+        captures = get_forensic_captures(self._db_conn, event_id)
+        has_captures = len(captures) > 0
+        self._forensics_cache[event_id] = has_captures
+        return has_captures
 
-            if cmd not in self._active:
-                # New tracking entry
-                self._active[cmd] = DisplayTrackedProcess(
-                    command=cmd,
-                    entry_time=now,
-                    peak_score=score,
-                    dominant_resource=dominant_resource,
-                    disproportionality=disproportionality,
-                )
-            else:
-                # Update peak if higher
-                tracked = self._active[cmd]
-                if score > tracked.peak_score:
-                    tracked.peak_score = score
-                    tracked.dominant_resource = dominant_resource
-                    tracked.disproportionality = disproportionality
+    def _get_band_color(self, band: str) -> str:
+        """Get color for a band from config."""
+        colors = self.app.config.tui.colors.bands
+        return {
+            "low": colors.low,
+            "medium": colors.medium,
+            "elevated": colors.elevated,
+            "high": colors.high,
+            "critical": colors.critical,
+        }.get(band, "white")
 
-        # Check for exits (commands that were active but no longer above threshold)
-        for cmd in list(self._active.keys()):
-            if cmd not in current_above:
-                tracked = self._active.pop(cmd)
-                tracked.exit_time = now
-                tracked.exit_reason = "dropped"
-
-                # Add to history, keeping only highest peak per command
-                existing = self._history.get(cmd)
-                if existing is None or tracked.peak_score > existing.peak_score:
-                    self._history[cmd] = tracked
-
-        # Limit history size (keep highest peaks)
-        max_history = self.app.config.tui.tracked_max_history
-        if len(self._history) > max_history:
-            sorted_history = sorted(
-                self._history.items(),
-                key=lambda x: x[1].peak_score,
-                reverse=True,
-            )
-            self._history = dict(sorted_history[:max_history])
-
-        self._tracked_pids = current_pids
-        self._refresh_display()
-
-    def _refresh_display(self) -> None:
-        """Refresh the table display."""
-        if not self._table:
+    def refresh_from_db(self) -> None:
+        """Refresh display from database."""
+        if not self._table or not self._db_conn:
             return
 
         self._table.clear()
 
         # Get config values
         status_colors = self.app.config.tui.colors.status
-        cmd_truncate = self.app.config.tui.command_truncate_length
+        max_events = self.app.config.tui.tracked_max_history
 
-        # Show active tracking first (sorted by peak score desc)
-        active_sorted = sorted(
-            self._active.values(),
-            key=lambda t: t.peak_score,
-            reverse=True,
+        # Get open events first (currently tracking)
+        open_events = []
+        if self._boot_time:
+            open_events = get_open_events(self._db_conn, self._boot_time)
+
+        # Get recent closed events
+        recent_events = get_process_events(
+            self._db_conn,
+            boot_time=self._boot_time if self._boot_time else None,
+            limit=max_events,
         )
-        for tracked in active_sorted:
-            time_str = datetime.fromtimestamp(tracked.entry_time).strftime("%H:%M:%S")
-            dominant_display = format_dominant_info(
-                tracked.dominant_resource, tracked.disproportionality
-            )
-            duration = format_duration(tracked.duration)
 
-            self._table.add_row(
-                time_str,
-                tracked.command[:cmd_truncate],
-                str(tracked.peak_score),
-                duration,
-                dominant_display,
-                f"[{status_colors.active}]active[/]",
-            )
+        # Build combined list: open events first, then recent (excluding open)
+        open_ids = {e["id"] for e in open_events}
+        combined = list(open_events)
+        for event in recent_events:
+            if event["id"] not in open_ids:
+                combined.append(event)
 
-        # Show history (sorted by peak score desc)
-        history_sorted = sorted(
-            self._history.values(),
-            key=lambda t: t.peak_score,
-            reverse=True,
-        )
-        for tracked in history_sorted:
-            time_str = datetime.fromtimestamp(tracked.entry_time).strftime("%H:%M:%S")
-            dominant_display = format_dominant_info(
-                tracked.dominant_resource, tracked.disproportionality
-            )
-            duration = format_duration(tracked.duration)
+        # Limit total
+        combined = combined[:max_events]
 
-            self._table.add_row(
-                time_str,
-                tracked.command[:cmd_truncate],
-                str(tracked.peak_score),
-                duration,
-                dominant_display,
-                f"[{status_colors.ended}]ended[/]",
-            )
+        now = time.time()
 
+        for event in combined:
+            entry_time = event.get("entry_time", 0)
+            exit_time = event.get("exit_time")
+            peak_score = event.get("peak_score", 0)
+            peak_band = event.get("peak_band", "low")
+            command = event.get("command", "?")
+            event_id = event.get("id", 0)
 
-class ActivityLog(Static):
-    """Activity log showing tier transitions using RichLog for auto-scroll."""
+            # Format time
+            time_str = datetime.fromtimestamp(entry_time).strftime("%H:%M:%S")
 
-    DEFAULT_CSS = """
-    ActivityLog {
-        height: 100%;
-        border: solid $primary;
-        border-title-align: left;
-    }
-
-    ActivityLog RichLog {
-        width: 100%;
-        height: 100%;
-    }
-    """
-
-    def __init__(self, **kwargs: Any) -> None:
-        super().__init__(**kwargs)
-        self._prev_tier = "NORMAL"
-
-    def compose(self) -> ComposeResult:
-        """Create container - RichLog created in on_mount where config is available."""
-        # RichLog created in on_mount to access config for max_lines
-        return
-        yield  # Makes this a generator (never reached)
-
-    def on_mount(self) -> None:
-        """Set up RichLog with config values and initial state."""
-        self.border_title = "ACTIVITY"
-        max_entries = self.app.config.tui.activity_max_entries
-        log = RichLog(id="activity-log", markup=True, max_lines=max_entries)
-        self.mount(log)
-        self._add_entry("Waiting for connection...", "normal")
-
-    def _add_entry(self, message: str, level: str = "normal") -> None:
-        """Add a log entry with colored timestamp using config colors."""
-        timestamp = datetime.now().strftime("%H:%M:%S")
-        colors = self.app.config.tui.colors
-        # Use band colors for severity, but border "normal" color for healthy state
-        # (band "low" may be empty since healthy processes don't need color)
-        color = {
-            "high": colors.bands.critical,
-            "elevated": colors.bands.elevated,
-            "normal": colors.borders.normal,  # Use border green for healthy
-        }.get(level, "white")
-        try:
-            log = self.query_one("#activity-log", RichLog)
-            log.write(f"[{color}]{timestamp}  {message}[/{color}]")
-        except NoMatches:
-            pass
-
-    def check_transitions(self, score: int) -> None:
-        """Check for tier transitions."""
-        bands = self.app.config.bands
-        current_tier = get_tier_name(score, bands.elevated, bands.critical)
-        if current_tier != self._prev_tier:
-            if current_tier == "CRITICAL":
-                self._add_entry(f"● System → CRITICAL (score: {score})", "high")
-            elif current_tier == "ELEVATED":
-                self._add_entry(f"● System → ELEVATED (score: {score})", "elevated")
+            # Calculate duration
+            if exit_time:
+                duration = exit_time - entry_time
             else:
-                self._add_entry(f"○ System → NORMAL (score: {score})", "normal")
-            self._prev_tier = current_tier
+                duration = now - entry_time
+            dur_str = format_duration(duration)
 
-    def connected(self) -> None:
-        """Called when daemon connects."""
-        try:
-            log = self.query_one("#activity-log", RichLog)
-            log.clear()
-        except NoMatches:
-            pass
-        self._add_entry("Connected to daemon", "normal")
+            # Determine status
+            is_open = exit_time is None
+            if is_open:
+                status_text = f"[{status_colors.active}]tracking[/]"
+            else:
+                status_text = f"[{status_colors.ended}]ended[/]"
+
+            # Get band color for peak
+            band_color = self._get_band_color(peak_band)
+
+            # Format peak with band color
+            peak_text = f"[{band_color}]{peak_score}[/]"
+
+            # Format band with color
+            band_text = f"[{band_color}]{peak_band}[/]"
+
+            # Forensics indicator
+            has_forensics = self._has_forensics(event_id)
+            forensics_text = "✓" if has_forensics else ""
+
+            self._table.add_row(
+                time_str,
+                command[:15],
+                Text.from_markup(peak_text),
+                Text.from_markup(band_text),
+                dur_str,
+                Text.from_markup(status_text),
+                forensics_text,
+            )
 
 
 class RogueHunterApp(App):
@@ -957,12 +857,8 @@ class RogueHunterApp(App):
         height: 1fr;
     }
 
-    #bottom-panels {
+    #event-history {
         height: 12;
-    }
-
-    #bottom-panels > * {
-        width: 1fr;
     }
     """
 
@@ -986,11 +882,7 @@ class RogueHunterApp(App):
         """Create the TUI layout."""
         yield HeaderBar(id="header")
         yield ProcessTable(id="main-area")
-        yield Horizontal(
-            ActivityLog(id="activity"),
-            TrackedEventsPanel(id="tracked"),
-            id="bottom-panels",
-        )
+        yield EventHistoryPanel(id="event-history")
         yield Footer()
 
     def on_mount(self) -> None:
@@ -1041,8 +933,9 @@ class RogueHunterApp(App):
                 )
             except ConnectionError:
                 pass  # Connection logging is best-effort
+            # Refresh event history from database on connect
             try:
-                self.query_one("#activity", ActivityLog).connected()
+                self.query_one("#event-history", EventHistoryPanel).refresh_from_db()
             except (NoMatches, ScreenStackError):
                 pass
             self._socket_read_task = asyncio.create_task(self._read_socket_loop())
@@ -1190,17 +1083,12 @@ class RogueHunterApp(App):
         except NoMatches:
             pass
 
-        # Check tier transitions
-        try:
-            self.query_one("#activity", ActivityLog).check_transitions(max_score)
-        except NoMatches:
-            pass
-
-        # Update tracked events panel
-        try:
-            self.query_one("#tracked", TrackedEventsPanel).update_tracking(rogues, now)
-        except NoMatches:
-            pass
+        # Refresh event history from database periodically (every 10 samples ≈ 3 seconds)
+        if sample_count % 10 == 0:
+            try:
+                self.query_one("#event-history", EventHistoryPanel).refresh_from_db()
+            except NoMatches:
+                pass
 
 
 def run_tui(config: Config | None = None) -> None:

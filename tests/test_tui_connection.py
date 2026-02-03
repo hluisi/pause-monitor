@@ -118,8 +118,7 @@ def test_tui_handle_socket_data_updates_widgets():
     # Create mock widgets
     mock_header = MagicMock()
     mock_process_table = MagicMock()
-    mock_activity = MagicMock()
-    mock_tracked = MagicMock()
+    mock_event_history = MagicMock()
 
     # Patch query_one to return our mocks
     def mock_query_one(selector, widget_type=None):
@@ -127,10 +126,8 @@ def test_tui_handle_socket_data_updates_widgets():
             return mock_header
         elif selector == "#main-area":
             return mock_process_table
-        elif selector == "#activity":
-            return mock_activity
-        elif selector == "#tracked":
-            return mock_tracked
+        elif selector == "#event-history":
+            return mock_event_history
         raise ValueError(f"Unknown selector: {selector}")
 
     app.query_one = mock_query_one
@@ -158,7 +155,7 @@ def test_tui_handle_socket_data_updates_widgets():
                 "categories": ["cpu"],
             },
         ],
-        "sample_count": 15,
+        "sample_count": 10,  # Multiple of 10 to trigger event history refresh
     }
 
     app._handle_socket_data(data)
@@ -168,7 +165,7 @@ def test_tui_handle_socket_data_updates_widgets():
     call_args = mock_header.update_from_sample.call_args
     assert call_args[0][0] == 75  # max_score
     assert call_args[0][1] == 500  # process_count
-    assert call_args[0][2] == 15  # sample_count
+    assert call_args[0][2] == 10  # sample_count
 
     # Verify process table was updated with rogues
     mock_process_table.update_rogues.assert_called_once()
@@ -176,5 +173,5 @@ def test_tui_handle_socket_data_updates_widgets():
     assert len(rogues_arg) == 1
     assert rogues_arg[0]["command"] == "test_proc"
 
-    # Verify activity log was checked for transitions
-    mock_activity.check_transitions.assert_called_once()
+    # Verify event history was refreshed (every 10 samples)
+    mock_event_history.refresh_from_db.assert_called_once()

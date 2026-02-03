@@ -95,6 +95,7 @@ def make_process_samples(
         process_count=process_count,
         max_score=max_score,
         rogues=rogues,
+        all_by_pid={r.pid: r for r in rogues},
     )
 
 

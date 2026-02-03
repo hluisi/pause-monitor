@@ -589,40 +589,40 @@ async def test_daemon_main_loop_collects_samples(patched_config_paths, monkeypat
     # Create mock samples using shared helper
     from tests.conftest import make_process_score
 
+    rogue1 = make_process_score(
+        pid=123,
+        command="test_proc",
+        captured_at=TEST_TIMESTAMP,
+        cpu=50.0,
+        mem=1024 * 1024 * 100,
+        score=25,
+        band="medium",
+    )
+    rogue2 = make_process_score(
+        pid=456,
+        command="heavy_proc",
+        captured_at=TEST_TIMESTAMP,
+        cpu=80.0,
+        mem=1024 * 1024 * 500,
+        score=45,
+        band="elevated",
+    )
     mock_samples = [
         ProcessSamples(
             timestamp=datetime.now(),
             elapsed_ms=1000,
             process_count=100,
             max_score=25,
-            rogues=[
-                make_process_score(
-                    pid=123,
-                    command="test_proc",
-                    captured_at=TEST_TIMESTAMP,
-                    cpu=50.0,
-                    mem=1024 * 1024 * 100,
-                    score=25,
-                    band="medium",
-                )
-            ],
+            rogues=[rogue1],
+            all_by_pid={rogue1.pid: rogue1},
         ),
         ProcessSamples(
             timestamp=datetime.now(),
             elapsed_ms=1000,
             process_count=100,
             max_score=45,
-            rogues=[
-                make_process_score(
-                    pid=456,
-                    command="heavy_proc",
-                    captured_at=TEST_TIMESTAMP,
-                    cpu=80.0,
-                    mem=1024 * 1024 * 500,
-                    score=45,
-                    band="elevated",
-                )
-            ],
+            rogues=[rogue2],
+            all_by_pid={rogue2.pid: rogue2},
         ),
     ]
 
@@ -641,6 +641,7 @@ async def test_daemon_main_loop_collects_samples(patched_config_paths, monkeypat
                 process_count=0,
                 max_score=0,
                 rogues=[],
+                all_by_pid={},
             )
         return mock_samples[call_count - 1]
 
@@ -703,7 +704,7 @@ async def test_daemon_schema_mismatch_recovery(patched_config_paths, monkeypatch
 
 @pytest.mark.asyncio
 async def test_daemon_main_loop_updates_tracker(patched_config_paths, monkeypatch):
-    """Main loop should call tracker.update() with rogues from samples."""
+    """Main loop should call tracker.update() with processes above threshold."""
     config = Config.load()
 
     monkeypatch.setattr("rogue_hunter.daemon.get_boot_time", lambda: int(TEST_TIMESTAMP))
@@ -716,30 +717,30 @@ async def test_daemon_main_loop_updates_tracker(patched_config_paths, monkeypatc
     original_update = daemon.tracker.update
 
     def track_update(scores):
-        update_calls.append(scores)
+        update_calls.append(list(scores))  # Copy since it's a generator result
         return original_update(scores)
 
     monkeypatch.setattr(daemon.tracker, "update", track_update)
 
-    # Create mock samples
+    # Create mock samples - score must be >= tracking_threshold (35)
     from tests.conftest import make_process_score
 
+    rogue = make_process_score(
+        pid=123,
+        command="test_proc",
+        captured_at=TEST_TIMESTAMP,
+        cpu=50.0,
+        mem=1024 * 1024 * 100,
+        score=40,  # Above tracking threshold (35)
+        band="elevated",
+    )
     mock_samples = ProcessSamples(
         timestamp=datetime.now(),
         elapsed_ms=1000,
         process_count=100,
-        max_score=25,
-        rogues=[
-            make_process_score(
-                pid=123,
-                command="test_proc",
-                captured_at=TEST_TIMESTAMP,
-                cpu=50.0,
-                mem=1024 * 1024 * 100,
-                score=25,
-                band="medium",
-            )
-        ],
+        max_score=40,
+        rogues=[rogue],
+        all_by_pid={rogue.pid: rogue},
     )
 
     # Mock collector.collect() to return sample then stop
@@ -757,9 +758,10 @@ async def test_daemon_main_loop_updates_tracker(patched_config_paths, monkeypatc
     # Run main loop
     await daemon._main_loop()
 
-    # Should have called tracker.update with the rogues
+    # Should have called tracker.update with processes above threshold
     assert len(update_calls) == 1
-    assert update_calls[0] == mock_samples.rogues
+    assert len(update_calls[0]) == 1
+    assert update_calls[0][0].pid == rogue.pid
 
 
 # Note: Pause detection was removed from the daemon's main loop.

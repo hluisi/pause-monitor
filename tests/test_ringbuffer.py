@@ -11,12 +11,14 @@ from rogue_hunter.ringbuffer import BufferContents, RingBuffer, RingSample
 
 def make_test_samples(**kwargs) -> ProcessSamples:
     """Create ProcessSamples with sensible defaults for testing."""
+    rogues = kwargs.get("rogues", [])
     defaults = {
         "timestamp": datetime.now(),
         "elapsed_ms": 100,
         "process_count": 50,
         "max_score": 25,
-        "rogues": [],
+        "rogues": rogues,
+        "all_by_pid": {r.pid: r for r in rogues},
     }
     defaults.update(kwargs)
     return ProcessSamples(**defaults)

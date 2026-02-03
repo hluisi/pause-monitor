@@ -266,7 +266,8 @@ class ProcessSamples:
     elapsed_ms: int
     process_count: int
     max_score: int
-    rogues: list[ProcessScore]
+    rogues: list[ProcessScore]  # Top-N for TUI display
+    all_by_pid: dict[int, ProcessScore]  # All scored processes by PID
 
     def to_json(self) -> str:
         """Serialize to JSON string."""
@@ -284,12 +285,14 @@ class ProcessSamples:
     def from_json(cls, data: str) -> "ProcessSamples":
         """Deserialize from JSON string."""
         d = json.loads(data)
+        rogues = [ProcessScore.from_dict(r) for r in d["rogues"]]
         return cls(
             timestamp=datetime.fromisoformat(d["timestamp"]),
             elapsed_ms=d["elapsed_ms"],
             process_count=d["process_count"],
             max_score=d["max_score"],
-            rogues=[ProcessScore.from_dict(r) for r in d["rogues"]],
+            rogues=rogues,
+            all_by_pid={r.pid: r for r in rogues},  # Reconstruct from rogues
         )
 
 
@@ -753,11 +756,16 @@ class LibprocCollector:
         all_scored = [
             self._score_process(p, shares_by_pid.get(p["pid"], {})) for p in all_processes
         ]
-        scored = self._select_rogues(all_scored)
+
+        # All scores by PID (daemon uses this to build tracker input)
+        all_by_pid = {p.pid: p for p in all_scored}
+
+        # Rogues: top-N for TUI display
+        rogues = self._select_rogues(all_scored)
 
         elapsed_ms = int((time.monotonic() - start) * 1000)
         # Hybrid: max(peak, rms) - bad actors visible, cumulative stress can push higher
-        scores = [p.score for p in scored]
+        scores = [p.score for p in rogues]
         if scores:
             peak = max(scores)
             rms = int((sum(s * s for s in scores) / len(scores)) ** 0.5)
@@ -770,7 +778,8 @@ class LibprocCollector:
             elapsed_ms=elapsed_ms,
             process_count=len(all_processes),
             max_score=max_score,
-            rogues=scored,
+            rogues=rogues,
+            all_by_pid=all_by_pid,
         )
 
     async def collect(self) -> ProcessSamples:

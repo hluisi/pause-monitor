@@ -24,13 +24,13 @@
 │  │   ...                                                        │ │
 │  └─────────────────────────────────────────────────────────────┘ │
 ├─────────────────────────────────────────────────────────────────┤
-│                       BOTTOM PANELS                              │
-│  ┌────────────────────────┐  ┌────────────────────────────────┐ │
-│  │     ACTIVITY LOG       │  │     TRACKED PROCESSES          │ │
-│  │  (System Activity)     │  │  Time  Process Peak Dur Why St │ │
-│  │  [timestamp] message   │  │  12:34 Safari   45  2m  cpu ● │ │
-│  │  [timestamp] message   │  │  12:30 Chrome   38  5m  mem ○ │ │
-│  └────────────────────────┘  └────────────────────────────────┘ │
+│                       EVENT HISTORY                              │
+│  ┌─────────────────────────────────────────────────────────────┐ │
+│  │ Time     Process         Peak Band     Dur     Status    📸 │ │
+│  │ 18:38:37 bridge          56   high     24s     tracking  ✓  │ │
+│  │ 18:38:51 2.1.29          47   elevated 12s     ended        │ │
+│  │ 18:39:01 ghostty         43   elevated 8s      ended        │ │
+│  └─────────────────────────────────────────────────────────────┘ │
 ├─────────────────────────────────────────────────────────────────┤
 │                          FOOTER                                  │
 │  (Textual default footer with keybindings)                       │
@@ -51,13 +51,8 @@ RogueHunterApp
 ├── ProcessTable (id="main-area")
 │   └── ScrollableContainer
 │       └── Grid (id="process-grid")  # Header row + data rows
-├── Horizontal (id="bottom-panels")
-│   ├── ActivityLog (id="activity")
-│   │   ├── Static (id="activity-title")   # "SYSTEM ACTIVITY"
-│   │   └── Container (id="log-container") # Scrolling log entries
-│   └── TrackedEventsPanel (id="tracked")
-│       ├── Static (id="tracked-title")    # "TRACKED PROCESSES"
-│       └── DataTable (id="tracked-table") # Tracking history
+├── EventHistoryPanel (id="event-history")
+│   └── DataTable (id="events-table") # Event history from database
 └── Footer
 ```
 
@@ -107,47 +102,32 @@ The main grid showing current rogue processes.
 
 ---
 
-### 3. Bottom Panels (`id="bottom-panels"`)
+### 3. EventHistoryPanel (`id="event-history"`)
 
-Horizontal split containing two panels side by side.
-
-#### 3a. ActivityLog (`id="activity"`)
-
-System event feed showing tier transitions.
+Full-width panel showing process events from the database.
 
 | Element | ID | Description |
 |---------|-----|-------------|
-| **Title** | `#activity-title` | "SYSTEM ACTIVITY" |
-| **Log Container** | `#log-container` | Scrolling list of timestamped events |
-
-**Events logged:**
-- Tier transitions (entered/exited elevated, high, critical)
-- Connection status changes
-
-#### 3b. TrackedEventsPanel (`id="tracked"`)
-
-Processes being tracked (entered elevated+ band).
-
-| Element | ID | Description |
-|---------|-----|-------------|
-| **Title** | `#tracked-title` | "TRACKED PROCESSES" |
-| **Table** | `#tracked-table` | DataTable with tracking history |
+| **Table** | `#events-table` | DataTable showing event history |
 
 **Table columns:**
 
 | Column | Width | Description |
 |--------|-------|-------------|
 | **Time** | 8 | Entry time (HH:MM:SS) |
-| **Process** | auto | Command name (truncated to 15 chars) |
-| **Peak** | 4 | Peak score reached |
-| **Dur** | 6 | Duration tracked |
-| **Dominant** | 10 | Highest weighted resource (e.g., "CPU 10.5x") |
-| **Status** | 8 | `[green]active[/]` or `[dim]ended[/]` |
+| **Process** | 15 | Command name (truncated) |
+| **Peak** | 4 | Peak score reached (colored by band) |
+| **Band** | 8 | Peak band (colored) |
+| **Dur** | 7 | Duration tracked |
+| **Status** | 10 | `[green]tracking[/]` or `[dim]ended[/]` |
+| **📸** | 2 | Forensics indicator (✓ if captures exist) |
 
-**Tracking logic:**
-- Tracks by command name (not PID) to deduplicate
-- Active processes shown first, then history
-- History limited to 15 entries, sorted by peak score
+**Data source:**
+- Reads directly from SQLite database (not from socket)
+- Queries `process_events` table for recent events
+- Queries `get_open_events()` for currently tracked processes
+- Checks `forensic_captures` table for forensics indicator
+- Refreshes every 10 samples (~3 seconds)
 
 ---
 
@@ -165,8 +145,12 @@ Daemon                          TUI
   │──[sample]───────────────────>│  Every sample (~3Hz):
   │   - max_score                │  - HeaderBar.update_from_sample()
   │   - rogues[]                 │  - ProcessTable.update_rogues()
-  │   - process_count            │  - ActivityLog.check_transitions()
-  │   - timestamp                │  - TrackedEventsPanel.update_tracking()
+  │   - process_count            │
+  │   - timestamp                │
+  │                              │
+  │                              │  Every 10 samples (~3s):
+  │                              │  - EventHistoryPanel.refresh_from_db()
+  │                              │    (reads from SQLite directly)
   │                              │
 ```
 
