@@ -48,7 +48,8 @@ uv run rogue-hunter tui
 uv run rogue-hunter status
 uv run rogue-hunter events
 uv run rogue-hunter config
-uv run rogue-hunter install
+uv run rogue-hunter service install   # launchd service
+sudo uv run rogue-hunter perms install  # forensics permissions
 ```
 
 ## Architecture

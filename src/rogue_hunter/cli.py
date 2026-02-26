@@ -689,8 +689,12 @@ def service_install(system_wide: bool, force: bool) -> None:
     if os.getuid() == 0:
         os.chown(log_dir, user_info.pw_uid, user_info.pw_gid)
 
-    # Get Python path
-    python_path = sys.executable
+    # Find the rogue-hunter entrypoint script (lives alongside the Python interpreter)
+    script_path = Path(sys.executable).parent / "rogue-hunter"
+    if not script_path.exists():
+        click.echo(f"Error: Could not find rogue-hunter entrypoint at {script_path}", err=True)
+        click.echo("Is rogue-hunter installed in this environment?", err=True)
+        raise SystemExit(1)
 
     # Create plist content
     plist_content = f"""<?xml version="1.0" encoding="UTF-8"?>
@@ -701,9 +705,7 @@ def service_install(system_wide: bool, force: bool) -> None:
     <string>{label}</string>
     <key>ProgramArguments</key>
     <array>
-        <string>{python_path}</string>
-        <string>-m</string>
-        <string>rogue_hunter.cli</string>
+        <string>{script_path}</string>
         <string>daemon</string>
     </array>
     <key>RunAtLoad</key>
