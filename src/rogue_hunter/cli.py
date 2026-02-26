@@ -184,8 +184,8 @@ def events_show(ctx, event_id: int, forensics: bool, threads: bool, logs: bool) 
         get_log_entries,
         get_process_event_detail,
         get_process_snapshots,
-        get_spindump_processes,
-        get_spindump_threads,
+        get_tailspin_processes,
+        get_tailspin_threads,
         require_database,
     )
 
@@ -268,20 +268,21 @@ def events_show(ctx, event_id: int, forensics: bool, threads: bool, logs: bool) 
                             pass
 
                 if threads:
-                    # Show spindump thread states
-                    procs = get_spindump_processes(conn, cap["id"])
+                    # Show tailspin process and thread data
+                    procs = get_tailspin_processes(conn, cap["id"])
                     if procs:
-                        click.echo(f"    Spindump Processes: {len(procs)}")
+                        click.echo(f"    Tailspin Processes: {len(procs)}")
                         for proc in procs[:10]:
                             footprint = (
                                 f"{proc['footprint_mb']:.1f}MB" if proc["footprint_mb"] else "?"
                             )
                             click.echo(f"      {proc['name']} [{proc['pid']}] ({footprint})")
-                            proc_threads = get_spindump_threads(conn, proc["id"])
+                            proc_threads = get_tailspin_threads(conn, proc["id"])
                             for t in proc_threads[:5]:
-                                state = t["state"] or "unknown"
-                                name = t["thread_name"] or "unnamed"
-                                click.echo(f"        Thread {t['thread_id']}: {state} ({name})")
+                                samples = t["num_samples"] or 0
+                                name = t["thread_name"] or t["dispatch_queue_name"] or "unnamed"
+                                tid = t["thread_id"]
+                                click.echo(f"        Thread {tid}: {samples} samples ({name})")
 
                 if logs:
                     # Show log entries

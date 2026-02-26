@@ -13,7 +13,7 @@ if TYPE_CHECKING:
 
 log = structlog.get_logger()
 
-SCHEMA_VERSION = 19  # Machine snapshots: periodic full-system state capture
+SCHEMA_VERSION = 20  # Full normalized tailspin schema with call stacks
 
 
 SCHEMA = """
@@ -118,33 +118,223 @@ CREATE TABLE IF NOT EXISTS forensic_captures (
     FOREIGN KEY (event_id) REFERENCES process_events(id) ON DELETE CASCADE
 );
 
--- Process info from spindump
-CREATE TABLE IF NOT EXISTS spindump_processes (
+-- Tailspin header: system-wide metadata from decoded tailspin
+CREATE TABLE IF NOT EXISTS tailspin_header (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    capture_id INTEGER NOT NULL UNIQUE,
+    -- Timestamps
+    start_time TEXT NOT NULL,
+    end_time TEXT NOT NULL,
+    duration_sec REAL NOT NULL,
+    steps INTEGER NOT NULL,
+    sampling_interval_ms INTEGER NOT NULL,
+    -- System info
+    os_version TEXT NOT NULL,
+    architecture TEXT NOT NULL,
+    report_version INTEGER,
+    hardware_model TEXT,
+    active_cpus INTEGER,
+    memory_gb INTEGER,
+    hw_page_size INTEGER,
+    vm_page_size INTEGER,
+    -- Boot info
+    time_since_boot_sec INTEGER,
+    time_awake_since_boot_sec INTEGER,
+    -- CPU totals
+    total_cpu_time_sec REAL,
+    total_cycles INTEGER,
+    total_instructions INTEGER,
+    total_cpi REAL,
+    -- Memory
+    memory_pressure_avg_pct INTEGER,
+    memory_pressure_max_pct INTEGER,
+    available_memory_avg_gb REAL,
+    available_memory_min_gb REAL,
+    -- Disk
+    free_disk_gb REAL,
+    total_disk_gb REAL,
+    -- Advisory
+    advisory_battery INTEGER,
+    advisory_user INTEGER,
+    advisory_thermal INTEGER,
+    advisory_combined INTEGER,
+    -- Other
+    shared_cache_residency_pct REAL,
+    vnodes_available_pct REAL,
+    data_source TEXT,
+    reason TEXT,
+    FOREIGN KEY (capture_id) REFERENCES forensic_captures(id) ON DELETE CASCADE
+);
+
+-- Tailspin shared caches (multiple per capture)
+CREATE TABLE IF NOT EXISTS tailspin_shared_cache (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    capture_id INTEGER NOT NULL,
+    uuid TEXT NOT NULL,
+    base_address TEXT NOT NULL,
+    slide TEXT NOT NULL,
+    name TEXT NOT NULL,
+    FOREIGN KEY (capture_id) REFERENCES forensic_captures(id) ON DELETE CASCADE
+);
+
+-- Tailspin I/O statistics from header
+CREATE TABLE IF NOT EXISTS tailspin_io_stats (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    capture_id INTEGER NOT NULL,
+    tier TEXT NOT NULL,  -- 'overall', 'tier0', 'tier1', 'tier2'
+    io_count INTEGER NOT NULL,
+    io_rate REAL,
+    bytes INTEGER NOT NULL,
+    bytes_rate REAL,
+    FOREIGN KEY (capture_id) REFERENCES forensic_captures(id) ON DELETE CASCADE
+);
+
+-- Tailspin process: full process info from decoded tailspin
+CREATE TABLE IF NOT EXISTS tailspin_process (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     capture_id INTEGER NOT NULL,
     pid INTEGER NOT NULL,
     name TEXT NOT NULL,
+    -- Optional identifiers
+    uuid TEXT,
     path TEXT,
+    identifier TEXT,  -- bundle ID
+    version TEXT,
+    -- Relationships
     parent_pid INTEGER,
     parent_name TEXT,
+    responsible_pid INTEGER,
+    responsible_name TEXT,
+    execed_from_pid INTEGER,
+    execed_from_name TEXT,
+    execed_to_pid INTEGER,
+    execed_to_name TEXT,
+    -- Metadata
+    architecture TEXT,
+    shared_cache_uuid TEXT,
+    runningboard_managed INTEGER,  -- boolean
+    sudden_term TEXT,
+    -- Resources
     footprint_mb REAL,
+    footprint_delta_mb REAL,
+    io_count INTEGER,
+    io_bytes INTEGER,
+    time_since_fork_sec INTEGER,
+    -- Timing (for short-lived processes)
+    start_time TEXT,
+    end_time TEXT,
+    -- Sampling
+    num_samples INTEGER,
+    sample_range_start INTEGER,
+    sample_range_end INTEGER,
+    -- CPU
     cpu_time_sec REAL,
-    thread_count INTEGER,
+    cycles INTEGER,
+    instructions INTEGER,
+    cpi REAL,
+    -- Threads
+    num_threads INTEGER,
     FOREIGN KEY (capture_id) REFERENCES forensic_captures(id) ON DELETE CASCADE
 );
 
--- Thread states from spindump
-CREATE TABLE IF NOT EXISTS spindump_threads (
+-- Tailspin process notes (multiple per process)
+CREATE TABLE IF NOT EXISTS tailspin_process_note (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     process_id INTEGER NOT NULL,
-    thread_id TEXT NOT NULL,
+    note TEXT NOT NULL,
+    FOREIGN KEY (process_id) REFERENCES tailspin_process(id) ON DELETE CASCADE
+);
+
+-- Tailspin thread: full thread info
+CREATE TABLE IF NOT EXISTS tailspin_thread (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    process_id INTEGER NOT NULL,
+    thread_id TEXT NOT NULL,  -- hex like '0x3fd504'
+    -- Names
+    dispatch_queue_name TEXT,
+    dispatch_queue_serial INTEGER,
     thread_name TEXT,
-    sample_count INTEGER,
+    -- Sampling
+    num_samples INTEGER,
+    sample_range_start INTEGER,
+    sample_range_end INTEGER,
+    -- Priority
     priority INTEGER,
+    base_priority INTEGER,
+    -- CPU
     cpu_time_sec REAL,
-    state TEXT,
-    blocked_on TEXT,
-    FOREIGN KEY (process_id) REFERENCES spindump_processes(id) ON DELETE CASCADE
+    cycles INTEGER,
+    instructions INTEGER,
+    cpi REAL,
+    -- I/O
+    io_count INTEGER,
+    io_bytes INTEGER,
+    FOREIGN KEY (process_id) REFERENCES tailspin_process(id) ON DELETE CASCADE
+);
+
+-- Tailspin stack frame: call stack with tree structure
+CREATE TABLE IF NOT EXISTS tailspin_frame (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    thread_id INTEGER NOT NULL,
+    parent_frame_id INTEGER,  -- NULL for root frames, self-referential for tree
+    depth INTEGER NOT NULL,  -- 0 = root, increases with call depth
+    -- Sampling
+    sample_count INTEGER NOT NULL,
+    -- Symbol info
+    is_kernel INTEGER NOT NULL,  -- boolean, true if frame has * prefix
+    symbol_name TEXT,  -- function name or NULL if unknown (???)
+    symbol_offset INTEGER,  -- offset within function
+    library_name TEXT,  -- library or binary name
+    library_offset INTEGER,  -- offset within library
+    address TEXT NOT NULL,  -- hex address like '0x19e30ab84'
+    -- State (for leaf frames)
+    state TEXT,  -- 'running', 'blocked', etc.
+    core_type TEXT,  -- 'p-core', 'e-core', or NULL
+    blocked_on TEXT,  -- e.g., 'wait4 on zsh [46454]'
+    FOREIGN KEY (thread_id) REFERENCES tailspin_thread(id) ON DELETE CASCADE,
+    FOREIGN KEY (parent_frame_id) REFERENCES tailspin_frame(id) ON DELETE CASCADE
+);
+
+-- Tailspin binary images per process
+CREATE TABLE IF NOT EXISTS tailspin_binary_image (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    process_id INTEGER NOT NULL,
+    start_address TEXT NOT NULL,
+    end_address TEXT,
+    name TEXT NOT NULL,
+    version TEXT,
+    uuid TEXT,
+    path TEXT,
+    is_kernel INTEGER NOT NULL,  -- boolean
+    FOREIGN KEY (process_id) REFERENCES tailspin_process(id) ON DELETE CASCADE
+);
+
+-- Tailspin I/O histogram buckets
+CREATE TABLE IF NOT EXISTS tailspin_io_histogram (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    capture_id INTEGER NOT NULL,
+    histogram_type TEXT NOT NULL,  -- 'io_size', 'tier0_latency', 'tier1_latency', 'tier2_latency'
+    begin_value INTEGER NOT NULL,  -- in KB for size, us for latency
+    end_value INTEGER,  -- NULL for overflow bucket (> X)
+    frequency INTEGER NOT NULL,
+    cdf INTEGER NOT NULL,
+    FOREIGN KEY (capture_id) REFERENCES forensic_captures(id) ON DELETE CASCADE
+);
+
+-- Tailspin I/O aggregate stats
+CREATE TABLE IF NOT EXISTS tailspin_io_aggregate (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    capture_id INTEGER NOT NULL,
+    tier TEXT NOT NULL,  -- 'tier0', 'tier1', 'tier2'
+    num_ios INTEGER NOT NULL,
+    latency_mean_us INTEGER,
+    latency_max_us INTEGER,
+    latency_sd_us INTEGER,
+    read_count INTEGER,
+    read_bytes INTEGER,
+    write_count INTEGER,
+    write_bytes INTEGER,
+    FOREIGN KEY (capture_id) REFERENCES forensic_captures(id) ON DELETE CASCADE
 );
 
 -- Log entries (from log show --style ndjson)
@@ -174,10 +364,22 @@ CREATE TABLE IF NOT EXISTS buffer_context (
 
 -- Indexes for forensic tables
 CREATE INDEX IF NOT EXISTS idx_forensic_captures_event ON forensic_captures(event_id);
-CREATE INDEX IF NOT EXISTS idx_spindump_processes_capture ON spindump_processes(capture_id);
-CREATE INDEX IF NOT EXISTS idx_spindump_threads_process ON spindump_threads(process_id);
 CREATE INDEX IF NOT EXISTS idx_log_entries_capture ON log_entries(capture_id);
 CREATE INDEX IF NOT EXISTS idx_buffer_context_capture ON buffer_context(capture_id);
+
+-- Indexes for tailspin tables
+CREATE INDEX IF NOT EXISTS idx_tailspin_header_capture ON tailspin_header(capture_id);
+CREATE INDEX IF NOT EXISTS idx_tailspin_shared_cache_capture ON tailspin_shared_cache(capture_id);
+CREATE INDEX IF NOT EXISTS idx_tailspin_io_stats_capture ON tailspin_io_stats(capture_id);
+CREATE INDEX IF NOT EXISTS idx_tailspin_process_capture ON tailspin_process(capture_id);
+CREATE INDEX IF NOT EXISTS idx_tailspin_process_pid ON tailspin_process(pid);
+CREATE INDEX IF NOT EXISTS idx_tailspin_process_note_process ON tailspin_process_note(process_id);
+CREATE INDEX IF NOT EXISTS idx_tailspin_thread_process ON tailspin_thread(process_id);
+CREATE INDEX IF NOT EXISTS idx_tailspin_frame_thread ON tailspin_frame(thread_id);
+CREATE INDEX IF NOT EXISTS idx_tailspin_frame_parent ON tailspin_frame(parent_frame_id);
+CREATE INDEX IF NOT EXISTS idx_tailspin_binary_image_process ON tailspin_binary_image(process_id);
+CREATE INDEX IF NOT EXISTS idx_tailspin_io_histogram_capture ON tailspin_io_histogram(capture_id);
+CREATE INDEX IF NOT EXISTS idx_tailspin_io_aggregate_capture ON tailspin_io_aggregate(capture_id);
 
 -- Machine snapshots: periodic full-system state (every 60s, retained 12h)
 CREATE TABLE IF NOT EXISTS machine_snapshots (
@@ -932,34 +1134,93 @@ def update_forensic_capture_status(
     conn.commit()
 
 
-def insert_spindump_process(
+def insert_tailspin_header(
     conn: sqlite3.Connection,
     capture_id: int,
-    pid: int,
-    name: str,
-    path: str | None = None,
-    parent_pid: int | None = None,
-    parent_name: str | None = None,
-    footprint_mb: float | None = None,
-    cpu_time_sec: float | None = None,
-    thread_count: int | None = None,
+    *,
+    start_time: str,
+    end_time: str,
+    duration_sec: float,
+    steps: int,
+    sampling_interval_ms: int,
+    os_version: str,
+    architecture: str,
+    report_version: int | None = None,
+    hardware_model: str | None = None,
+    active_cpus: int | None = None,
+    memory_gb: int | None = None,
+    hw_page_size: int | None = None,
+    vm_page_size: int | None = None,
+    time_since_boot_sec: int | None = None,
+    time_awake_since_boot_sec: int | None = None,
+    total_cpu_time_sec: float | None = None,
+    total_cycles: int | None = None,
+    total_instructions: int | None = None,
+    total_cpi: float | None = None,
+    memory_pressure_avg_pct: int | None = None,
+    memory_pressure_max_pct: int | None = None,
+    available_memory_avg_gb: float | None = None,
+    available_memory_min_gb: float | None = None,
+    free_disk_gb: float | None = None,
+    total_disk_gb: float | None = None,
+    advisory_battery: int | None = None,
+    advisory_user: int | None = None,
+    advisory_thermal: int | None = None,
+    advisory_combined: int | None = None,
+    shared_cache_residency_pct: float | None = None,
+    vnodes_available_pct: float | None = None,
+    data_source: str | None = None,
+    reason: str | None = None,
 ) -> int:
-    """Insert spindump process record, return process_id."""
+    """Insert tailspin header record, return header_id."""
     cursor = conn.execute(
-        """INSERT INTO spindump_processes
-           (capture_id, pid, name, path, parent_pid, parent_name,
-            footprint_mb, cpu_time_sec, thread_count)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        """INSERT INTO tailspin_header
+           (capture_id, start_time, end_time, duration_sec, steps, sampling_interval_ms,
+            os_version, architecture, report_version, hardware_model, active_cpus,
+            memory_gb, hw_page_size, vm_page_size, time_since_boot_sec,
+            time_awake_since_boot_sec, total_cpu_time_sec, total_cycles,
+            total_instructions, total_cpi, memory_pressure_avg_pct,
+            memory_pressure_max_pct, available_memory_avg_gb, available_memory_min_gb,
+            free_disk_gb, total_disk_gb, advisory_battery, advisory_user,
+            advisory_thermal, advisory_combined, shared_cache_residency_pct,
+            vnodes_available_pct, data_source, reason)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                   ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             capture_id,
-            pid,
-            name,
-            path,
-            parent_pid,
-            parent_name,
-            footprint_mb,
-            cpu_time_sec,
-            thread_count,
+            start_time,
+            end_time,
+            duration_sec,
+            steps,
+            sampling_interval_ms,
+            os_version,
+            architecture,
+            report_version,
+            hardware_model,
+            active_cpus,
+            memory_gb,
+            hw_page_size,
+            vm_page_size,
+            time_since_boot_sec,
+            time_awake_since_boot_sec,
+            total_cpu_time_sec,
+            total_cycles,
+            total_instructions,
+            total_cpi,
+            memory_pressure_avg_pct,
+            memory_pressure_max_pct,
+            available_memory_avg_gb,
+            available_memory_min_gb,
+            free_disk_gb,
+            total_disk_gb,
+            advisory_battery,
+            advisory_user,
+            advisory_thermal,
+            advisory_combined,
+            shared_cache_residency_pct,
+            vnodes_available_pct,
+            data_source,
+            reason,
         ),
     )
     conn.commit()
@@ -968,35 +1229,341 @@ def insert_spindump_process(
     return result
 
 
-def insert_spindump_thread(
+def insert_tailspin_shared_cache(
+    conn: sqlite3.Connection,
+    capture_id: int,
+    uuid: str,
+    base_address: str,
+    slide: str,
+    name: str,
+) -> int:
+    """Insert tailspin shared cache record."""
+    cursor = conn.execute(
+        """INSERT INTO tailspin_shared_cache
+           (capture_id, uuid, base_address, slide, name)
+           VALUES (?, ?, ?, ?, ?)""",
+        (capture_id, uuid, base_address, slide, name),
+    )
+    conn.commit()
+    result = cursor.lastrowid
+    assert result is not None
+    return result
+
+
+def insert_tailspin_io_stats(
+    conn: sqlite3.Connection,
+    capture_id: int,
+    tier: str,
+    io_count: int,
+    bytes_total: int,
+    io_rate: float | None = None,
+    bytes_rate: float | None = None,
+) -> int:
+    """Insert tailspin I/O stats record."""
+    cursor = conn.execute(
+        """INSERT INTO tailspin_io_stats
+           (capture_id, tier, io_count, io_rate, bytes, bytes_rate)
+           VALUES (?, ?, ?, ?, ?, ?)""",
+        (capture_id, tier, io_count, io_rate, bytes_total, bytes_rate),
+    )
+    conn.commit()
+    result = cursor.lastrowid
+    assert result is not None
+    return result
+
+
+def insert_tailspin_process(
+    conn: sqlite3.Connection,
+    capture_id: int,
+    pid: int,
+    name: str,
+    *,
+    uuid: str | None = None,
+    path: str | None = None,
+    identifier: str | None = None,
+    version: str | None = None,
+    parent_pid: int | None = None,
+    parent_name: str | None = None,
+    responsible_pid: int | None = None,
+    responsible_name: str | None = None,
+    execed_from_pid: int | None = None,
+    execed_from_name: str | None = None,
+    execed_to_pid: int | None = None,
+    execed_to_name: str | None = None,
+    architecture: str | None = None,
+    shared_cache_uuid: str | None = None,
+    runningboard_managed: bool | None = None,
+    sudden_term: str | None = None,
+    footprint_mb: float | None = None,
+    footprint_delta_mb: float | None = None,
+    io_count: int | None = None,
+    io_bytes: int | None = None,
+    time_since_fork_sec: int | None = None,
+    start_time: str | None = None,
+    end_time: str | None = None,
+    num_samples: int | None = None,
+    sample_range_start: int | None = None,
+    sample_range_end: int | None = None,
+    cpu_time_sec: float | None = None,
+    cycles: int | None = None,
+    instructions: int | None = None,
+    cpi: float | None = None,
+    num_threads: int | None = None,
+) -> int:
+    """Insert tailspin process record, return process_id."""
+    cursor = conn.execute(
+        """INSERT INTO tailspin_process
+           (capture_id, pid, name, uuid, path, identifier, version,
+            parent_pid, parent_name, responsible_pid, responsible_name,
+            execed_from_pid, execed_from_name, execed_to_pid, execed_to_name,
+            architecture, shared_cache_uuid, runningboard_managed, sudden_term,
+            footprint_mb, footprint_delta_mb, io_count, io_bytes, time_since_fork_sec,
+            start_time, end_time, num_samples, sample_range_start, sample_range_end,
+            cpu_time_sec, cycles, instructions, cpi, num_threads)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                   ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            capture_id,
+            pid,
+            name,
+            uuid,
+            path,
+            identifier,
+            version,
+            parent_pid,
+            parent_name,
+            responsible_pid,
+            responsible_name,
+            execed_from_pid,
+            execed_from_name,
+            execed_to_pid,
+            execed_to_name,
+            architecture,
+            shared_cache_uuid,
+            1 if runningboard_managed else (0 if runningboard_managed is False else None),
+            sudden_term,
+            footprint_mb,
+            footprint_delta_mb,
+            io_count,
+            io_bytes,
+            time_since_fork_sec,
+            start_time,
+            end_time,
+            num_samples,
+            sample_range_start,
+            sample_range_end,
+            cpu_time_sec,
+            cycles,
+            instructions,
+            cpi,
+            num_threads,
+        ),
+    )
+    conn.commit()
+    result = cursor.lastrowid
+    assert result is not None
+    return result
+
+
+def insert_tailspin_process_note(
+    conn: sqlite3.Connection,
+    process_id: int,
+    note: str,
+) -> int:
+    """Insert tailspin process note."""
+    cursor = conn.execute(
+        """INSERT INTO tailspin_process_note (process_id, note) VALUES (?, ?)""",
+        (process_id, note),
+    )
+    conn.commit()
+    result = cursor.lastrowid
+    assert result is not None
+    return result
+
+
+def insert_tailspin_thread(
     conn: sqlite3.Connection,
     process_id: int,
     thread_id: str,
+    *,
+    dispatch_queue_name: str | None = None,
+    dispatch_queue_serial: int | None = None,
     thread_name: str | None = None,
-    sample_count: int | None = None,
+    num_samples: int | None = None,
+    sample_range_start: int | None = None,
+    sample_range_end: int | None = None,
     priority: int | None = None,
+    base_priority: int | None = None,
     cpu_time_sec: float | None = None,
-    state: str | None = None,
-    blocked_on: str | None = None,
-) -> None:
-    """Insert spindump thread record."""
-    conn.execute(
-        """INSERT INTO spindump_threads
-           (process_id, thread_id, thread_name, sample_count,
-            priority, cpu_time_sec, state, blocked_on)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+    cycles: int | None = None,
+    instructions: int | None = None,
+    cpi: float | None = None,
+    io_count: int | None = None,
+    io_bytes: int | None = None,
+) -> int:
+    """Insert tailspin thread record, return thread_id."""
+    cursor = conn.execute(
+        """INSERT INTO tailspin_thread
+           (process_id, thread_id, dispatch_queue_name, dispatch_queue_serial,
+            thread_name, num_samples, sample_range_start, sample_range_end,
+            priority, base_priority, cpu_time_sec, cycles, instructions, cpi,
+            io_count, io_bytes)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             process_id,
             thread_id,
+            dispatch_queue_name,
+            dispatch_queue_serial,
             thread_name,
-            sample_count,
+            num_samples,
+            sample_range_start,
+            sample_range_end,
             priority,
+            base_priority,
             cpu_time_sec,
+            cycles,
+            instructions,
+            cpi,
+            io_count,
+            io_bytes,
+        ),
+    )
+    conn.commit()
+    result = cursor.lastrowid
+    assert result is not None
+    return result
+
+
+def insert_tailspin_frame(
+    conn: sqlite3.Connection,
+    thread_id: int,
+    depth: int,
+    sample_count: int,
+    is_kernel: bool,
+    address: str,
+    *,
+    parent_frame_id: int | None = None,
+    symbol_name: str | None = None,
+    symbol_offset: int | None = None,
+    library_name: str | None = None,
+    library_offset: int | None = None,
+    state: str | None = None,
+    core_type: str | None = None,
+    blocked_on: str | None = None,
+) -> int:
+    """Insert tailspin stack frame record, return frame_id."""
+    cursor = conn.execute(
+        """INSERT INTO tailspin_frame
+           (thread_id, parent_frame_id, depth, sample_count, is_kernel,
+            symbol_name, symbol_offset, library_name, library_offset,
+            address, state, core_type, blocked_on)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            thread_id,
+            parent_frame_id,
+            depth,
+            sample_count,
+            1 if is_kernel else 0,
+            symbol_name,
+            symbol_offset,
+            library_name,
+            library_offset,
+            address,
             state,
+            core_type,
             blocked_on,
         ),
     )
     conn.commit()
+    result = cursor.lastrowid
+    assert result is not None
+    return result
+
+
+def insert_tailspin_binary_image(
+    conn: sqlite3.Connection,
+    process_id: int,
+    start_address: str,
+    name: str,
+    is_kernel: bool,
+    *,
+    end_address: str | None = None,
+    version: str | None = None,
+    uuid: str | None = None,
+    path: str | None = None,
+) -> int:
+    """Insert tailspin binary image record."""
+    cursor = conn.execute(
+        """INSERT INTO tailspin_binary_image
+           (process_id, start_address, end_address, name, version, uuid, path, is_kernel)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+        (process_id, start_address, end_address, name, version, uuid, path, 1 if is_kernel else 0),
+    )
+    conn.commit()
+    result = cursor.lastrowid
+    assert result is not None
+    return result
+
+
+def insert_tailspin_io_histogram(
+    conn: sqlite3.Connection,
+    capture_id: int,
+    histogram_type: str,
+    begin_value: int,
+    frequency: int,
+    cdf: int,
+    end_value: int | None = None,
+) -> int:
+    """Insert tailspin I/O histogram bucket."""
+    cursor = conn.execute(
+        """INSERT INTO tailspin_io_histogram
+           (capture_id, histogram_type, begin_value, end_value, frequency, cdf)
+           VALUES (?, ?, ?, ?, ?, ?)""",
+        (capture_id, histogram_type, begin_value, end_value, frequency, cdf),
+    )
+    conn.commit()
+    result = cursor.lastrowid
+    assert result is not None
+    return result
+
+
+def insert_tailspin_io_aggregate(
+    conn: sqlite3.Connection,
+    capture_id: int,
+    tier: str,
+    num_ios: int,
+    *,
+    latency_mean_us: int | None = None,
+    latency_max_us: int | None = None,
+    latency_sd_us: int | None = None,
+    read_count: int | None = None,
+    read_bytes: int | None = None,
+    write_count: int | None = None,
+    write_bytes: int | None = None,
+) -> int:
+    """Insert tailspin I/O aggregate stats."""
+    cursor = conn.execute(
+        """INSERT INTO tailspin_io_aggregate
+           (capture_id, tier, num_ios, latency_mean_us, latency_max_us,
+            latency_sd_us, read_count, read_bytes, write_count, write_bytes)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            capture_id,
+            tier,
+            num_ios,
+            latency_mean_us,
+            latency_max_us,
+            latency_sd_us,
+            read_count,
+            read_bytes,
+            write_count,
+            write_bytes,
+        ),
+    )
+    conn.commit()
+    result = cursor.lastrowid
+    assert result is not None
+    return result
 
 
 def insert_log_entry(
@@ -1072,55 +1639,60 @@ def get_forensic_captures(conn: sqlite3.Connection, event_id: int) -> list[dict]
     ]
 
 
-def get_spindump_processes(conn: sqlite3.Connection, capture_id: int) -> list[dict]:
-    """Get spindump processes for a capture."""
+def get_tailspin_header(conn: sqlite3.Connection, capture_id: int) -> dict | None:
+    """Get tailspin header for a capture."""
+    row = conn.execute(
+        """SELECT * FROM tailspin_header WHERE capture_id = ?""",
+        (capture_id,),
+    ).fetchone()
+    if not row:
+        return None
+    columns = [d[0] for d in conn.execute("SELECT * FROM tailspin_header LIMIT 0").description]
+    return dict(zip(columns, row))
+
+
+def get_tailspin_processes(conn: sqlite3.Connection, capture_id: int) -> list[dict]:
+    """Get tailspin processes for a capture."""
     cursor = conn.execute(
-        """SELECT id, capture_id, pid, name, path, parent_pid, parent_name,
-                  footprint_mb, cpu_time_sec, thread_count
-           FROM spindump_processes WHERE capture_id = ?
-           ORDER BY footprint_mb DESC NULLS LAST""",
+        """SELECT * FROM tailspin_process WHERE capture_id = ?
+           ORDER BY cpu_time_sec DESC NULLS LAST""",
         (capture_id,),
     )
-    return [
-        {
-            "id": r[0],
-            "capture_id": r[1],
-            "pid": r[2],
-            "name": r[3],
-            "path": r[4],
-            "parent_pid": r[5],
-            "parent_name": r[6],
-            "footprint_mb": r[7],
-            "cpu_time_sec": r[8],
-            "thread_count": r[9],
-        }
-        for r in cursor.fetchall()
-    ]
+    columns = [d[0] for d in cursor.description]
+    return [dict(zip(columns, r)) for r in cursor.fetchall()]
 
 
-def get_spindump_threads(conn: sqlite3.Connection, process_id: int) -> list[dict]:
-    """Get threads for a spindump process."""
+def get_tailspin_threads(conn: sqlite3.Connection, process_id: int) -> list[dict]:
+    """Get threads for a tailspin process."""
     cursor = conn.execute(
-        """SELECT id, process_id, thread_id, thread_name, sample_count,
-                  priority, cpu_time_sec, state, blocked_on
-           FROM spindump_threads WHERE process_id = ?
-           ORDER BY sample_count DESC NULLS LAST""",
+        """SELECT * FROM tailspin_thread WHERE process_id = ?
+           ORDER BY num_samples DESC NULLS LAST""",
         (process_id,),
     )
-    return [
-        {
-            "id": r[0],
-            "process_id": r[1],
-            "thread_id": r[2],
-            "thread_name": r[3],
-            "sample_count": r[4],
-            "priority": r[5],
-            "cpu_time_sec": r[6],
-            "state": r[7],
-            "blocked_on": r[8],
-        }
-        for r in cursor.fetchall()
-    ]
+    columns = [d[0] for d in cursor.description]
+    return [dict(zip(columns, r)) for r in cursor.fetchall()]
+
+
+def get_tailspin_frames(conn: sqlite3.Connection, thread_id: int) -> list[dict]:
+    """Get stack frames for a tailspin thread, ordered by depth."""
+    cursor = conn.execute(
+        """SELECT * FROM tailspin_frame WHERE thread_id = ?
+           ORDER BY depth, id""",
+        (thread_id,),
+    )
+    columns = [d[0] for d in cursor.description]
+    return [dict(zip(columns, r)) for r in cursor.fetchall()]
+
+
+def get_tailspin_binary_images(conn: sqlite3.Connection, process_id: int) -> list[dict]:
+    """Get binary images for a tailspin process."""
+    cursor = conn.execute(
+        """SELECT * FROM tailspin_binary_image WHERE process_id = ?
+           ORDER BY start_address""",
+        (process_id,),
+    )
+    columns = [d[0] for d in cursor.description]
+    return [dict(zip(columns, r)) for r in cursor.fetchall()]
 
 
 def get_log_entries(

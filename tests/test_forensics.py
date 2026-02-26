@@ -12,7 +12,7 @@ from rogue_hunter.forensics import (
     ForensicsCapture,
     identify_culprits,
     parse_logs_ndjson,
-    parse_spindump,
+    parse_tailspin,
 )
 from rogue_hunter.ringbuffer import BufferContents, RingBuffer, RingSample
 from rogue_hunter.storage import get_connection, init_database
@@ -99,27 +99,29 @@ def make_process_samples(
     )
 
 
-# --- Spindump Parsing Tests ---
+# --- Tailspin Parsing Tests ---
 
 
-def test_parse_spindump_empty():
-    """parse_spindump returns empty list for empty input."""
-    assert parse_spindump("") == []
+def test_parse_tailspin_empty():
+    """parse_tailspin returns empty data for empty input."""
+    result = parse_tailspin("")
+    assert result.processes == []
 
 
-def test_parse_spindump_header_only():
-    """parse_spindump returns empty list when no process blocks."""
+def test_parse_tailspin_header_only():
+    """parse_tailspin returns empty processes when no process blocks."""
     text = """
 Date/Time:        2024-01-15 10:30:45.123 -0800
 Duration:         10.00s
 Hardware model:   Mac16,5
 Memory size:      128 GB
 """
-    assert parse_spindump(text) == []
+    result = parse_tailspin(text)
+    assert result.processes == []
 
 
-def test_parse_spindump_single_process():
-    """parse_spindump extracts process metadata."""
+def test_parse_tailspin_single_process():
+    """parse_tailspin extracts process metadata."""
     text = """
 Process:          python3.14 [12345]
 Path:             /opt/homebrew/bin/python3.14
@@ -128,9 +130,9 @@ Footprint:        123.45 MB
 CPU Time:         0.456s
 Num threads:      8
 """
-    processes = parse_spindump(text)
-    assert len(processes) == 1
-    p = processes[0]
+    result = parse_tailspin(text)
+    assert len(result.processes) == 1
+    p = result.processes[0]
     assert p.pid == 12345
     assert p.name == "python3.14"
     assert p.path == "/opt/homebrew/bin/python3.14"
@@ -138,11 +140,11 @@ Num threads:      8
     assert p.parent_name == "zsh"
     assert p.footprint_mb == 123.45
     assert p.cpu_time_sec == 0.456
-    assert p.thread_count == 8
+    assert p.num_threads == 8
 
 
-def test_parse_spindump_multiple_processes():
-    """parse_spindump handles multiple process blocks."""
+def test_parse_tailspin_multiple_processes():
+    """parse_tailspin handles multiple process blocks."""
     text = """
 Process:          chrome [1001]
 Footprint:        500.0 MB
@@ -150,67 +152,71 @@ Footprint:        500.0 MB
 Process:          firefox [1002]
 Footprint:        300.0 MB
 """
-    processes = parse_spindump(text)
-    assert len(processes) == 2
-    assert processes[0].pid == 1001
-    assert processes[0].name == "chrome"
-    assert processes[1].pid == 1002
-    assert processes[1].name == "firefox"
+    result = parse_tailspin(text)
+    assert len(result.processes) == 2
+    assert result.processes[0].pid == 1001
+    assert result.processes[0].name == "chrome"
+    assert result.processes[1].pid == 1002
+    assert result.processes[1].name == "firefox"
 
 
-def test_parse_spindump_thread_basic():
-    """parse_spindump extracts thread information."""
+def test_parse_tailspin_thread_basic():
+    """parse_tailspin extracts thread information."""
+    # Use realistic spindump format with sample range and base priority
+    # fmt: off
     text = """
 Process:          test [100]
 
-  Thread 0x1abc    DispatchQueue "com.apple.main-thread"(1)    500 samples    priority 31
+  Thread 0x1abc    DispatchQueue "main-thread"(1)    500 samples (1-500)    priority 31 (base 31)
 """
-    processes = parse_spindump(text)
-    assert len(processes) == 1
-    assert processes[0].threads is not None
-    assert len(processes[0].threads) == 1
-    t = processes[0].threads[0]
+    # fmt: on
+    result = parse_tailspin(text)
+    assert len(result.processes) == 1
+    assert result.processes[0].threads is not None
+    assert len(result.processes[0].threads) == 1
+    t = result.processes[0].threads[0]
     assert t.thread_id == "0x1abc"
-    assert t.thread_name == "com.apple.main-thread"
-    assert t.sample_count == 500
+    assert t.dispatch_queue_name == "main-thread"
+    assert t.num_samples == 500
     assert t.priority == 31
-    # cpu_time not in simplified line format
 
 
-def test_parse_spindump_thread_blocked_state():
-    """parse_spindump detects blocked state from stack frames."""
+def test_parse_tailspin_frame_running_state():
+    """parse_tailspin detects running state with core info in stack frames."""
+    # Real spindump format has state info at end of frame line in parens
     text = """
 Process:          test [100]
 
-  Thread 0x1abc    1000 samples (1-1000)    priority 31
-    1000  start + 100 (dyld + 100) [0x100]
-      1000  kevent64 + 8 (libsystem_kernel.dylib + 52100) [0x192c4ab84]
+  Thread 0x1abc    1000 samples (1-1000)    priority 31 (base 31)
+    1000  start + 100 (dyld + 100) [0x100]  (running on P-core)
 """
-    processes = parse_spindump(text)
-    assert len(processes) == 1
-    t = processes[0].threads[0]
-    assert t.state == "blocked_kevent"
-    assert t.blocked_on == "kevent64"
+    result = parse_tailspin(text)
+    assert len(result.processes) == 1
+    t = result.processes[0].threads[0]
+    # Find frame with running state
+    frames_with_state = [f for f in t.frames if f.state == "running"]
+    assert len(frames_with_state) == 1
+    running_frame = frames_with_state[0]
+    assert running_frame.core_type == "p-core"
 
 
-def test_parse_spindump_various_blocked_states():
-    """parse_spindump detects various blocked states."""
-    test_cases = [
-        ("__psynch_cvwait", "blocked_psynch"),
-        ("__ulock_wait2", "blocked_ulock"),
-        ("mach_msg", "blocked_mach_msg"),
-        ("__semwait_signal", "blocked_semaphore"),
-    ]
-    for syscall, expected_state in test_cases:
-        text = f"""
+def test_parse_tailspin_frame_blocked_state():
+    """parse_tailspin detects blocked state with wait info."""
+    # Real spindump format shows blocked state with wait target
+    text = """
 Process:          test [100]
 
-  Thread 0x1abc    100 samples    priority 31
-    100  {syscall} + 8 (lib + 100) [0x100]
+  Thread 0x1abc    1000 samples (1-1000)    priority 31 (base 31)
+    1000  start + 100 (dyld + 100) [0x100]  (blocked by wait4 on pid:1234)
 """
-        processes = parse_spindump(text)
-        t = processes[0].threads[0]
-        assert t.state == expected_state, f"Failed for syscall: {syscall}"
+    result = parse_tailspin(text)
+    assert len(result.processes) == 1
+    t = result.processes[0].threads[0]
+    # Find frame with blocked state
+    frames_with_state = [f for f in t.frames if f.state == "blocked"]
+    assert len(frames_with_state) == 1
+    blocked_frame = frames_with_state[0]
+    assert blocked_frame.blocked_on == "pid:1234"
 
 
 # --- Log Parsing Tests ---

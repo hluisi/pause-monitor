@@ -47,10 +47,12 @@ def test_init_database_creates_tables(tmp_path: Path):
     assert "process_events" in table_names
     assert "process_snapshots" in table_names
     assert "daemon_state" in table_names
-    # Forensic tables (schema v10)
+    # Forensic tables (schema v20)
     assert "forensic_captures" in table_names
-    assert "spindump_processes" in table_names
-    assert "spindump_threads" in table_names
+    assert "tailspin_header" in table_names
+    assert "tailspin_process" in table_names
+    assert "tailspin_thread" in table_names
+    assert "tailspin_frame" in table_names
     assert "log_entries" in table_names
     assert "buffer_context" in table_names
 
@@ -302,11 +304,11 @@ def test_schema_has_process_snapshots_table(tmp_path):
     conn.close()
 
 
-def test_schema_version_is_19():
-    """Schema version is 19 for machine snapshots."""
+def test_schema_version_is_20():
+    """Schema version is 20 for comprehensive tailspin data."""
     from rogue_hunter.storage import SCHEMA_VERSION
 
-    assert SCHEMA_VERSION == 19
+    assert SCHEMA_VERSION == 20
 
 
 def test_process_snapshots_has_resource_shares():
@@ -588,15 +590,15 @@ def test_get_forensic_captures(tmp_path):
     conn.close()
 
 
-def test_insert_and_get_spindump_process(tmp_path):
-    """insert_spindump_process and get_spindump_processes work correctly."""
+def test_insert_and_get_tailspin_process(tmp_path):
+    """insert_tailspin_process and get_tailspin_processes work correctly."""
     from rogue_hunter.storage import (
         create_forensic_capture,
         create_process_event,
         get_connection,
-        get_spindump_processes,
+        get_tailspin_processes,
         init_database,
-        insert_spindump_process,
+        insert_tailspin_process,
     )
 
     db_path = tmp_path / "test.db"
@@ -615,19 +617,19 @@ def test_insert_and_get_spindump_process(tmp_path):
     )
     capture_id = create_forensic_capture(conn, event_id, trigger="test")
 
-    proc_id = insert_spindump_process(
+    proc_id = insert_tailspin_process(
         conn,
         capture_id=capture_id,
         pid=456,
         name="chrome",
         path="/Applications/Chrome.app",
         footprint_mb=500.5,
-        thread_count=42,
+        num_threads=42,
     )
 
     assert proc_id is not None
 
-    procs = get_spindump_processes(conn, capture_id)
+    procs = get_tailspin_processes(conn, capture_id)
     assert len(procs) == 1
     assert procs[0]["pid"] == 456
     assert procs[0]["name"] == "chrome"
@@ -635,16 +637,16 @@ def test_insert_and_get_spindump_process(tmp_path):
     conn.close()
 
 
-def test_insert_and_get_spindump_threads(tmp_path):
-    """insert_spindump_thread and get_spindump_threads work correctly."""
+def test_insert_and_get_tailspin_threads(tmp_path):
+    """insert_tailspin_thread and get_tailspin_threads work correctly."""
     from rogue_hunter.storage import (
         create_forensic_capture,
         create_process_event,
         get_connection,
-        get_spindump_threads,
+        get_tailspin_threads,
         init_database,
-        insert_spindump_process,
-        insert_spindump_thread,
+        insert_tailspin_process,
+        insert_tailspin_thread,
     )
 
     db_path = tmp_path / "test.db"
@@ -662,22 +664,22 @@ def test_insert_and_get_spindump_threads(tmp_path):
         peak_band="high",
     )
     capture_id = create_forensic_capture(conn, event_id, trigger="test")
-    proc_id = insert_spindump_process(conn, capture_id, pid=456, name="chrome")
+    proc_id = insert_tailspin_process(conn, capture_id, pid=456, name="chrome")
 
-    insert_spindump_thread(
+    insert_tailspin_thread(
         conn,
         process_id=proc_id,
         thread_id="0x1234",
         thread_name="main-thread",
-        sample_count=100,
-        state="blocked_kevent",
+        num_samples=100,
+        priority=31,
     )
 
-    threads = get_spindump_threads(conn, proc_id)
+    threads = get_tailspin_threads(conn, proc_id)
     assert len(threads) == 1
     assert threads[0]["thread_id"] == "0x1234"
     assert threads[0]["thread_name"] == "main-thread"
-    assert threads[0]["state"] == "blocked_kevent"
+    assert threads[0]["num_samples"] == 100
     conn.close()
 
 
