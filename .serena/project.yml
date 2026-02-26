@@ -80,12 +80,12 @@ read_only: false
 #  * `think_about_whether_you_are_done`: Thinking tool for determining whether the task is truly completed.
 #  * `write_memory`: Writes a named memory (for future reference) to Serena's project-specific memory store.
 excluded_tools:
-  - execute_shell_command
-  - create_text_file
-  - replace_content
-  - replace_symbol_body
-  - insert_after_symbol
-  - insert_before_symbol
+- execute_shell_command
+- create_text_file
+- replace_content
+- replace_symbol_body
+- insert_after_symbol
+- insert_before_symbol
 
 # initial prompt for the project. It will always be given to the LLM upon activating the project
 # (contrary to the memories, which are loaded on demand).
@@ -114,3 +114,7 @@ default_modes:
 # fixed set of tools to use as the base tool set (if non-empty), replacing Serena's default set of tools.
 # This cannot be combined with non-empty excluded_tools or included_optional_tools.
 fixed_tools: []
+
+# override of the corresponding setting in serena_config.yml, see the documentation there.
+# If null or missing, the value from the global config is used.
+symbol_info_budget:
